@@ -1,8 +1,10 @@
 #include "recompiler.hpp"
 #include "jit_helpers.hpp"
 #include "jit_invalidate.hpp"
+#include "jit_decode.hpp"
 #include "../cpu.hpp"
 #include "../bus.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -10,102 +12,15 @@
 #include "assembler_x64.hpp"
 #define ORBIT64_JIT_X64 1
 #elif defined(__aarch64__)
+#include "backend_a64.hpp"
 #include "assembler_a64.hpp"
 #define ORBIT64_JIT_A64 1
 #endif
 
-namespace {
+using namespace jit_detail;
 
-constexpr u32 kMaxBlockLen = 512;
-// Free arena space lookup_or_compile() insists on before compiling: once less
-// is left, every cached block is dropped and the arena starts over. Well above
-// the largest block either backend can emit (kMaxBlockLen instructions, each
-// well under 256 bytes even for the COP1 helper-call sequences).
-constexpr size_t kArenaHeadroom = 256 * 1024;
-
-// A single decoded MIPS instruction; shared by both backends so the opcode
-// table only has to be reasoned about once. Whitelisting happens inside each
-// backend's compile_one() (it returns false the moment it sees something it
-// won't inline), not here.
-struct Decoded {
-    u32 raw;
-    u8 op, rs, rt, rd, shamt, funct;
-    u16 imm;   // zero-extended 16-bit immediate (ANDI/ORI/XORI)
-    s32 simm;  // sign-extended 16-bit immediate (everything else)
-};
-
-// A pending "trapping arithmetic overflowed" branch: `patch` is where the
-// native overflow-branch instruction was emitted (still pointing nowhere -
-// patched once the out-of-line stub for it is emitted, same idea as the
-// load/store fault_patches list), `site` identifies the guest instruction
-// (see kSiteDelaySlot); its index is the instruction count to report.
-struct OverflowSite {
-    size_t patch;
-    u32 site;
-};
-
-// Guest instructions that completed before the one `site` names.
-constexpr u32 site_index(u32 site) { return site & ~kSiteDelaySlot; }
-
-// Branches/jumps a block may end with (together with their delay slot).
-// BC1T/BC1F are not among them: they read the FPU condition bit, which only
-// the interpreter maintains.
-[[maybe_unused]] bool is_block_branch(const Decoded& d) {
-    switch (d.op) {
-    case 0x00: return d.funct == 0x08 || d.funct == 0x09; // JR, JALR
-    case 0x01: return d.rt <= 0x03 || (d.rt >= 0x10 && d.rt <= 0x13); // BLTZ..BGEZL, BLTZAL..BGEZALL
-    case 0x02: case 0x03: // J, JAL
-    case 0x04: case 0x05: case 0x06: case 0x07: // BEQ, BNE, BLEZ, BGTZ
-    case 0x14: case 0x15: case 0x16: case 0x17: // ...likely
-        return true;
-    default: return false;
-    }
-}
-
-// Instructions a block runs by calling the interpreter for just that one
-// instruction (jit_interp) instead of ending there: a helper call costs about
-// what interpreting it would, but the block - and everything after it -
-// stays compiled. Only instructions that never branch, never depend on how
-// far COUNT has advanced mid-block and never change interrupt state qualify
-// (so no COP0), and only the forms each backend's compile_one() doesn't
-// already inline - it is always tried first.
-[[maybe_unused]] bool is_interp_callable(const Decoded& d) {
-    switch (d.op) {
-    case 0x00: return d.funct >= 0x18 && d.funct <= 0x1F; // MULT, MULTU, DIV, DIVU, DMULT, DMULTU, DDIV, DDIVU
-    case 0x11: // COP1: CFC1/CTC1 and S/D/W/L arithmetic (ROUND/TRUNC/CEIL/FLOOR, ...)
-        return d.rs == 0x02 || d.rs == 0x06 || d.rs == 0x10 || d.rs == 0x11 || d.rs == 0x14 || d.rs == 0x15;
-    case 0x1A: case 0x1B: // LDL, LDR
-    case 0x22: case 0x26: // LWL, LWR
-    case 0x2A: case 0x2C: case 0x2D: case 0x2E: // SWL, SDL, SDR, SWR
-    case 0x30: case 0x34: case 0x38: case 0x3C: // LL, LLD, SC, SCD
-    case 0x31: case 0x35: case 0x39: case 0x3D: // LWC1, LDC1, SWC1, SDC1
-        return true;
-    default: return false;
-    }
-}
-
-u32 fetch_instr(const u8* rdram, u32 paddr) {
-    return (static_cast<u32>(rdram[paddr]) << 24) | (static_cast<u32>(rdram[paddr + 1]) << 16) |
-           (static_cast<u32>(rdram[paddr + 2]) << 8) | static_cast<u32>(rdram[paddr + 3]);
-}
-
-Decoded decode(u32 instr) {
-    Decoded d{};
-    d.raw = instr;
-    d.op = (instr >> 26) & 0x3F;
-    d.rs = (instr >> 21) & 0x1F;
-    d.rt = (instr >> 16) & 0x1F;
-    d.rd = (instr >> 11) & 0x1F;
-    d.shamt = (instr >> 6) & 0x1F;
-    d.funct = instr & 0x3F;
-    d.imm = instr & 0xFFFF;
-    d.simm = static_cast<s16>(d.imm);
-    return d;
-}
-
-} // namespace
-
-Recompiler::Recompiler() : code_pages_(RDRAM_SIZE >> kPageShift, 0) {
+Recompiler::Recompiler() : code_pages_(RDRAM_SIZE >> kPageShift, 0), jcache_(1u << kJCacheBits) {
+    clear_jcache();
     jit::set_invalidate_hook(this, [](void* owner, u32 paddr, u32 len) {
         static_cast<Recompiler*>(owner)->request_invalidate(paddr, len);
     });
@@ -116,13 +31,30 @@ Recompiler::~Recompiler() {
 }
 
 void Recompiler::invalidate_all() {
-    for (BlockMap* map : {&blocks_, &ds_blocks_}) {
+    for (BlockMap* map : {&blocks_, &ds_blocks_, &map_blocks_}) {
         for (auto& table : map->tables) table.reset();
         map->last_paddr = 0xFFFFFFFFu;
         map->last_block = nullptr;
     }
     code_.reset();
     std::fill(code_pages_.begin(), code_pages_.end(), 0);
+    pending_links_.clear();
+    map_pending_links_.clear();
+    clear_jcache();
+    rt_ready_ = false; // the chaining runtime lived in the arena too
+}
+
+void Recompiler::clear_jcache() {
+    // No pc is ever odd, so this never matches.
+    std::fill(jcache_.begin(), jcache_.end(), JCacheEntry{~0ULL, nullptr});
+}
+
+const void* Recompiler::link_target(u32 paddr, bool mapped) const {
+    if (paddr >= RDRAM_SIZE) return nullptr;
+    const auto& table = (mapped ? map_blocks_ : blocks_).tables[paddr >> kTableShift];
+    if (!table) return nullptr;
+    const Block& b = (*table)[(paddr >> 2) & (kSlotsPerTable - 1)];
+    return (b.valid && b.fn && b.link_ok) ? reinterpret_cast<const void*>(b.fn) : nullptr;
 }
 
 void Recompiler::request_invalidate(u32 paddr, u32 len) {
@@ -132,6 +64,7 @@ void Recompiler::request_invalidate(u32 paddr, u32 len) {
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
         if (code_pages_[p]) {
             pending_invalidate_ = true;
+            if (active_ctx_) active_ctx_->exit_req = 1; // leave the chain after this store
             return;
         }
     }
@@ -144,6 +77,101 @@ void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr) {
         code_pages_[p] = 1;
     }
 }
+
+#if defined(ORBIT64_JIT_A64)
+u32 Recompiler::run_step(CPU& cpu, Bus& bus) { return run(cpu, bus, 1); }
+
+u32 Recompiler::run(CPU& cpu, Bus& bus, u32 budget) {
+    if (pending_invalidate_) {
+        pending_invalidate_ = false;
+        invalidate_all();
+        if (stats_on_) stats_.invalidations++;
+    }
+
+    // Translations cached in the dispatcher table for TLB-mapped code are only
+    // good for the TLB contents and ASID they were made under.
+    if (bus.tlb_generation() != tlb_gen_seen_ || cpu.jit_asid() != asid_seen_) {
+        tlb_gen_seen_ = bus.tlb_generation();
+        asid_seen_ = cpu.jit_asid();
+        clear_jcache();
+    }
+
+    const u64 pc = cpu.get_pc();
+    // KSEG0/KSEG1, in either its zero- or sign-extended 64-bit form (see the
+    // other run_step() below), is RDRAM directly. Anything else goes through
+    // the TLB exactly as an instruction fetch would; code outside RDRAM, or a
+    // fetch that faults, is left to the interpreter.
+    const u64 pc_hi = pc >> 32;
+    const u32 pc32 = static_cast<u32>(pc);
+    u32 paddr = pc32 & 0x1FFFFFFFu;
+    bool mapped = false;
+    if ((pc_hi != 0 && pc_hi != 0xFFFFFFFFull) || pc32 < 0x80000000u || pc32 > 0xBFFFFFFFu) {
+        mapped = (pc & 3) == 0 && bus.translate_vaddr(pc, paddr, false, cpu.jit_asid()) == TLBResult::SUCCESS &&
+                 paddr < RDRAM_SIZE;
+        if (!mapped) {
+            if (stats_on_) {
+                stats_.interp_instrs++;
+                stats_.interp_unmapped++;
+            }
+            return cpu.step();
+        }
+    }
+    const bool delay_slot = cpu.jit_pending_delay_slot();
+    const Block* blk = lookup_or_compile(cpu, bus, paddr, delay_slot, mapped);
+    if (!blk || !blk->fn || !rt_ready_) {
+        if (stats_on_) count_fallback(bus, pc);
+        return cpu.step();
+    }
+    if (blk->link_ok) jcache_[(pc >> 2) & ((1u << kJCacheBits) - 1)] = {pc, reinterpret_cast<const void*>(blk->fn)};
+
+    // The chain stops at the block that reaches COUNT == COMPARE, so the timer
+    // interrupt is raised after exactly the block it would be with one block
+    // per call (COUNT ticks once every 2 cycles; 0 ticks away = 2^32).
+    const u32 ticks = static_cast<u32>(cpu.get_cp0(CP0Reg::COMPARE)) - static_cast<u32>(cpu.get_cp0(CP0Reg::COUNT));
+    const u64 to_timer = ticks ? 2ULL * ticks : (2ULL << 32);
+    const s64 limit = static_cast<s64>(std::min<u64>(std::max<u32>(budget, 1), to_timer));
+
+    JitCtx ctx{&cpu, &bus, cpu.jit_gpr_ptr(), cpu.jit_hi_ptr(), cpu.jit_lo_ptr(),
+               /*start_pc*/ pc,
+               /*next_pc*/ delay_slot ? cpu.jit_branch_target() : 0,
+               /*branch_taken*/ 1, // delay-slot sites are only ever flagged on the taken path
+               /*faulted*/ 0,
+               bus.get_rdram(),
+               code_pages_.data(),
+               /*cycles*/ limit,
+               /*jcache*/ jcache_.data(),
+               /*exit_req*/ 0,
+               /*fr_mismatch*/ 0,
+               /*synced*/ 0};
+    active_ctx_ = &ctx;
+    rt_.enter(&ctx, reinterpret_cast<const void*>(blk->fn));
+    active_ctx_ = nullptr;
+    const u32 consumed = static_cast<u32>(limit - ctx.cycles);
+    if (stats_on_) {
+        stats_.jit_entries++;
+        stats_.jit_instrs += consumed / 2;
+    }
+
+    if (!ctx.faulted) {
+        cpu.set_pc(ctx.next_pc);
+        if (delay_slot) cpu.jit_clear_pending_delay_slot(); // see run_step() below
+    }
+    // A block compiled for the other STATUS.FR mode was reached: recompile
+    // everything for the current one (FR hardly ever changes after boot).
+    if (ctx.fr_mismatch) pending_invalidate_ = true;
+    // Everything a single block does at its end, for the whole chain: nothing
+    // in it could have raised an interrupt before its last block (see run()).
+    // COP0 instructions in the chain have applied the cycles up to them already.
+    if (consumed > 0) {
+        const u32 rest = consumed - static_cast<u32>(ctx.synced);
+        cpu.jit_advance_random(rest / 2);
+        cpu.step_timer(rest);
+        cpu.check_interrupts();
+    }
+    return consumed;
+}
+#else
+u32 Recompiler::run(CPU& cpu, Bus& bus, u32) { return run_step(cpu, bus); }
 
 u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     // Always reached from plain C++ (never from inside a compiled block), so
@@ -215,20 +243,22 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     // after every instruction): an interrupt that becomes pending mid-block
     // is taken at the block's end instead, i.e. a few instructions late -
     // never between a branch and its delay slot, since a block always
-    // contains both. CP0 RANDOM (TLB-replacement index) is deliberately
-    // *not* decremented per compiled instruction - only the interpreter does
-    // that precisely - since whitelisted blocks never touch the TLB
-    // themselves.
+    // contains both. CP0 RANDOM (TLB-replacement index) is caught up the
+    // same way: nothing inside a block reads it.
     if (executed > 0) {
+        cpu.jit_advance_random(executed);
         cpu.step_timer(2 * executed);
         cpu.check_interrupts();
     }
 
     return executed * 2;
 }
+#endif
 
-const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot) {
-    BlockMap& map = delay_slot ? ds_blocks_ : blocks_;
+const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot, bool mapped) {
+    // A delay slot block is a single instruction, so it doesn't matter how it
+    // was reached.
+    BlockMap& map = delay_slot ? ds_blocks_ : mapped ? map_blocks_ : blocks_;
     if (paddr == map.last_paddr) return map.last_block;
     if (paddr >= RDRAM_SIZE) return nullptr; // e.g. code running straight from cartridge ROM
 
@@ -238,10 +268,29 @@ const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 p
         if (code_.remaining() < kArenaHeadroom) invalidate_all(); // also drops *table
         if (!*table) *table = std::make_unique<BlockTable>();
         slot = &(**table)[(paddr >> 2) & (kSlotsPerTable - 1)];
+#if defined(ORBIT64_JIT_A64)
+        std::vector<PendingLink> links;
+        *slot = compile_block_linked(cpu, bus, paddr, delay_slot, mapped && !delay_slot, links);
+#else
         *slot = compile_block(cpu, bus, paddr, delay_slot);
+#endif
         slot->valid = true;
         if (stats_on_) stats_.compiles++;
         if (slot->fn) mark_code_pages(paddr, paddr + slot->length * 4);
+#if defined(ORBIT64_JIT_A64)
+        if (slot->fn) {
+            u8* code = reinterpret_cast<u8*>(slot->fn);
+            auto& pending = (mapped && !delay_slot) ? map_pending_links_ : pending_links_;
+            // Branches that were waiting for this block now jump straight to it.
+            if (slot->link_ok) {
+                if (auto it = pending.find(paddr); it != pending.end()) {
+                    for (u8* site : it->second) code_.patch32(site, a64::Assembler::b_word(site, code));
+                    pending.erase(it);
+                }
+            }
+            for (const PendingLink& l : links) pending[l.target_paddr].push_back(code + l.offset);
+        }
+#endif
     }
     map.last_paddr = paddr;
     map.last_block = slot;
@@ -1428,661 +1477,34 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
 }
 #endif // ORBIT64_JIT_X64
 
-// ===========================================================================
-// AArch64 backend
-// ===========================================================================
+
 #if defined(ORBIT64_JIT_A64)
-namespace {
-using namespace a64;
-
-// Context registers (AAPCS64 callee-saved X19-X24), fixed for the lifetime
-// of a compiled block.
-constexpr int X_CPU = 19; // CPU* (unused directly by codegen; kept for symmetry)
-constexpr int X_BUS = 20; // Bus* (unused directly; helpers take ctx instead)
-constexpr int X_GPR = 21; // u64 gpr[32]
-constexpr int X_HI = 22;  // u64*
-constexpr int X_LO = 23;  // u64*
-constexpr int X_CTX = 24; // JitCtx*
-// Scratch: X0-X17 freely, except while a helper call is being set up (X0-X2
-// are that call's arguments) - codegen never needs a scratch value to survive
-// across a call.
-constexpr int S0 = 0, S1 = 1, S2 = 2, S3 = 9;
-// COP1 arithmetic needs one integer scratch slot to stash an FPU register's
-// raw bits across a second helper call (X0-X17 are all caller-saved, same
-// reasoning as the x64 backend's kFpScratchSlot). The 64-byte frame already
-// reserved in emit_prologue only uses its first 56 bytes (LR + X19-X24);
-// this borrows the free 8 bytes at the end instead of growing the frame.
-constexpr s32 kFpScratchSlot = 56;
-
-void emit_prologue(Assembler& a) {
-    a.sub_sp(64);
-    a.str64(30, SP, 0);  // LR
-    a.str64(19, SP, 8);
-    a.str64(20, SP, 16);
-    a.str64(21, SP, 24);
-    a.str64(22, SP, 32);
-    a.str64(23, SP, 40);
-    a.str64(24, SP, 48);
-    a.ldr64(X_CPU, 0, 0);
-    a.ldr64(X_BUS, 0, 8);
-    a.ldr64(X_GPR, 0, 16);
-    a.ldr64(X_HI, 0, 24);
-    a.ldr64(X_LO, 0, 32);
-    a.mov_reg(X_CTX, 0);
-}
-
-void emit_epilogue(Assembler& a) {
-    // LR is reloaded but never branched to directly - RET always targets X30.
-    a.ldr64(30, SP, 0);
-    a.ldr64(19, SP, 8);
-    a.ldr64(20, SP, 16);
-    a.ldr64(21, SP, 24);
-    a.ldr64(22, SP, 32);
-    a.ldr64(23, SP, 40);
-    a.ldr64(24, SP, 48);
-    a.add_sp(64);
-    a.ret();
-}
-
-// Calls a jit_helpers thunk `u32 fn(JitCtx*, u64 addr, u32 arg, u32 site)` with
-// X1=addr, X2=arg already set. On return, W0!=0 means a TLB fault redirected
-// cpu->pc; the block then reports the instruction's index as the number of
-// guest instructions executed and returns.
-void emit_helper_call(Assembler& a, void* fn, u32 site, std::vector<size_t>& fault_patches) {
-    a.mov_reg(0, X_CTX);
-    a.mov_imm64(3, site);
-    a.mov_imm64(S3, reinterpret_cast<u64>(fn));
-    a.blr(S3);
-    size_t skip = a.cbz(0, false); // W0==0 -> success, skip the fault path
-    a.movz(0, static_cast<u16>(site_index(site)), 0, false);
-    fault_patches.push_back(a.b());
-    a.patch_branch(skip, a.pos());
-}
-
-void emit_load(Assembler& a, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
-    a.ldr64(1, X_GPR, d.rs * 8);
-    a.mov_imm64_sext32(S3, d.simm);
-    a.add_reg(1, 1, S3, true);
-    a.movz(2, d.rt, 0, false);
-    emit_helper_call(a, fn, site, fault_patches);
-}
-
-void emit_store(Assembler& a, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
-    a.ldr64(1, X_GPR, d.rs * 8);
-    a.mov_imm64_sext32(S3, d.simm);
-    a.add_reg(1, 1, S3, true);
-    a.ldr64(2, X_GPR, d.rt * 8); // value to store
-    emit_helper_call(a, fn, site, fault_patches);
-}
-
-// ---- COP1 helpers: fetch/store an FPU register's raw bits via jit_fpr_*.
-// These never fault, so - unlike load/store - there's nothing to check on
-// return; the result is just wherever the ABI puts it (X0).
-void emit_fpr_get(Assembler& a, void* fn, u8 reg) {
-    a.mov_reg(0, X_CTX);
-    a.movz(1, reg, 0, false);
-    a.mov_imm64(S3, reinterpret_cast<u64>(fn));
-    a.blr(S3); // result in X0/W0
-}
-// `value_reg` holds the bits to store (X0 by convention, matching where
-// emit_fpr_get() just left them).
-void emit_fpr_set(Assembler& a, void* fn, u8 reg, int value_reg) {
-    a.mov_reg(2, value_reg);
-    a.movz(1, reg, 0, false);
-    a.mov_reg(0, X_CTX);
-    a.mov_imm64(S3, reinterpret_cast<u64>(fn));
-    a.blr(S3);
-}
-
-// Records a pending overflow branch (the native ADDS/SUBS just emitted
-// already set the V flag; the B.VS placeholder is resolved later).
-void emit_overflow_check(Assembler& a, u32 site, std::vector<OverflowSite>& overflow_sites) {
-    overflow_sites.push_back({a.bcond(Cond::VS), site});
-}
-
-bool compile_one(Assembler& a, const Decoded& d, u32 site, std::vector<size_t>& fault_patches,
-                  std::vector<OverflowSite>& overflow_sites) {
-    auto st_if = [&](u8 reg, int src) { if (reg != 0) a.str64(src, X_GPR, reg * 8); };
-    // shamt materialized into S2 for the variable-shift instructions.
-    auto shift32 = [&](void (Assembler::*op)(int, int, int, bool), u8 rt, u8 shamt, u8 rd) {
-        a.ldr32z(S0, X_GPR, rt * 8);
-        a.movz(S2, shamt, 0, false);
-        (a.*op)(S0, S0, S2, false);
-        a.sxtw(S0, S0);
-        st_if(rd, S0);
-    };
-    auto shiftv32 = [&](void (Assembler::*op)(int, int, int, bool), u8 rt, u8 rs, u8 rd) {
-        a.ldr32z(S0, X_GPR, rt * 8);
-        a.ldr32z(S1, X_GPR, rs * 8);
-        a.movz(S2, 0x1F, 0, false);
-        a.and_reg(S1, S1, S2, false);
-        (a.*op)(S0, S0, S1, false);
-        a.sxtw(S0, S0);
-        st_if(rd, S0);
-    };
-    auto shift64 = [&](void (Assembler::*op)(int, int, int, bool), u8 rt, u8 shamt, u8 rd) {
-        a.ldr64(S0, X_GPR, rt * 8);
-        a.movz(S2, shamt, 0, false);
-        (a.*op)(S0, S0, S2, true);
-        st_if(rd, S0);
-    };
-    auto shiftv64 = [&](void (Assembler::*op)(int, int, int, bool), u8 rt, u8 rs, u8 rd) {
-        a.ldr64(S0, X_GPR, rt * 8);
-        a.ldr64(S1, X_GPR, rs * 8);
-        a.movz(S2, 0x3F, 0, false);
-        a.and_reg(S1, S1, S2, true);
-        (a.*op)(S0, S0, S1, true);
-        st_if(rd, S0);
-    };
-
-    switch (d.op) {
-    case 0x00: // SPECIAL
-        switch (d.funct) {
-        case 0x00: if (d.rd != 0) shift32(&Assembler::lslv, d.rt, d.shamt, d.rd); return true; // SLL
-        case 0x02: if (d.rd != 0) shift32(&Assembler::lsrv, d.rt, d.shamt, d.rd); return true; // SRL
-        case 0x03: if (d.rd != 0) shift32(&Assembler::asrv, d.rt, d.shamt, d.rd); return true; // SRA
-        case 0x04: if (d.rd != 0) shiftv32(&Assembler::lslv, d.rt, d.rs, d.rd); return true;   // SLLV
-        case 0x06: if (d.rd != 0) shiftv32(&Assembler::lsrv, d.rt, d.rs, d.rd); return true;   // SRLV
-        case 0x07: if (d.rd != 0) shiftv32(&Assembler::asrv, d.rt, d.rs, d.rd); return true;   // SRAV
-        case 0x0A: // MOVZ
-            if (d.rd != 0) {
-                a.ldr64(S0, X_GPR, d.rt * 8);
-                size_t skip = a.cbnz(S0, true);
-                a.ldr64(S0, X_GPR, d.rs * 8);
-                a.str64(S0, X_GPR, d.rd * 8);
-                a.patch_branch(skip, a.pos());
-            }
-            return true;
-        case 0x0B: // MOVN
-            if (d.rd != 0) {
-                a.ldr64(S0, X_GPR, d.rt * 8);
-                size_t skip = a.cbz(S0, true);
-                a.ldr64(S0, X_GPR, d.rs * 8);
-                a.str64(S0, X_GPR, d.rd * 8);
-                a.patch_branch(skip, a.pos());
-            }
-            return true;
-        case 0x0F: return true; // SYNC (no-op)
-        case 0x10: if (d.rd != 0) { a.ldr64(S0, X_HI, 0); st_if(d.rd, S0); } return true; // MFHI
-        case 0x11: a.ldr64(S0, X_GPR, d.rs * 8); a.str64(S0, X_HI, 0); return true;       // MTHI
-        case 0x12: if (d.rd != 0) { a.ldr64(S0, X_LO, 0); st_if(d.rd, S0); } return true; // MFLO
-        case 0x13: a.ldr64(S0, X_GPR, d.rs * 8); a.str64(S0, X_LO, 0); return true;       // MTLO
-        case 0x14: if (d.rd != 0) shiftv64(&Assembler::lslv, d.rt, d.rs, d.rd); return true; // DSLLV
-        case 0x16: if (d.rd != 0) shiftv64(&Assembler::lsrv, d.rt, d.rs, d.rd); return true; // DSRLV
-        case 0x17: if (d.rd != 0) shiftv64(&Assembler::asrv, d.rt, d.rs, d.rd); return true; // DSRAV
-        case 0x20: { // ADD (traps on 32-bit signed overflow - always checked, even if rd==$0)
-            a.ldr32z(S0, X_GPR, d.rs * 8); a.ldr32z(S1, X_GPR, d.rt * 8);
-            a.adds_reg(S0, S0, S1, false);
-            emit_overflow_check(a, site, overflow_sites);
-            a.sxtw(S0, S0); st_if(d.rd, S0);
-            return true;
-        }
-        case 0x21: // ADDU
-            if (d.rd != 0) {
-                a.ldr32z(S0, X_GPR, d.rs * 8); a.ldr32z(S1, X_GPR, d.rt * 8);
-                a.add_reg(S0, S0, S1, false); a.sxtw(S0, S0); st_if(d.rd, S0);
-            }
-            return true;
-        case 0x22: { // SUB (traps on 32-bit signed overflow)
-            a.ldr32z(S0, X_GPR, d.rs * 8); a.ldr32z(S1, X_GPR, d.rt * 8);
-            a.subs_reg(S0, S0, S1, false);
-            emit_overflow_check(a, site, overflow_sites);
-            a.sxtw(S0, S0); st_if(d.rd, S0);
-            return true;
-        }
-        case 0x23: // SUBU
-            if (d.rd != 0) {
-                a.ldr32z(S0, X_GPR, d.rs * 8); a.ldr32z(S1, X_GPR, d.rt * 8);
-                a.sub_reg(S0, S0, S1, false); a.sxtw(S0, S0); st_if(d.rd, S0);
-            }
-            return true;
-        case 0x24: // AND
-            if (d.rd != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8); a.and_reg(S0, S0, S1, true); st_if(d.rd, S0); }
-            return true;
-        case 0x25: // OR
-            if (d.rd != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8); a.orr_reg(S0, S0, S1, true); st_if(d.rd, S0); }
-            return true;
-        case 0x26: // XOR
-            if (d.rd != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8); a.eor_reg(S0, S0, S1, true); st_if(d.rd, S0); }
-            return true;
-        case 0x27: // NOR
-            if (d.rd != 0) {
-                a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
-                a.orr_reg(S0, S0, S1, true); a.mvn_reg(S0, S0, true); st_if(d.rd, S0);
-            }
-            return true;
-        case 0x2A: // SLT
-            if (d.rd != 0) {
-                a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
-                a.cmp_reg(S0, S1, true); a.cset(S0, Cond::LT, true); st_if(d.rd, S0);
-            }
-            return true;
-        case 0x2B: // SLTU
-            if (d.rd != 0) {
-                a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
-                a.cmp_reg(S0, S1, true); a.cset(S0, Cond::CC, true); st_if(d.rd, S0);
-            }
-            return true;
-        case 0x2C: { // DADD (traps on 64-bit signed overflow)
-            a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
-            a.adds_reg(S0, S0, S1, true);
-            emit_overflow_check(a, site, overflow_sites);
-            st_if(d.rd, S0);
-            return true;
-        }
-        case 0x2D: // DADDU
-            if (d.rd != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8); a.add_reg(S0, S0, S1, true); st_if(d.rd, S0); }
-            return true;
-        case 0x2E: { // DSUB (traps on 64-bit signed overflow)
-            a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
-            a.subs_reg(S0, S0, S1, true);
-            emit_overflow_check(a, site, overflow_sites);
-            st_if(d.rd, S0);
-            return true;
-        }
-        case 0x2F: // DSUBU
-            if (d.rd != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8); a.sub_reg(S0, S0, S1, true); st_if(d.rd, S0); }
-            return true;
-        case 0x38: if (d.rd != 0) shift64(&Assembler::lslv, d.rt, d.shamt, d.rd); return true;      // DSLL
-        case 0x3A: if (d.rd != 0) shift64(&Assembler::lsrv, d.rt, d.shamt, d.rd); return true;      // DSRL
-        case 0x3B: if (d.rd != 0) shift64(&Assembler::asrv, d.rt, d.shamt, d.rd); return true;      // DSRA
-        case 0x3C: if (d.rd != 0) shift64(&Assembler::lslv, d.rt, d.shamt + 32, d.rd); return true; // DSLL32
-        case 0x3E: if (d.rd != 0) shift64(&Assembler::lsrv, d.rt, d.shamt + 32, d.rd); return true; // DSRL32
-        case 0x3F: if (d.rd != 0) shift64(&Assembler::asrv, d.rt, d.shamt + 32, d.rd); return true; // DSRA32
-        default: return false;
-        }
-
-    case 0x08: { // ADDI (traps on 32-bit signed overflow)
-        a.ldr32z(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
-        a.adds_reg(S0, S0, S1, false);
-        emit_overflow_check(a, site, overflow_sites);
-        a.sxtw(S0, S0); st_if(d.rt, S0);
-        return true;
+Recompiler::Block Recompiler::compile_block_linked(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot, bool mapped,
+                                                   std::vector<PendingLink>& links) {
+    if (!rt_ready_) {
+        rt_ready_ = emit_a64_runtime(code_, rt_, kJCacheBits);
+        if (!rt_ready_) return Block{};
     }
-    case 0x09: // ADDIU
-        if (d.rt != 0) {
-            a.ldr32z(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
-            a.add_reg(S0, S0, S1, false); a.sxtw(S0, S0); st_if(d.rt, S0);
-        }
-        return true;
-    case 0x0A: // SLTI
-        if (d.rt != 0) {
-            a.ldr64(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
-            a.cmp_reg(S0, S1, true); a.cset(S0, Cond::LT, true); st_if(d.rt, S0);
-        }
-        return true;
-    case 0x0B: // SLTIU
-        if (d.rt != 0) {
-            a.ldr64(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
-            a.cmp_reg(S0, S1, true); a.cset(S0, Cond::CC, true); st_if(d.rt, S0);
-        }
-        return true;
-    case 0x0C: // ANDI
-        if (d.rt != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.movz(S1, d.imm, 0); a.and_reg(S0, S0, S1, true); st_if(d.rt, S0); }
-        return true;
-    case 0x0D: // ORI
-        if (d.rt != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.movz(S1, d.imm, 0); a.orr_reg(S0, S0, S1, true); st_if(d.rt, S0); }
-        return true;
-    case 0x0E: // XORI
-        if (d.rt != 0) { a.ldr64(S0, X_GPR, d.rs * 8); a.movz(S1, d.imm, 0); a.eor_reg(S0, S0, S1, true); st_if(d.rt, S0); }
-        return true;
-    case 0x0F: // LUI
-        if (d.rt != 0) {
-            s64 val = sign_extend_32_64(static_cast<s32>(static_cast<u32>(d.imm) << 16));
-            a.mov_imm64(S0, static_cast<u64>(val));
-            st_if(d.rt, S0);
-        }
-        return true;
-    case 0x18: { // DADDI (traps on 64-bit signed overflow)
-        a.ldr64(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
-        a.adds_reg(S0, S0, S1, true);
-        emit_overflow_check(a, site, overflow_sites);
-        st_if(d.rt, S0);
-        return true;
-    }
-    case 0x19: // DADDIU
-        if (d.rt != 0) {
-            a.ldr64(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
-            a.add_reg(S0, S0, S1, true); st_if(d.rt, S0);
-        }
-        return true;
-
-    case 0x11: // COP1 - fmt/sub-op lives in d.rs, ft in d.rt, fs in d.rd, fd in d.shamt
-        switch (d.rs) {
-        case 0x00: // MFC1 rt, fs
-            emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-            a.sxtw(S0, 0);
-            st_if(d.rt, S0);
-            return true;
-        case 0x01: // DMFC1 rt, fs
-            emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-            st_if(d.rt, 0);
-            return true;
-        case 0x04: // MTC1 rt, fs
-            a.ldr32z(0, X_GPR, d.rt * 8);
-            emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.rd, 0);
-            return true;
-        case 0x05: // DMTC1 rt, fs
-            a.ldr64(0, X_GPR, d.rt * 8);
-            emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.rd, 0);
-            return true;
-        case 0x10: // .S (single precision)
-            switch (d.funct) {
-            case 0x06: // MOV.S
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x05: // ABS.S - clear the sign bit, pure integer op
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.mov_imm64_sext32(1, 0x7FFFFFFF); // low 32 bits: 0x7FFFFFFF regardless of upper bits
-                a.and_reg(0, 0, 1, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x07: // NEG.S - flip the sign bit, pure integer op
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.mov_imm64_sext32(1, static_cast<s32>(0x80000000u)); // low 32 bits: 0x80000000
-                a.eor_reg(0, 0, 1, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x00: case 0x01: case 0x02: { // ADD.S / SUB.S / MUL.S
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd); // fs
-                a.str64(0, SP, kFpScratchSlot);
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rt); // ft
-                a.fmov_to_fp(1, 0, false);
-                a.ldr64(0, SP, kFpScratchSlot);
-                a.fmov_to_fp(0, 0, false);
-                if (d.funct == 0x00) a.fadd(0, 0, 1, false);
-                else if (d.funct == 0x01) a.fsub(0, 0, 1, false);
-                else a.fmul(0, 0, 1, false);
-                a.fmov_from_fp(0, 0, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            }
-            case 0x03: { // DIV.S - hardware divide, except the interpreter
-                // special-cases a zero divisor to 0.0f instead of IEEE Inf/NaN.
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd); // fs
-                a.str64(0, SP, kFpScratchSlot);
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rt); // ft (divisor)
-                a.mov_reg(2, 0);
-                a.mov_imm64_sext32(S3, 0x7FFFFFFF);
-                a.and_reg(2, 2, S3, false); // ignore sign: +0.0 and -0.0 both count as zero
-                size_t nz = a.cbnz(2, false);
-                a.movz(0, 0, 0, false); // divisor is zero -> result is 0.0f
-                size_t skip = a.b();
-                a.patch_branch(nz, a.pos());
-                a.fmov_to_fp(1, 0, false);
-                a.ldr64(0, SP, kFpScratchSlot);
-                a.fmov_to_fp(0, 0, false);
-                a.fdiv(0, 0, 1, false);
-                a.fmov_from_fp(0, 0, false);
-                a.patch_branch(skip, a.pos());
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            }
-            case 0x04: // SQRT.S
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.fmov_to_fp(0, 0, false);
-                a.fsqrt(0, 0, false);
-                a.fmov_from_fp(0, 0, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x21: // CVT.D.S: float -> double
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.fmov_to_fp(0, 0, false);
-                a.fcvt_s_to_d(0, 0);
-                a.fmov_from_fp(0, 0, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            case 0x24: // CVT.W.S: float -> 32-bit int (truncating)
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.fmov_to_fp(0, 0, false);
-                a.fcvtzs(0, 0, false, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x25: // CVT.L.S: float -> 64-bit int (truncating)
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.fmov_to_fp(0, 0, false);
-                a.fcvtzs(0, 0, true, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            default:
-                if ((d.funct & 0x30) == 0x30) { // C.cond.S
-                    a.mov_reg(0, X_CTX);
-                    a.movz(1, d.rd, 0, false);
-                    a.movz(2, d.rt, 0, false);
-                    a.movz(3, d.funct & 0x07, 0, false);
-                    a.mov_imm64(S3, reinterpret_cast<u64>(&jit_fpu_ccond_s));
-                    a.blr(S3);
-                    return true;
-                }
-                return false; // ROUND/TRUNC/CEIL/FLOOR - interpreter handles it
-            }
-        case 0x11: // .D (double precision)
-            switch (d.funct) {
-            case 0x06: // MOV.D
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            case 0x05: // ABS.D
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.mov_imm64(1, 0x7FFFFFFFFFFFFFFFull);
-                a.and_reg(0, 0, 1, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            case 0x07: // NEG.D
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.mov_imm64(1, 0x8000000000000000ull);
-                a.eor_reg(0, 0, 1, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            case 0x00: case 0x01: case 0x02: { // ADD.D / SUB.D / MUL.D
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd); // fs
-                a.str64(0, SP, kFpScratchSlot);
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rt); // ft
-                a.fmov_to_fp(1, 0, true);
-                a.ldr64(0, SP, kFpScratchSlot);
-                a.fmov_to_fp(0, 0, true);
-                if (d.funct == 0x00) a.fadd(0, 0, 1, true);
-                else if (d.funct == 0x01) a.fsub(0, 0, 1, true);
-                else a.fmul(0, 0, 1, true);
-                a.fmov_from_fp(0, 0, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            }
-            case 0x03: { // DIV.D - same zero-divisor special case as DIV.S, 64-bit
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd); // fs
-                a.str64(0, SP, kFpScratchSlot);
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rt); // ft (divisor)
-                a.mov_reg(2, 0);
-                a.mov_imm64(S3, 0x7FFFFFFFFFFFFFFFull);
-                a.and_reg(2, 2, S3, true);
-                size_t nz = a.cbnz(2, true);
-                a.movz(0, 0, 0, false); // divisor is zero -> result is 0.0 (W0=0 zero-extends X0)
-                size_t skip = a.b();
-                a.patch_branch(nz, a.pos());
-                a.fmov_to_fp(1, 0, true);
-                a.ldr64(0, SP, kFpScratchSlot);
-                a.fmov_to_fp(0, 0, true);
-                a.fdiv(0, 0, 1, true);
-                a.fmov_from_fp(0, 0, true);
-                a.patch_branch(skip, a.pos());
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            }
-            case 0x04: // SQRT.D
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.fmov_to_fp(0, 0, true);
-                a.fsqrt(0, 0, true);
-                a.fmov_from_fp(0, 0, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            case 0x20: // CVT.S.D: double -> float
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.fmov_to_fp(0, 0, true);
-                a.fcvt_d_to_s(0, 0);
-                a.fmov_from_fp(0, 0, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x24: // CVT.W.D: double -> 32-bit int (truncating)
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.fmov_to_fp(0, 0, true);
-                a.fcvtzs(0, 0, false, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x25: // CVT.L.D: double -> 64-bit int (truncating)
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.fmov_to_fp(0, 0, true);
-                a.fcvtzs(0, 0, true, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            default:
-                if ((d.funct & 0x30) == 0x30) { // C.cond.D
-                    a.mov_reg(0, X_CTX);
-                    a.movz(1, d.rd, 0, false);
-                    a.movz(2, d.rt, 0, false);
-                    a.movz(3, d.funct & 0x07, 0, false);
-                    a.mov_imm64(S3, reinterpret_cast<u64>(&jit_fpu_ccond_d));
-                    a.blr(S3);
-                    return true;
-                }
-                return false;
-            }
-        // SCVTF writes its result to an FP register (S0/D0), while emit_fpr_set
-        // takes the bits from X0 - hence the FMOV back after every conversion.
-        case 0x14: // .W (word) - fs holds a raw int32 stored in the FPR, not float bits
-            switch (d.funct) {
-            case 0x20: // CVT.S.W
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.scvtf(0, 0, false, false);
-                a.fmov_from_fp(0, 0, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x21: // CVT.D.W
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get32), d.rd);
-                a.sxtw(0, 0); // sign-extend the int32 before treating it as a 64-bit source width
-                a.scvtf(0, 0, true, true);
-                a.fmov_from_fp(0, 0, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            default: return false;
-            }
-        case 0x15: // .L (long) - fs holds a raw int64 stored in the FPR
-            switch (d.funct) {
-            case 0x20: // CVT.S.L
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.scvtf(0, 0, true, false);
-                a.fmov_from_fp(0, 0, false);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set32), d.shamt, 0);
-                return true;
-            case 0x21: // CVT.D.L
-                emit_fpr_get(a, reinterpret_cast<void*>(&jit_fpr_get64), d.rd);
-                a.scvtf(0, 0, true, true);
-                a.fmov_from_fp(0, 0, true);
-                emit_fpr_set(a, reinterpret_cast<void*>(&jit_fpr_set64), d.shamt, 0);
-                return true;
-            default: return false;
-            }
-        default: return false; // CFC1/CTC1/BC1 - interpreter handles it
-        }
-
-    case 0x20: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lb), site, fault_patches); return true;
-    case 0x21: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lh), site, fault_patches); return true;
-    case 0x23: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lw), site, fault_patches); return true;
-    case 0x24: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lbu), site, fault_patches); return true;
-    case 0x25: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lhu), site, fault_patches); return true;
-    case 0x27: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lwu), site, fault_patches); return true;
-    case 0x37: emit_load(a, d, reinterpret_cast<void*>(&jit_load_ld), site, fault_patches); return true;
-
-    case 0x28: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sb), site, fault_patches); return true;
-    case 0x29: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sh), site, fault_patches); return true;
-    case 0x2B: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sw), site, fault_patches); return true;
-    case 0x3F: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sd), site, fault_patches); return true;
-
-    case 0x2F: return true; // CACHE: a no-op, as in the interpreter
-
-    default:
-        return false;
-    }
+    A64BlockEnv env;
+    env.rt = &rt_;
+    env.chain = chain_;
+    env.mapped = mapped;
+    env.link_target = [this, mapped](u32 target) { return link_target(target, mapped); };
+    return compile_block_a64(cpu, bus, start_paddr, code_, delay_slot, env, links);
 }
+#endif
 
-// Runs `d` through jit_interp (see is_interp_callable), with the same
-// fault-exit convention as a load/store helper call.
-void emit_interp_call(Assembler& a, const Decoded& d, u32 site, std::vector<size_t>& fault_patches) {
-    a.mov_reg(0, X_CTX);
-    a.mov_imm64(1, d.raw);
-    a.mov_imm64(2, site);
-    a.mov_imm64(S3, reinterpret_cast<u64>(&jit_interp));
-    a.blr(S3);
-    size_t skip = a.cbz(0, false);
-    a.movz(0, static_cast<u16>(site_index(site)), 0, false);
-    fault_patches.push_back(a.b());
-    a.patch_branch(skip, a.pos());
-}
-
-} // namespace
-
-// Branches are not compiled on this backend yet (no emit_branch()): a block
-// ends right before one and the interpreter runs it.
-static Recompiler::Block compile_block_a64(Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot) {
-    Recompiler::Block blk{};
-    size_t rdram_size = bus.get_rdram_size();
-    const u8* rdram = bus.get_rdram();
-    const u32 max_len = delay_slot ? 1 : kMaxBlockLen;
-
-    Assembler a;
-    emit_prologue(a);
-    std::vector<size_t> fault_patches;
-    std::vector<OverflowSite> overflow_sites;
-
-    u32 len = 0;
-    while (len < max_len) {
-        u32 paddr = start_paddr + len * 4;
-        if (static_cast<size_t>(paddr) + 4 > rdram_size) break;
-        Decoded d = decode(fetch_instr(rdram, paddr));
-        const u32 site = delay_slot ? (len | kSiteDelaySlot) : len;
-        if (!compile_one(a, d, site, fault_patches, overflow_sites)) {
-            if (!is_interp_callable(d)) break;
-            emit_interp_call(a, d, site, fault_patches);
-        }
-        len++;
-    }
-    if (len == 0) return blk;
-
-    a.movz(0, static_cast<u16>(len), 0, false);
-    size_t epilogue_pos = a.pos();
-    emit_epilogue(a);
-    for (size_t site : fault_patches) a.patch_branch(site, epilogue_pos);
-    // Out-of-line stubs for trapping arithmetic that overflowed - see the
-    // x64 backend's identical comment above compile_block_x64's equivalent.
-    for (const OverflowSite& s : overflow_sites) {
-        a.patch_branch(s.patch, a.pos());
-        a.mov_reg(0, X_CTX);
-        a.mov_imm64(1, s.site);
-        a.mov_imm64(S3, reinterpret_cast<u64>(&jit_overflow));
-        a.blr(S3);
-        a.movz(0, static_cast<u16>(site_index(s.site)), 0, false);
-        a.patch_branch(a.b(), epilogue_pos);
-    }
-
-    // See compile_block_x64: lookup_or_compile() keeps kArenaHeadroom free.
-    if (code.remaining() < a.size()) return blk; // left to the interpreter
-    code.make_writable(a.size());
-    u8* dst = code.write_ptr();
-    std::memcpy(dst, a.data(), a.size());
-    code.commit(a.size());
-    code.make_executable();
-
-    blk.fn = reinterpret_cast<JitBlockFn>(code.exec_ptr(dst));
-    blk.length = len;
-    return blk;
-}
-#endif // ORBIT64_JIT_A64
-
-Recompiler::Block Recompiler::compile_block(CPU&, Bus& bus, u32 start_paddr, bool delay_slot) {
+Recompiler::Block Recompiler::compile_block([[maybe_unused]] CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot) {
 #if defined(ORBIT64_JIT_X64)
     return compile_block_x64(bus, start_paddr, code_, delay_slot);
 #elif defined(ORBIT64_JIT_A64)
-    return compile_block_a64(bus, start_paddr, code_, delay_slot);
+    std::vector<PendingLink> links; // dropped: nothing will patch them
+    A64BlockEnv env;
+    if (!rt_ready_) rt_ready_ = emit_a64_runtime(code_, rt_, kJCacheBits);
+    env.rt = &rt_;
+    env.chain = false;
+    env.link_target = [](u32) { return static_cast<const void*>(nullptr); };
+    return compile_block_a64(cpu, bus, start_paddr, code_, delay_slot, env, links);
 #else
     (void)bus; (void)start_paddr; (void)delay_slot;
     return Block{}; // unsupported host architecture: interpreter-only

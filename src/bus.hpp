@@ -75,6 +75,9 @@ public:
     // TLB management
     void set_tlb_entry(size_t index, const TLBEntry& entry);
     const TLBEntry& get_tlb_entry(size_t index) const;
+    // Changes whenever a TLB entry is written, so the recompiler knows when
+    // translations it cached (virtual pc -> compiled block) may be stale.
+    u32 tlb_generation() const { return tlb_gen_; }
 
     // Save states (savestate.hpp).
     template <class S> void serialize(S& s) {
@@ -96,6 +99,7 @@ private:
 
     std::vector<u8> rdram;
     std::array<TLBEntry, 32> tlb_entries{};
+    u32 tlb_gen_ = 0;
 
     // RI registers
     u32 ri_mode{0};

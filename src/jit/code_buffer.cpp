@@ -1,6 +1,7 @@
 #include "code_buffer.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 #if defined(_WIN32)
@@ -116,6 +117,35 @@ void CodeBuffer::make_executable() {
         writable_lo_ = writable_hi_ = 0;
     }
     flush_icache();
+}
+
+void CodeBuffer::patch32(u8* where, u32 word) {
+#if defined(ORBIT64_MAP_JIT)
+    if (map_jit_) {
+        pthread_jit_write_protect_np(0);
+        std::memcpy(where, &word, 4);
+        pthread_jit_write_protect_np(1);
+        sys_icache_invalidate(where, 4);
+        return;
+    }
+#endif
+    u8* page = base_ + ((where - base_) & ~(page_size_ - 1));
+#if defined(_WIN32)
+    DWORD old_protect;
+    VirtualProtect(page, page_size_, PAGE_READWRITE, &old_protect);
+    std::memcpy(where, &word, 4);
+    VirtualProtect(page, page_size_, PAGE_EXECUTE_READ, &old_protect);
+    FlushInstructionCache(GetCurrentProcess(), where, 4);
+#else
+    mprotect(page, page_size_, PROT_READ | PROT_WRITE);
+    std::memcpy(where, &word, 4);
+    mprotect(page, page_size_, PROT_READ | PROT_EXEC);
+#if defined(__APPLE__)
+    sys_icache_invalidate(where, 4);
+#elif defined(__GNUC__) || defined(__clang__)
+    __builtin___clear_cache(reinterpret_cast<char*>(where), reinterpret_cast<char*>(where + 4));
+#endif
+#endif
 }
 
 // The arena is append-only between resets, so everything below flushed_ is

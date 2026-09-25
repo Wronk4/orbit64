@@ -23,6 +23,7 @@ Bus::Bus(Cartridge& cart, PIF& pif, Controller controllers[4],
 void Bus::reset() {
     std::fill(rdram.begin(), rdram.end(), 0);
     for (auto& entry : tlb_entries) entry = {};
+    tlb_gen_++;
     ri_mode = 0;
     ri_config = 0;
     ri_current_load = 0;
@@ -34,6 +35,7 @@ void Bus::reset() {
 }
 
 void Bus::set_tlb_entry(size_t index, const TLBEntry& entry) {
+    tlb_gen_++;
     if (index < tlb_entries.size()) {
         tlb_entries[index] = entry;
     }

@@ -114,7 +114,7 @@ void Emulator::step_frame() {
             }
             prev_prev_pc = prev_pc;
             prev_pc = pc;
-            executed += (cpu_core_ == CpuCore::Recompiler) ? jit.run_step(cpu, bus) : cpu.step();
+            executed += (cpu_core_ == CpuCore::Recompiler) ? jit.run(cpu, bus, cycles_per_scanline - executed) : cpu.step();
         }
         const Clock::time_point t1 = profiling_ ? Clock::now() : Clock::time_point{};
 

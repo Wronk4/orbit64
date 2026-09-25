@@ -167,6 +167,16 @@ void CPU::check_interrupts() {
     }
 }
 
+bool CPU::jit_interrupt_deliverable() const {
+    if (in_delay_slot) return false;
+    u64 cause = cp0[CP0Reg::CAUSE];
+    if (bus.get_mi().is_interrupt_asserted()) cause |= (1 << 10);
+    else cause &= ~(1ULL << 10);
+    const u64 status = cp0[CP0Reg::STATUS];
+    if (!(status & 1) || (status & 6)) return false;
+    return (((status >> 8) & 0xFF) & ((cause >> 8) & 0xFF)) != 0;
+}
+
 u32 CPU::step() {
     gpr[0] = 0;
 

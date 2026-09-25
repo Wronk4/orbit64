@@ -74,6 +74,13 @@ public:
     u64* jit_gpr_ptr() { return gpr.data(); }
     u64* jit_hi_ptr() { return &hi; }
     u64* jit_lo_ptr() { return &lo; }
+    u64* jit_fpr_ptr() { return fpr.data(); }
+    u32* jit_fcsr_ptr() { return &fcsr; }
+    u64* jit_cp0_ptr() { return cp0.data(); }
+
+    // What check_interrupts() would do right now, without doing it: whether
+    // an interrupt is pending, enabled and not blocked by EXL/ERL.
+    bool jit_interrupt_deliverable() const;
     u8 jit_asid() const { return static_cast<u8>(cp0[CP0Reg::ENTRY_HI] & 0xFF); }
 
     // True when the instruction at the *current* pc is sitting in a branch
@@ -99,6 +106,17 @@ public:
     // CPU::step() does for every instruction, so the *next* instruction
     // isn't mistaken for another delay slot.
     void jit_clear_pending_delay_slot() { in_delay_slot = false; }
+
+    // CP0 RANDOM steps once per instruction (see step()); compiled code
+    // never reads it, so the driver catches it up after each run of `instrs`
+    // compiled instructions instead.
+    void jit_advance_random(u64 instrs) {
+        const u64 wired = cp0[CP0Reg::WIRED] & 0x1F;
+        const u64 random = cp0[CP0Reg::RANDOM] & 0x1F;
+        const u64 span = 32 - wired;
+        const u64 pos = random > wired ? random - wired : 0;
+        cp0[CP0Reg::RANDOM] = wired + (pos + span - instrs % span) % span;
+    }
 
     // Compiled code doesn't maintain cur_pc/delay_slot_active per
     // instruction like step() does, and trigger_exception() derives EPC/BD

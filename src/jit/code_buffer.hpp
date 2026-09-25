@@ -63,6 +63,12 @@ public:
     // the calling thread).
     void make_writable(size_t n);
 
+    // Rewrites one 4-byte instruction word of code that is already executable
+    // (the AArch64 backend retargets a branch to a block compiled after it)
+    // and makes that word visible to instruction fetch. The arena is left
+    // executable, as after make_executable().
+    void patch32(u8* where, u32 word);
+
     // Identity on this (single-mapping) implementation; exists so callers
     // can be written the same way a dual-mapping backend would need them to
     // be, in case a future platform-specific backend brings that back.

@@ -53,6 +53,20 @@ void jit_fpr_set32(JitCtx* ctx, u32 reg, u32 bits);
 u64 jit_fpr_get64(JitCtx* ctx, u32 reg);
 void jit_fpr_set64(JitCtx* ctx, u32 reg, u64 bits);
 
+// COP0 moves and TLB instructions (MFC0/DMFC0/MTC0/DMTC0/TLBR/TLBWI/TLBWR/TLBP)
+// in a chain of compiled blocks (AArch64). `remaining` is the chain's cycle
+// budget left at this instruction (JitCtx::cycles - it = cycles executed
+// before it). COUNT and RANDOM are first brought up to date, then the
+// instruction runs exactly as CPU::step() would run it (RANDOM steps before,
+// COUNT after). Returns 1 if the chain has to end right after it: an
+// interrupt can now be taken, COUNT/COMPARE changed, STATUS.FR did (the rest
+// of the block assumed the old COP1 register mode), or the TLB or ASID did.
+u32 jit_cop0(JitCtx* ctx, u32 instr, s64 remaining);
+// ERET, the same way; the pc it returns to is left in JitCtx::next_pc.
+u32 jit_eret(JitCtx* ctx, s64 remaining);
+// A block compiled for the other STATUS.FR setting was entered (see JitCtx::fr_mismatch).
+void jit_fr_mismatch(JitCtx* ctx);
+
 // C.cond.S/C.cond.D: updates FCSR's condition bit; see CPU::jit_fpu_compare_s/d.
 void jit_fpu_ccond_s(JitCtx* ctx, u32 fs, u32 ft, u32 cond);
 void jit_fpu_ccond_d(JitCtx* ctx, u32 fs, u32 ft, u32 cond);

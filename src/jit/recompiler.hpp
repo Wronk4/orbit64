@@ -29,6 +29,7 @@
 #include "jit_abi.hpp"
 #include <array>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 class CPU;
@@ -40,9 +41,28 @@ public:
     // recompiler.cpp can build and return one; not part of the public API
     // otherwise.
     struct Block {
-        JitBlockFn fn = nullptr; // null (with valid) = "known not JIT-able at this PC"
+        // null (with valid) = "known not JIT-able at this PC". On AArch64 this
+        // is not a C function but a chain entry point (see run()).
+        JitBlockFn fn = nullptr;
         u32 length = 0;          // guest instructions covered (incl. a terminating branch + delay slot)
         bool valid = false;      // false = not compiled yet
+        bool link_ok = false;    // AArch64: other blocks may jump straight here
+    };
+
+    // AArch64 chaining runtime, emitted at the start of the code arena (see
+    // backend_a64.cpp): `enter` sets up a chain's registers and jumps to a
+    // block; blocks leave through `exit`, or look their successor up through
+    // `dispatch` when it isn't known at compile time.
+    struct ChainRuntime {
+        void (*enter)(JitCtx* ctx, const void* entry) = nullptr;
+        const u8* exit = nullptr;
+        const u8* dispatch = nullptr;
+    };
+    // A branch in compiled code that should jump straight to the block for
+    // `target_paddr` once that is compiled; until then it leaves the chain.
+    struct PendingLink {
+        u32 target_paddr;
+        u32 offset; // of the B instruction, from the start of its block's code
     };
 
     Recompiler();
@@ -54,6 +74,20 @@ public:
     // isn't JIT-able. Returns the same "cycles consumed" convention as
     // CPU::step() (2 per instruction, 1 on an instruction-fetch TLB fault).
     u32 run_step(CPU& cpu, Bus& bus);
+
+    // Like run_step(), but may run up to `budget` cycles' worth of compiled
+    // code in one go: on AArch64, blocks chain directly into each other until
+    // the budget is used up, the COUNT/COMPARE timer is about to fire, a store
+    // hits MMIO or compiled code, or execution reaches code that has to be
+    // interpreted. Interrupts are then checked exactly as after a single block
+    // (nothing that could raise one happens mid-chain). Returns the cycles
+    // consumed. Elsewhere this is run_step().
+    u32 run(CPU& cpu, Bus& bus, u32 budget);
+
+    // Chaining on/off (AArch64). Off, every block returns to the driver - the
+    // same code and state, just slower, which makes it the reference to check
+    // chaining against.
+    void set_chaining(bool on) { chain_ = on; }
 
     // Drops every cached block immediately. Safe to call from plain C++ (e.g.
     // Emulator::reset()) but never while a compiled block might be on the
@@ -128,14 +162,49 @@ private:
     // ordinary visit to the same address, their own map.
     BlockMap blocks_;
     BlockMap ds_blocks_;
+    // AArch64: code reached through the TLB (e.g. GoldenEye runs at
+    // 0x7000xxxx), keyed by the physical address it translated to. Such a
+    // block never runs past its 4 KB page - the next virtual page may map
+    // anywhere - and only links to blocks in the same page.
+    BlockMap map_blocks_;
 
     CodeBuffer code_;
     std::vector<u8> code_pages_; // page index -> nonzero if a cached block covers this page (read by compiled stores)
     bool pending_invalidate_ = false;
 
-    const Block* lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot);
+    // --- AArch64 chaining (see run()) ---
+    bool chain_ = true;
+    ChainRuntime rt_;          // valid while rt_ready_; re-emitted after every arena reset
+    bool rt_ready_ = false;
+    // Dispatcher lookup: direct-mapped on the (virtual) pc, entries only for
+    // blocks that allow linking. A miss just leaves the chain.
+    struct JCacheEntry {
+        u64 pc;
+        const void* entry;
+    };
+    static constexpr u32 kJCacheBits = 13;
+    std::vector<JCacheEntry> jcache_;
+    // Branches waiting for their target block: target paddr -> B instructions
+    // (for blocks_ and map_blocks_ respectively).
+    std::unordered_map<u32, std::vector<u8*>> pending_links_;
+    std::unordered_map<u32, std::vector<u8*>> map_pending_links_;
+    // TLB contents / ASID the dispatcher table's entries for mapped code were
+    // made under; any change drops the table.
+    u32 tlb_gen_seen_ = 0;
+    u8 asid_seen_ = 0;
+    JitCtx* active_ctx_ = nullptr; // the running chain's context, for request_invalidate()
+
+    const Block* lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot, bool mapped = false);
     Block compile_block(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot);
+    // AArch64: compile_block() with linking; branches to blocks not compiled
+    // yet are returned in `links`.
+    Block compile_block_linked(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot, bool mapped,
+                               std::vector<PendingLink>& links);
     void mark_code_pages(u32 start_paddr, u32 end_paddr);
+    // Entry of the compiled, linkable block at `paddr` (in map_blocks_ if
+    // `mapped`), or null.
+    const void* link_target(u32 paddr, bool mapped) const;
+    void clear_jcache();
 
     bool stats_on_ = false;
     Stats stats_;

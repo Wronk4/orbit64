@@ -35,6 +35,13 @@ struct JitCtx {
     u32 faulted;      // set by jit_helpers when an instruction raised an exception
     u8* rdram;        // RDRAM_SIZE bytes, for inline KSEG0/KSEG1 loads/stores
     const u8* code_pages; // Recompiler::code_pages_: nonzero = a compiled block was read from this 64-byte page
+    // Block chaining (AArch64 backend only - see Recompiler::run): blocks
+    // jump straight to each other while the cycle budget lasts.
+    s64 cycles;       // in: cycles the chain may run; out: what is left (<= 0 once used up)
+    const void* jcache; // Recompiler::jcache_, the dispatcher's pc -> block lookup table
+    u32 exit_req;     // set by C++ (an MMIO store, a write to compiled code) to end the chain early
+    u32 fr_mismatch;  // a block compiled for the other COP1 register mode (STATUS.FR) was entered
+    s64 synced;       // cycles of this chain already applied to COUNT/RANDOM (by jit_cop0)
 };
 
 // Identifies the guest instruction a jit_helpers call is made for, so an
@@ -58,3 +65,8 @@ static_assert(offsetof(JitCtx, next_pc) == 48, "JitCtx layout is baked into code
 static_assert(offsetof(JitCtx, branch_taken) == 56, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, rdram) == 64, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, code_pages) == 72, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, cycles) == 80, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, jcache) == 88, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, exit_req) == 96, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, fr_mismatch) == 100, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, synced) == 104, "JitCtx layout is baked into codegen");
