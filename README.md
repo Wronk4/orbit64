@@ -57,6 +57,13 @@ tools/jit_bench.sh 600 --stats # every ROM in roms/: fps, CPU vs RSP/RDP time, J
   by one. Check any change to it with `make rdp_check` against a build without the change (`--frame-log` finds the
   first frame that differs).
 
+## Compatibility testing
+
+`python tools/compat_sweep.py` runs every ROM in `roms/` headless for 30 s of game time (pressing START/A a few times
+to get past title screens) and writes `test_output/compat/report.html`: status, speed, graphics and audio microcode,
+screenshots and the captured sound per game, plus `sheet.png` with all screenshots and `results.json`.
+`--compare <old results.json>` marks what changed since an earlier sweep; `--filter <text>` runs a subset.
+
 ## Audio
 
 - **Microcode HLE** (`src/ahle.*`): the audio command lists of the libultra ABI 1 microcode (and its GoldenEye /

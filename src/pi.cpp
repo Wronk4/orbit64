@@ -2,6 +2,7 @@
 #include "mi.hpp"
 #include "cartridge.hpp"
 #include "jit/jit_invalidate.hpp"
+#include <algorithm>
 #include <iostream>
 
 PI::PI() {
@@ -91,13 +92,8 @@ void PI::execute_dma_read(MI& mi, Cartridge& cart, u8* rdram, size_t rdram_size)
 
     if (cart_addr >= 0x08000000 && cart_addr < 0x10000000) {
         // Read from Cartridge SRAM / FlashRAM
-        u32 sram_offset = cart_addr - 0x08000000;
-        for (u32 i = 0; i < len; ++i) {
-            u8 byte = cart.read_sram(sram_offset + i);
-            if (cur_dram + i < rdram_size) {
-                rdram[cur_dram + i] = byte;
-            }
-        }
+        const u32 n = static_cast<u32>(std::min<size_t>(len, rdram_size - cur_dram));
+        cart.dma_to_rdram(cart_addr - 0x08000000, rdram + cur_dram, n);
     } else {
         // Read from Cartridge ROM
         u32 rom_offset = (cart_addr >= 0x10000000) ? (cart_addr - 0x10000000) : cart_addr;
@@ -125,11 +121,9 @@ void PI::execute_dma_write(MI& mi, Cartridge& cart, const u8* rdram, size_t rdra
 
     u32 cur_dram = dram_addr & (rdram_size - 1);
 
-    u32 sram_offset = (cart_addr >= 0x08000000) ? (cart_addr - 0x08000000) : cart_addr;
-    for (u32 i = 0; i < len; ++i) {
-        u8 byte = (cur_dram + i < rdram_size) ? rdram[cur_dram + i] : 0;
-        cart.write_sram(sram_offset + i, byte);
-    }
+    const u32 sram_offset = (cart_addr >= 0x08000000) ? (cart_addr - 0x08000000) : cart_addr;
+    const u32 n = static_cast<u32>(std::min<size_t>(len, rdram_size - cur_dram));
+    cart.dma_from_rdram(sram_offset, rdram + cur_dram, n);
 
     dram_addr += len;
     cart_addr += len;

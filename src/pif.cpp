@@ -11,10 +11,12 @@ void PIF::reset(CICType cic) {
     std::fill(rom.begin(), rom.end(), 0);
 
     // Boot handshake defaults
+    // What the PIF reports about the CIC after boot: 0x24 = 00 0x ss 3F,
+    // x = 06 for 6101 else 02, ss = the CIC's seed.
     ram[0x24] = 0x00;
-    ram[0x25] = 0x00;
-    ram[0x26] = (cic == CICType::CIC_6105) ? 0x91 : 0x3F; // CIC seed
-    ram[0x27] = (cic == CICType::CIC_6105) ? 0x85 : 0x3F;
+    ram[0x25] = (cic == CICType::CIC_6101) ? 0x06 : 0x02;
+    ram[0x26] = cic == CICType::CIC_6103 ? 0x78 : cic == CICType::CIC_6105 ? 0x91 : cic == CICType::CIC_6106 ? 0x85 : 0x3F;
+    ram[0x27] = 0x3F;
     ram[63] = 0x00;
 }
 

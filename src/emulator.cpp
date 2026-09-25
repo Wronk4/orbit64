@@ -36,8 +36,9 @@ void Emulator::reset() {
 
     // Copy IPL3/payload into RDRAM and RSP DMEM as IPL3 leaves it
     const auto& rom = cart.get_rom_data();
-    u32 entry = cart.get_entry_point();
-    if (entry == 0) entry = 0x80000400;
+    // IPL3 copies the first MB after the boot code to where the game starts
+    // (the header's entry point, minus 1/2 MB for CIC 6103/6106) and jumps there.
+    const u32 entry = cart.get_boot_address();
     u32 phys_entry = entry & 0x1FFFFFFF;
 
     if (rom.size() >= 0x1000) {
@@ -47,10 +48,6 @@ void Emulator::reset() {
         // Copy to entry point destination in RDRAM
         if (phys_entry + copy_size <= bus.get_rdram_size()) {
             std::memcpy(rdram + phys_entry, rom.data() + 0x1000, copy_size);
-        }
-        // Also copy to 0x00000400
-        if (0x400 + copy_size <= bus.get_rdram_size()) {
-            std::memcpy(rdram + 0x400, rom.data() + 0x1000, copy_size);
         }
 
         // Copy header and IPL3 into RSP DMEM (0xA4000000)
@@ -69,9 +66,22 @@ void Emulator::reset() {
     write_u32(0x304, 0);          // osRomType (0 = cartridge)
     write_u32(0x308, 0x10000000); // osRomBase (Cartridge Domain 1)
     write_u32(0x30C, 0);          // osResetType
-    write_u32(0x310, (cart.get_cic_type() == CICType::CIC_6105) ? 0x91 : 0x3F); // osCicId
+    write_u32(0x310, cart.get_cic_seed()); // osCicId
     write_u32(0x314, 0);          // osVersion
     write_u32(0x318, bus.get_rdram_size()); // osMemSize (8MB = 0x00800000)
+    if (cart.get_cic_type() == CICType::CIC_6105) {
+        // 6105's IPL3 stores the memory size at 0x3F0 instead, and leaves a
+        // few instructions at the start of SP IMEM that its games check.
+        write_u32(0x3F0, bus.get_rdram_size());
+        static const u32 imem_words[] = {0x3C0DBFC0, 0x8DA807FC, 0x25AD07C0, 0x31080080,
+                                         0x5500FFFC, 0x3C0DBFC0, 0x8DA80024, 0x3C0BB000};
+        u8* imem = rsp.get_imem();
+        for (size_t i = 0; i < 8; ++i)
+            for (int b = 0; b < 4; ++b) imem[i * 4 + b] = static_cast<u8>(imem_words[i] >> (24 - 8 * b));
+        // One of its instructions (`sw s7, 0x14(t0)`) also ends up in RDRAM
+        // at 0x2FE1C0; Donkey Kong 64 hangs on purpose if it isn't there.
+        write_u32(0x2FE1C0, 0xAD170014);
+    }
 
     // Reset CPU to start at entry point
     cpu.reset(entry);
@@ -82,8 +92,8 @@ void Emulator::reset() {
     cpu.set_cp0(CP0Reg::COUNT, 0x02000000);  // Advance past 0.5s boot delay for osContInit
 
     // Initial GPR setup according to IPL3 specification
-    cpu.set_gpr(20, 0x00000000); // s4
-    cpu.set_gpr(22, (cart.get_cic_type() == CICType::CIC_6105) ? 0x91 : 0x3F); // s6 (CIC seed)
+    cpu.set_gpr(20, 0x00000001); // s4: TV type (NTSC)
+    cpu.set_gpr(22, cart.get_cic_seed()); // s6: CIC seed
     cpu.set_gpr(29, (entry >= 0x80200000) ? 0x80200600 : 0x8033B400); // sp
     cpu.set_gpr(31, entry); // ra
 }

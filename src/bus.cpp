@@ -170,6 +170,13 @@ u32 Bus::read32(u32 paddr) {
         }
     } else if (paddr >= 0x04800000 && paddr < 0x048FFFFF) {
         return si.read_reg(paddr);
+    } else if (paddr >= 0x05000000 && paddr < 0x08000000) {
+        // Cartridge domain 2 below SRAM is the 64DD, which isn't there: open
+        // bus, i.e. the address's low half twice. 64DD-aware games (F-Zero X)
+        // take anything else for a drive and wait for it forever.
+        return ((paddr & 0xFFFF) << 16) | (paddr & 0xFFFF);
+    } else if (paddr >= 0x08000000 && paddr < 0x10000000) {
+        return cart.read_bus32(paddr - 0x08000000); // SRAM / FlashRAM status
     } else if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
         return cart.read_rom32(paddr - 0x10000000);
     } else if (paddr >= 0x1FC007C0 && paddr < 0x1FC00800) {
@@ -262,6 +269,8 @@ void Bus::write32(u32 paddr, u32 val) {
     } else if (paddr >= 0x04800000 && paddr < 0x048FFFFF) {
         // Likewise for PIF RAM -> RDRAM DMAs (SI::write_reg).
         si.write_reg(paddr, val, mi, pif, controllers, cart, rdram.data(), rdram.size());
+    } else if (paddr >= 0x08000000 && paddr < 0x10000000) {
+        cart.write_bus32(paddr - 0x08000000, val); // SRAM / FlashRAM commands
     } else if (paddr >= 0x1FC007C0 && paddr < 0x1FC00800) {
         u32 off = paddr - 0x1FC007C0;
         pif.write_ram(off + 0, (val >> 24) & 0xFF);

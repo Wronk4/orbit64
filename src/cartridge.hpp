@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.hpp"
+#include <array>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,19 @@ public:
     u8 read_sram(u32 addr) const;
     void write_sram(u32 addr, u8 val);
 
+    // Cartridge domain 2 (0x08000000): SRAM, or FlashRAM and its command
+    // interface. `off` is relative to 0x08000000.
+    u32 read_bus32(u32 off);
+    void write_bus32(u32 off, u32 val);
+    void dma_to_rdram(u32 off, u8* dst, u32 len);      // PI read (cart -> RDRAM)
+    void dma_from_rdram(u32 off, const u8* src, u32 len); // PI write (RDRAM -> cart)
+
+    // What the CIC chip's boot code (IPL3) does differently per chip: the
+    // seed it passes on, and where it copies the game's boot code and jumps
+    // (6103 and 6106 subtract 1 or 2 MB from the header's entry point).
+    u8 get_cic_seed() const;
+    u32 get_boot_address() const;
+
     // EEPROM access
     void read_eeprom(u8 block, u8* out_data);
     void write_eeprom(u8 block, const u8* in_data);
@@ -60,6 +74,7 @@ public:
     template <class S> void serialize(S& s) {
         s.fixed(sram);
         s.fixed(eeprom);
+        s(flash_mode, flash_status, flash_erase_offset, flash_erase_chip, flash_buf);
         if constexpr (S::loading) sram_dirty = eeprom_dirty = true;
     }
 
@@ -71,6 +86,15 @@ private:
     std::vector<u8> eeprom;
     bool sram_dirty{false};
     bool eeprom_dirty{false};
+
+    // FlashRAM (128 KB, kept in `sram`): the libultra osFlash* protocol.
+    enum FlashMode : u8 { FLASH_READ_ARRAY, FLASH_STATUS, FLASH_ID, FLASH_WRITE_BUFFER };
+    u8 flash_mode{FLASH_READ_ARRAY};
+    u8 flash_status{0};        // low byte of the status register: 0x04 programmed, 0x08 erased
+    u32 flash_erase_offset{0};
+    bool flash_erase_chip{false};
+    std::array<u8, 128> flash_buf{};
+    void flash_command(u32 cmd);
 
     u32 entry_point{0};
     u32 crc1{0};
