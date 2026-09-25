@@ -16,13 +16,14 @@ namespace ui {
 namespace fs = std::filesystem;
 
 static const char* kUcodeNames[] = {"Auto", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)"};
-static const char* kAbiShort[] = {"ABI", "ABI 2", "Nintendo Audio", "Nintendo Audio", "Nintendo Audio"};
+static const char* kAbiShort[] = {"ABI", "n_audio", "Nintendo Audio", "Nintendo Audio", "Nintendo Audio", "MusyX"};
 static const char* kAbiLong[] = {
     "Standard libultra audio microcode (ABI 1)",
-    "n_audio microcode (ABI 2) \xE2\x80\x94 Rare titles",
+    "n_audio microcode \xE2\x80\x94 Rare and many third-party titles",
     "Nintendo EAD audio (Mario Kart 64 family)",
     "Nintendo EAD audio (Star Fox 64 / F-Zero X family)",
     "Nintendo EAD audio (Zelda family)",
+    "Factor 5 MusyX \xE2\x80\x94 not emulated yet, no sound",
 };
 
 // ---------------------------------------------------------------------------
@@ -491,7 +492,7 @@ void App::draw_statusbar(ImVec2 pos, ImVec2 size) {
         segs.push_back({"GPU", u, loaded && s.ucode >= 0 ? g_pal.text : dim, {}, tip, 2});
     }
     {
-        bool known = loaded && s.audio_abi >= 0 && s.audio_abi < 5;
+        bool known = loaded && s.audio_abi >= 0 && s.audio_abi < 6;
         segs.push_back({"Audio", known ? kAbiShort[s.audio_abi] : "Unknown", known ? g_pal.text : dim, {},
                         known ? kAbiLong[s.audio_abi] : "No audio task has been submitted yet", 3});
     }

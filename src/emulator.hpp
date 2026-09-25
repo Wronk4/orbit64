@@ -45,8 +45,6 @@ public:
     // (RDP::set_hires_scale) it is that many times the frame buffer size;
     // `out_scale` receives the factor.
     void render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h, int* out_scale = nullptr);
-    void get_audio_samples(float* out_stream, size_t count);
-    void set_audio_output_rate(u32 rate) { ai.set_output_sample_rate(rate); }
 
     // Save states (savestate.hpp): the whole machine between two frames,
     // i.e. after step_frame() (and render_frame()). load_state() leaves the

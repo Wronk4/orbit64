@@ -236,6 +236,7 @@ private:
 
     // audio
     SDL_AudioDeviceID audio_dev_ = 0;
+    int audio_freq_ = 0;  // rate the device actually opened at
     std::atomic<float> audio_volume_{1.0f};
     std::vector<std::string> audio_devices_;
 

@@ -24,6 +24,37 @@ extern char** environ;
 
 namespace platform {
 
+void sleep_until_precise(std::chrono::steady_clock::time_point t) {
+    using namespace std::chrono;
+#if defined(_WIN32)
+#  ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#    define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#  endif
+    struct Timer {
+        HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        ~Timer() { if (h) CloseHandle(h); }
+    };
+    thread_local Timer timer;
+    constexpr auto spin = microseconds(600);
+    for (;;) {
+        const auto left = t - steady_clock::now();
+        if (left <= steady_clock::duration::zero()) return;
+        if (left > spin && timer.h) {
+            LARGE_INTEGER due;
+            due.QuadPart = -static_cast<LONGLONG>(duration_cast<nanoseconds>(left - spin).count() / 100);
+            if (SetWaitableTimerEx(timer.h, &due, 0, nullptr, nullptr, nullptr, 0)) {
+                WaitForSingleObject(timer.h, INFINITE);
+                continue;
+            }
+        }
+        if (left > spin) std::this_thread::sleep_for(left - spin);
+        else SwitchToThread();
+    }
+#else
+    std::this_thread::sleep_until(t);
+#endif
+}
+
 OS current_os() {
 #if defined(_WIN32)
     return OS::Windows;

@@ -420,8 +420,8 @@ void App::draw_info_panel(ImVec2 pos, ImVec2 size) {
     section("HARDWARE");
     {
         kv("GPU microcode", s.ucode >= 0 && s.ucode < 7 ? kUcodeLong[s.ucode] : "Unknown");
-        static const char* abi[] = {"ABI 1", "ABI 2 (n_audio)", "Nintendo Audio (MK)", "Nintendo Audio (SF)", "Nintendo Audio (Zelda)"};
-        kv("Audio microcode", s.audio_abi >= 0 && s.audio_abi < 5 ? abi[s.audio_abi] : "Unknown");
+        static const char* abi[] = {"ABI 1", "n_audio", "Nintendo Audio (MK)", "Nintendo Audio (SF)", "Nintendo Audio (Zelda)", "MusyX (not emulated)"};
+        kv("Audio microcode", s.audio_abi >= 0 && s.audio_abi < 6 ? abi[s.audio_abi] : "Unknown");
         ImVec4 on = g_pal.success, off = g_pal.text_dim;
         kv("RSP", s.rsp_active ? "Active" : "Idle", s.rsp_active ? &on : &off);
         kv("RDP", s.rdp_active ? "Active" : "Idle", s.rdp_active ? &on : &off);

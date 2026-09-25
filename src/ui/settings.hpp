@@ -66,8 +66,8 @@ struct Settings {
     bool mute_on_fast_forward = true;
     bool mute_on_focus_loss = false;
     std::string audio_device;    // empty = system default
-    int sample_rate = 44100;
-    int buffer_frames = 1024;
+    int sample_rate = 48000;
+    int buffer_frames = 512;
 
     // Emulation
     int cpu_core = 1;        // 0 = Interpreter, 1 = Dynamic Recompiler (JIT)

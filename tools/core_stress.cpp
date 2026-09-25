@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
 
     ui::EmuCore core;
     core.set_cpu_core(interp ? 0 : 1);
-    core.set_audio_rate(48000);
+    core.set_audio_output(48000, 1024);
     std::string err;
     if (!core.start(rom, err)) {
         std::fprintf(stderr, "start failed: %s\n", err.c_str());

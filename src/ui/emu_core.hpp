@@ -8,6 +8,7 @@
 //   core -> UI  : latest video frame, live statistics
 
 #include <atomic>
+#include "../audio_stream.hpp"
 #include "../rdp.hpp"
 #include <condition_variable>
 #include <cstring>
@@ -97,6 +98,10 @@ struct CoreStats {
     bool rdp_active = false;
     int vi_hz = 60;
     std::uint32_t ai_rate = 0;  // native AI DAC rate, Hz (0 = unknown)
+    float audio_latency_ms = 0; // queued sound + the device buffer
+    float audio_target_ms = 0;  // what the pacing steers the queue to
+    std::uint64_t audio_underruns = 0;
+    float pacing_pct = 0;       // emulation speed trim that keeps the queue on target
     double uptime_s = 0;        // emulated wall time while running
     std::string cart_title;     // internal header name reported by the core
     std::string cic;
@@ -176,13 +181,16 @@ public:
 
     // Audio: called from the SDL audio thread. Always fills `count` floats.
     void pull_audio(float* out, std::size_t count, float volume);
-    void set_audio_rate(std::uint32_t rate);
+    // The host device: its rate and callback size (frames), rate 0 = none
+    // open. With a device the emulator paces itself to its clock.
+    void set_audio_output(std::uint32_t rate, std::uint32_t device_frames);
     float audio_peak() const { return audio_peak_.load(); }
 
 private:
     void thread_main();
     struct FrameClock;
     void run_one_frame(FrameClock& fc);
+    void log_pacing(FrameClock& fc);
     void apply_memory_writes();
     void publish_debug(std::uint64_t frame, bool frame_ran);
     void publish_frame(FrameClock& fc, int w, int h, int scale);
@@ -252,10 +260,14 @@ private:
     std::mutex stats_mutex_;
     CoreStats stats_;
 
-    // Guards emu_ lifetime against the audio callback.
+    // Held while the machine is replaced wholesale (reset, state load).
     std::mutex audio_mutex_;
-    std::uint32_t audio_rate_ = 44100;
+    // Sound on its way to the device: filled by the emulation thread (the
+    // AI), drained by the audio callback. Outlives every Emulator.
+    AudioStream audio_;
+    std::atomic<bool> audio_open_{false};
     std::atomic<float> audio_peak_{0.0f};
+    float audio_volume_ = 0.0f; // audio thread: last applied volume, ramped from
 };
 
 } // namespace ui

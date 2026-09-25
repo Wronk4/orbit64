@@ -101,6 +101,10 @@ add_executable(savestate_check EXCLUDE_FROM_ALL tools/savestate_check.cpp ${CHEC
 target_include_directories(savestate_check PRIVATE src third_party/stb)
 target_link_libraries(savestate_check PRIVATE Threads::Threads)
 
+# Host audio path checks (tools/audio_check.cpp), not built by default.
+add_executable(audio_check EXCLUDE_FROM_ALL tools/audio_check.cpp src/audio_stream.cpp)
+target_include_directories(audio_check PRIVATE src)
+
 # Optional RDP unit test (unchanged from the core project).
 add_executable(test_rdp EXCLUDE_FROM_ALL src/test_rdp.cpp src/rdp.cpp src/hires.cpp src/mi.cpp)
 target_include_directories(test_rdp PRIVATE src)

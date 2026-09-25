@@ -73,6 +73,17 @@ $(BUILD_DIR)/tools/core_stress.o: tools/core_stress.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
 
+# Host audio path checks: resampler quality and pacing (tools/audio_check.cpp).
+AUDIO_CHECK_TARGET := $(BIN_DIR)/audio_check$(EXE)
+.PHONY: audio_check
+audio_check: $(AUDIO_CHECK_TARGET)
+	./$(AUDIO_CHECK_TARGET)
+$(AUDIO_CHECK_TARGET): $(BUILD_DIR)/tools/audio_check.o $(BUILD_DIR)/audio_stream.o | $(BIN_DIR)
+	$(CXX) $^ -o $@
+$(BUILD_DIR)/tools/audio_check.o: tools/audio_check.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
+
 # Console tools without SDL keep their own main() (Windows: -Dmain=SDL_main above).
 $(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o \
 $(BUILD_DIR)/tools/savestate_check.o: CXXFLAGS += -Umain

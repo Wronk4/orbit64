@@ -274,6 +274,3 @@ bool Emulator::load_state(const std::vector<u8>& state, std::string& error) {
     return ok;
 }
 
-void Emulator::get_audio_samples(float* out_stream, size_t count) {
-    ai.get_samples(out_stream, count);
-}

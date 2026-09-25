@@ -2,7 +2,6 @@
 
 #include "common.hpp"
 #include <array>
-#include <unordered_map>
 
 // High-level emulation of the RSP audio microcode (the "audio command list"
 // / ALIST interpreter). Games submit an audio task (M_AUDTASK) whose DMEM
@@ -11,6 +10,15 @@
 // PCM buffer in RDRAM, which the CPU then hands to the AI for DMA playback.
 // This class reimplements that command list against a private DMEM-sized
 // scratch buffer, independent of the RSP's real DMEM/IMEM.
+//
+// Like the microcode, every command that carries state from one audio frame
+// to the next (ADPCM predictor history, resampler history and phase, the
+// envelope ramps, pole/FIR filter history) keeps it in RDRAM at the address
+// the game passes: the game owns that memory, restarts a voice by passing
+// A_INIT, and a save state captures it along with the rest of RDRAM.
+//
+// The microcode flavour is recognised from its data segment, the same
+// signature words the reference HLE implementations key on.
 class AudioHLE {
 public:
     void reset();
@@ -20,20 +28,32 @@ public:
     void process(u8* rdram, size_t rdram_size, u32 addr, u32 size, u32 ucode_data_ptr = 0);
 
     // Frontend status queries (read-only). ABI index follows AudioABI order:
-    // 0=ABI1, 1=ABI2, 2=NEAD_MK, 3=NEAD_SF, 4=NEAD_OOT.
-    int get_abi_index() const { return static_cast<int>(current_abi); }
+    // 0=ABI1, 1=n_audio, 2=NEAD (Mario Kart), 3=NEAD (Star Fox / F-Zero X),
+    // 4=NEAD (Zelda / Yoshi / 1080), 5=MusyX (not emulated: silent).
+    int get_abi_index() const;
     u64 get_task_count() const { return task_count; }
 
-    // Save states (savestate.hpp): everything a command list leaves behind
-    // for the next one.
+    // Save states (savestate.hpp): what one command list leaves behind for
+    // the next (the per-voice state lives in RDRAM, see above).
     template <class S> void serialize(S& s) {
-        s(scratch, segments, codebook, buf_in, buf_out, buf_count, buf_dry_right, buf_wet_left, buf_wet_right, vol,
-          target, rate, dry, wet, loop_addr, adpcm_state, envmix_state, resample_state, polef_state, current_abi,
-          task_count, envsetup2, nead_env_values, nead_env_steps, nead_filter_count, nead_filter_lut);
+        s(scratch, segments, table, in, out, count, dry_right, wet_left, wet_right, vol, target, rate, dry, wet, loop,
+          env_values, env_steps, filter_count, filter_lut, abi, task_count);
     }
 
+    enum class Abi : u8 {
+        Audio,      // libultra ABI 1 (Super Mario 64, Wave Race 64, Dr. Mario 64, ...)
+        AudioGE,    // ABI 1 with the GoldenEye / Blast Corps / Diddy Kong Racing envelope mixer
+        NAudio,     // n_audio (Rare and many third-party titles)
+        NAudioDK,   // n_audio, Donkey Kong 64 command table
+        NAudioMP3,  // n_audio with MP3 support (Banjo-Tooie, Perfect Dark, Jet Force Gemini, Conker)
+        NeadMK,     // Nintendo EAD: Mario Kart 64, Wave Race 64 (E)
+        NeadSF,     // Nintendo EAD: Star Fox 64, Wave Race 64 (J rev B)
+        NeadFZ,     // Nintendo EAD: F-Zero X
+        NeadZelda,  // Nintendo EAD: Zelda OoT/MM, Yoshi's Story, 1080, Animal Crossing, Pokemon Stadium 2
+        MusyX,      // Factor 5 MusyX: a different synthesizer altogether, not emulated
+    };
+
 private:
-    static constexpr u32 DMEM_BASE = 0x5C0;
     static constexpr size_t SCRATCH_SIZE = 0x1000;
 
     std::array<u8, SCRATCH_SIZE> scratch{};
@@ -41,163 +61,92 @@ private:
     // index into its segment table (see audio.s cmd_SEGMENT: `srl $2,$25,24`
     // with no further masking), so we size this to the full byte range.
     std::array<u32, 256> segments{};
-    std::array<s16, 256> codebook{};
+    // ADPCM codebook, also the pole filter's coefficients (LOADADPCM).
+    std::array<s16, 256> table{};
 
-    // State shared across commands within (and across) a command list, set
-    // up by SETBUFF/SETVOL/SEGMENT/SETLOOP and consumed by ADPCM/ENVMIXER/
-    // RESAMPLE/MIXER/INTERLEAVE.
-    u16 buf_in{0};
-    u16 buf_out{0};
-    u16 buf_count{0};
-    u16 buf_dry_right{0};
-    u16 buf_wet_left{0};
-    u16 buf_wet_right{0};
+    // Registers set by SETBUFF/SETVOL/SETLOOP and consumed by the others.
+    u16 in{0}, out{0}, count{0};
+    u16 dry_right{0}, wet_left{0}, wet_right{0};
     s16 vol[2]{0, 0};
     s16 target[2]{0, 0};
     s32 rate[2]{0, 0};
-    s16 dry{0};
-    s16 wet{0};
-    u32 loop_addr{0};
+    s16 dry{0}, wet{0};
+    u32 loop{0};
+    // Nintendo EAD envelope and filter setup.
+    u16 env_values[3]{0, 0, 0};
+    u16 env_steps[3]{0, 0, 0};
+    u16 filter_count{0};
+    u32 filter_lut[2]{0, 0};
+
+    Abi abi{Abi::Audio};
+    u64 task_count{0};
 
     u8* rdram_ptr{nullptr};
     size_t rdram_sz{0};
 
-    // State structures used both for local continuation caching and RDRAM
-    // serialization matching real hardware RSP DMA.
-    struct EnvmixState {
-        s16 dry{0};
-        s16 wet{0};
-        s64 target[2]{0, 0};
-        s64 value[2]{0, 0};
-        s32 exp_rate[2]{0, 0};
-        s32 exp_seq[2]{0, 0};
+    static Abi detect(const u8* rdram, size_t rdram_size, u32 ucode_data_ptr);
+    void dispatch(u32 acmd, u32 w1, u32 w2);
 
-        template <class S> void serialize(S& s) { s(dry, wet, target, value, exp_rate, exp_seq); }
-    };
-    struct ResampleState {
-        s16 hist[4]{0, 0, 0, 0};
-        u32 frac{0};
-    };
-    struct PolefState {
-        s16 hist[4]{0, 0, 0, 0};
-    };
-
-    std::unordered_map<u32, std::array<s16, 16>> adpcm_state;
-    std::unordered_map<u32, EnvmixState> envmix_state;
-    std::unordered_map<u32, ResampleState> resample_state;
-    std::unordered_map<u32, PolefState> polef_state;
-
-    // ABI selection
-    enum class AudioABI {
-        ABI1,       // Standard libultra audio (Super Mario 64, Wave Race 64, GoldenEye, DKR)
-        ABI2,       // N_AUDIO (Banjo-Kazooie, Donkey Kong 64, Conker, Perfect Dark)
-        NEAD_MK,    // Nintendo EAD Mario Kart 64
-        NEAD_SF,    // Nintendo EAD Star Fox 64 / F-Zero X
-        NEAD_OOT,   // Nintendo EAD Zelda Ocarina of Time / Majora's Mask
-    };
-    AudioABI current_abi{AudioABI::ABI1};
-    u64 task_count{0};
-
-    // ABI 2 specific state
-    struct EnvSetupABI2 {
-        s16 vol[2]{0, 0};
-        s16 delta[2]{0, 0};
-        s16 wet_vol[2]{0, 0};
-        s16 wet_delta[2]{0, 0};
-    } envsetup2{};
-
-    // NEAD specific state
-    uint16_t nead_env_values[3]{0, 0, 0};
-    uint16_t nead_env_steps[3]{0, 0, 0};
-    uint16_t nead_filter_count{0};
-    uint32_t nead_filter_lut[2]{0, 0};
-
-    // Scratch (DMEM-relative) accessors.
-    inline u8 scratch_u8(u16 off) const {
-        return scratch[off & (SCRATCH_SIZE - 1)];
+    // DMEM scratch accessors (big-endian, wrapped to the 4 KB DMEM).
+    u8 dmem_u8(u32 off) const { return scratch[off & (SCRATCH_SIZE - 1)]; }
+    void set_dmem_u8(u32 off, u8 v) { scratch[off & (SCRATCH_SIZE - 1)] = v; }
+    s16 dmem_s16(u32 off) const {
+        return static_cast<s16>((dmem_u8(off) << 8) | dmem_u8(off + 1));
     }
-    inline void set_scratch_u8(u16 off, u8 v) {
-        scratch[off & (SCRATCH_SIZE - 1)] = v;
+    void set_dmem_s16(u32 off, s16 v) {
+        set_dmem_u8(off, static_cast<u8>(static_cast<u16>(v) >> 8));
+        set_dmem_u8(off + 1, static_cast<u8>(v));
     }
-    inline s16 scratch_s16(u16 off) const {
-        off &= (SCRATCH_SIZE - 1);
-        return static_cast<s16>((scratch[off] << 8) | scratch[off + 1]);
-    }
-    inline void set_scratch_s16(u16 off, s16 v) {
-        off &= (SCRATCH_SIZE - 1);
-        scratch[off] = static_cast<u8>((static_cast<u16>(v) >> 8) & 0xFF);
-        scratch[off + 1] = static_cast<u8>(static_cast<u16>(v) & 0xFF);
-    }
+    // One 16-bit sample slot of DMEM by sample index (the resamplers' view).
+    s16 sample(u32 pos) const { return dmem_s16((pos & 0x7FF) * 2); }
+    void set_sample(u32 pos, s16 v) { set_dmem_s16((pos & 0x7FF) * 2, v); }
 
     // RDRAM accessors (big-endian, wrapped to RDRAM size).
-    u8 dram_u8(u32 addr) const;
-    void set_dram_u8(u32 addr, u8 v);
-    s16 dram_s16(u32 addr) const;
-    void set_dram_s16(u32 addr, s16 v);
-    u32 dram_u32(u32 addr) const;
+    u8 dram_u8(u32 addr) const { return rdram_ptr[addr & (rdram_sz - 1)]; }
+    void set_dram_u8(u32 addr, u8 v) { rdram_ptr[addr & (rdram_sz - 1)] = v; }
+    s16 dram_s16(u32 addr) const { return static_cast<s16>((dram_u8(addr) << 8) | dram_u8(addr + 1)); }
+    void set_dram_s16(u32 addr, s16 v) {
+        set_dram_u8(addr, static_cast<u8>(static_cast<u16>(v) >> 8));
+        set_dram_u8(addr + 1, static_cast<u8>(v));
+    }
+    s32 dram_s32(u32 addr) const {
+        return static_cast<s32>((static_cast<u32>(static_cast<u16>(dram_s16(addr))) << 16) |
+                                static_cast<u16>(dram_s16(addr + 2)));
+    }
+    void set_dram_s32(u32 addr, s32 v) {
+        set_dram_s16(addr, static_cast<s16>(static_cast<u32>(v) >> 16));
+        set_dram_s16(addr + 2, static_cast<s16>(v));
+    }
+    u32 dram_u32(u32 addr) const { return static_cast<u32>(dram_s32(addr)); }
 
-    u32 resolve_address(u32 seg_offset) const;
+    u32 segment_address(u32 so) const;
+    void load_table(u32 address, u32 entries);
 
-    void dispatch_abi1(u32 acmd, u32 w1, u32 w2);
-    void dispatch_abi2(u32 acmd, u32 w1, u32 w2);
-    void dispatch_nead_mk(u32 acmd, u32 w1, u32 w2);
-    void dispatch_nead_sf(u32 acmd, u32 w1, u32 w2);
-    void dispatch_nead_oot(u32 acmd, u32 w1, u32 w2);
+    // Building blocks shared by the microcode flavours; counts are in bytes
+    // unless named otherwise.
+    void clear(u16 dmem, u16 n);
+    void load(u16 dmem, u32 address, u16 n);
+    void save(u16 dmem, u32 address, u16 n);
+    void move(u16 dmemo, u16 dmemi, u16 n);
+    void mix(u16 dmemo, u16 dmemi, u16 n, s16 gain);
+    void add(u16 dmemo, u16 dmemi, u16 n);
+    void mult_q44(u16 dmem, u16 n, s8 gain);
+    void interleave(u16 dmemo, u16 left, u16 right, u16 n);
+    void copy_every_other_sample(u16 dmemo, u16 dmemi, u16 samples);
+    void repeat64(u16 dmemo, u16 dmemi, u8 times);
+    void copy_blocks(u16 dmemo, u16 dmemi, u16 block_size, u8 blocks);
+    void adpcm(bool init, bool loop_state, bool two_bit, u16 dmemo, u16 dmemi, u16 n, u32 state);
+    void resample(bool init, u16 dmemo, u16 dmemi, u16 n, u32 pitch, u32 state);
+    void resample_zoh(u16 dmemo, u16 dmemi, u16 n, u32 pitch, u32 pitch_accu);
+    void polef(bool init, u16 dmemo, u16 dmemi, u16 n, s16 gain, u32 state);
+    void iirf(bool init, u16 dmemo, u16 dmemi, u16 n, u32 state);
+    void fir_filter(bool init, u16 dmem, u16 n, u32 state);
+    void envmix_exp(bool init, bool aux, u32 state);
+    void envmix_ge(bool init, bool aux, u32 state);
+    void envmix_lin(bool init, u16 dl, u16 dr, u16 wl, u16 wr, u16 dmemi, u16 n, u32 state);
+    void envmix_nead(bool swap_wet, u16 dl, u16 dr, u16 wl, u16 wr, u16 dmemi, u32 samples, const s16 xors[4]);
 
-    // ABI 1 commands
-    void cmd_adpcm(u32 w1, u32 w2);
-    void cmd_clearbuff(u32 w1, u32 w2);
-    void cmd_envmixer(u32 w1, u32 w2);
-    void cmd_loadbuff(u32 w1, u32 w2);
-    void cmd_resample(u32 w1, u32 w2);
-    void cmd_savebuff(u32 w1, u32 w2);
-    void cmd_segment(u32 w1, u32 w2);
-    void cmd_setbuff(u32 w1, u32 w2);
-    void cmd_setvol(u32 w1, u32 w2);
-    void cmd_dmemmove(u32 w1, u32 w2);
-    void cmd_loadadpcm(u32 w1, u32 w2);
-    void cmd_mixer(u32 w1, u32 w2);
-    void cmd_interleave(u32 w1, u32 w2);
-    void cmd_polef(u32 w1, u32 w2);
-    void cmd_setloop(u32 w1, u32 w2);
-
-    // ABI 2 (N_AUDIO) commands
-    void cmd_adpcm_abi2(u32 w1, u32 w2);
-    void cmd_addmixer_abi2(u32 w1, u32 w2);
-    void cmd_resample_abi2(u32 w1, u32 w2);
-    void cmd_resample_zoh_abi2(u32 w1, u32 w2);
-    void cmd_dmemmove2_abi2(u32 w1, u32 w2);
-    void cmd_envsetup1_abi2(u32 w1, u32 w2);
-    void cmd_envsetup2_abi2(u32 w1, u32 w2);
-    void cmd_envmixer_abi2(u32 w1, u32 w2);
-    void cmd_loadbuff_abi2(u32 w1, u32 w2);
-    void cmd_savebuff_abi2(u32 w1, u32 w2);
-    void cmd_mixer_abi2(u32 w1, u32 w2);
-    void cmd_interleave_abi2(u32 w1, u32 w2);
-
-    // NEAD commands
-    void cmd_setbuff_nead(u32 w1, u32 w2);
-    void cmd_loadbuff_nead(u32 w1, u32 w2);
-    void cmd_savebuff_nead(u32 w1, u32 w2);
-    void cmd_clearbuff_nead(u32 w1, u32 w2);
-    void cmd_dmemmove_nead(u32 w1, u32 w2);
-    void cmd_loadadpcm_nead(u32 w1, u32 w2);
-    void cmd_mixer_nead(u32 w1, u32 w2);
-    void cmd_addmixer_nead(u32 w1, u32 w2);
-    void cmd_interleave_nead_mk(u32 w1, u32 w2);
-    void cmd_interleave_nead(u32 w1, u32 w2);
-    void cmd_polef_nead(u32 w1, u32 w2);
-    void cmd_nead16(u32 w1, u32 w2);
-    void cmd_interl_nead(u32 w1, u32 w2);
-    void cmd_envsetup1_nead_mk(u32 w1, u32 w2);
-    void cmd_envsetup1_nead(u32 w1, u32 w2);
-    void cmd_envsetup2_nead(u32 w1, u32 w2);
-    void cmd_envmixer_nead_mk(u32 w1, u32 w2);
-    void cmd_envmixer_nead(u32 w1, u32 w2);
-    void cmd_adpcm_nead(u32 w1, u32 w2);
-    void cmd_resample_nead(u32 w1, u32 w2);
-    void cmd_resample_zoh_nead(u32 w1, u32 w2);
-    void cmd_hilogain_nead(u32 w1, u32 w2);
-    void cmd_duplicate_nead(u32 w1, u32 w2);
-    void cmd_filter_nead(u32 w1, u32 w2);
+    void run_audio(u32 acmd, u32 w1, u32 w2);
+    void run_naudio(u32 acmd, u32 w1, u32 w2);
+    void run_nead(u32 acmd, u32 w1, u32 w2);
 };

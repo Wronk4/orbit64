@@ -229,7 +229,8 @@ void App::open_audio() {
     audio_dev_ = SDL_OpenAudioDevice(dev, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (!audio_dev_ && dev) audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (audio_dev_) {
-        core_.set_audio_rate(static_cast<std::uint32_t>(have.freq));
+        audio_freq_ = have.freq;
+        core_.set_audio_output(static_cast<std::uint32_t>(have.freq), have.samples);
         SDL_PauseAudioDevice(audio_dev_, 0);
     }
 }
@@ -237,6 +238,8 @@ void App::open_audio() {
 void App::close_audio() {
     if (audio_dev_) SDL_CloseAudioDevice(audio_dev_);
     audio_dev_ = 0;
+    audio_freq_ = 0;
+    core_.set_audio_output(0, 0);
 }
 
 void App::update_audio_volume() {

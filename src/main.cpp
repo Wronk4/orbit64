@@ -62,6 +62,19 @@ static bool save_bmp(const std::string& filename, const u32* pixels, int width, 
     return true;
 }
 
+static bool save_wav(const std::string& filename, const std::vector<s16>& samples, u32 rate) {
+    std::ofstream f(filename, std::ios::binary);
+    if (!f.is_open()) return false;
+    auto u32le = [&](u32 v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+    auto u16le = [&](u16 v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+    const u32 data_bytes = static_cast<u32>(samples.size() * 2);
+    f.write("RIFF", 4); u32le(36 + data_bytes); f.write("WAVE", 4);
+    f.write("fmt ", 4); u32le(16); u16le(1); u16le(2); u32le(rate); u32le(rate * 4); u16le(4); u16le(16);
+    f.write("data", 4); u32le(data_bytes);
+    f.write(reinterpret_cast<const char*>(samples.data()), data_bytes);
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     std::string rom_path;
     bool headless = false;
@@ -77,6 +90,7 @@ int main(int argc, char* argv[]) {
     bool jit_stats = false;
     std::string profile_path;
     bool use_save_file = true;
+    std::string wav_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -105,6 +119,8 @@ int main(int argc, char* argv[]) {
             jit_stats = true;
         } else if (arg == "--no-save") {
             use_save_file = false; // don't read or write the .sav next to the ROM
+        } else if (arg == "--wav" && i + 1 < argc) {
+            wav_path = argv[++i]; // raw AI output (native rate, s16 stereo) of the run
         } else if (arg == "--profile" && i + 1 < argc) {
             profile_path = argv[++i]; // sampling profile of the run, see src/profiler.hpp
         } else if (arg == "--mash" && i + 1 < argc) {
@@ -162,6 +178,8 @@ int main(int argc, char* argv[]) {
     else if (cpu_core_arg == "jit") emu.set_cpu_core(CpuCore::Recompiler);
     emu.get_jit().set_stats_enabled(jit_stats);
     emu.set_profiling(jit_stats);
+    std::vector<s16> wav_samples;
+    if (!wav_path.empty()) emu.get_ai().set_capture(&wav_samples);
     const auto run_start = std::chrono::steady_clock::now();
 
     std::vector<u32> frame_pixels;
@@ -222,6 +240,17 @@ int main(int argc, char* argv[]) {
                 std::cout << "[Main] time split: cpu=" << emu.prof_cpu_seconds() << "s, ai/vi/rsp/rdp="
                           << emu.prof_other_seconds() << "s\n";
                 if (emu.cpu_core() == CpuCore::Recompiler) emu.get_jit().print_stats(std::cout);
+            }
+        }
+
+        if (!wav_path.empty()) {
+            const u32 rate = emu.get_ai().get_native_sample_rate();
+            u64 hash = 0xCBF29CE484222325ULL;
+            for (s16 v : wav_samples) hash = (hash ^ static_cast<u16>(v)) * 0x100000001B3ULL;
+            if (save_wav(wav_path, wav_samples, rate ? rate : 32000)) {
+                std::cout << "[Main] Audio: " << wav_samples.size() / 2 << " frames @ " << rate << " Hz, abi="
+                          << emu.get_rsp().get_audio_hle().get_abi_index() << " hash=" << std::hex << hash << std::dec
+                          << " -> " << wav_path << "\n";
             }
         }
 

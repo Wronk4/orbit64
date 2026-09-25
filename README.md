@@ -44,6 +44,23 @@ tools/jit_bench.sh 600 --stats # every ROM in the project folder: fps, CPU vs RS
   by one. Check any change to it with `make rdp_check` against a build without the change (`--frame-log` finds the
   first frame that differs).
 
+## Audio
+
+- **Microcode HLE** (`src/ahle.*`): the audio command lists of the libultra ABI 1 microcode (and its GoldenEye /
+  Diddy Kong Racing variant), n_audio (Rare and many third-party games) and the Nintendo EAD microcodes (Mario Kart 64,
+  Star Fox 64 / F-Zero X, Zelda / Yoshi / 1080) are run with the microcode's own DMEM layouts, rounding and saturation.
+  Per-voice state (ADPCM history, resampler phase, envelopes, filters) lives in RDRAM where the game points it, as on
+  hardware. MusyX games are recognised but not emulated yet (silent).
+- **Output** (`src/audio_stream.*`): the samples the game hands to the DAC go through a lock-free queue to the audio
+  callback, which resamples them to the device rate with a 32-tap windowed-sinc filter. The pitch is never bent to
+  absorb clock drift: at normal speed the emulator runs up to 3% faster or slower to keep the queue on target
+  (Settings › Audio shows the resulting latency and any dropouts).
+- **Checks:** `--wav out.wav` in `--headless` mode saves the raw DAC stream (native rate) with a hash of it;
+  `python tools/audio_report.py out.wav --png spec.png` reports level, clipping and clicks and draws a spectrogram;
+  `make audio_check` tests the resampler (tones at every native/device rate pair) and simulates the pacing against a
+  drifting device clock. `ORBIT64_PACING_LOG=<file>` makes the GUI log frame timing, queue level and dropouts once a
+  second.
+
 ## Running
 
 ```

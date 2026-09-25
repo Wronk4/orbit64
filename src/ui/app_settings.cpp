@@ -358,6 +358,25 @@ void App::settings_audio() {
     }
     row_end();
 
+    row_begin("Latency", "Sound waiting to be played, including the device buffer. A dropout is a moment the "
+                         "emulator fell behind and the sound paused briefly.", cw);
+    {
+        const CoreStats st = core_.stats();
+        ImGui::PushFont(g_fonts.mono);
+        if (core_.state() == RunState::Running && audio_dev_ && st.audio_latency_ms > 0.0f) {
+            ImGui::Text("%.0f ms", st.audio_latency_ms);
+            ImGui::SameLine();
+            ImGui::TextColored(g_pal.text_dim, "%.1f kHz", audio_freq_ / 1000.0);
+            ImGui::SameLine();
+            ImGui::TextColored(st.audio_underruns ? g_pal.warning : g_pal.text_dim, "%llu dropout%s",
+                               static_cast<unsigned long long>(st.audio_underruns), st.audio_underruns == 1 ? "" : "s");
+        } else {
+            ImGui::TextColored(g_pal.text_dim, "%s", "\xE2\x80\x94");
+        }
+        ImGui::PopFont();
+    }
+    row_end();
+
     row_begin("Output device", "Where sound is played. System default follows your OS settings.", cw);
     {
         std::vector<const char*> items = {"System default"};
@@ -373,7 +392,8 @@ void App::settings_audio() {
     }
     row_end();
 
-    row_begin("Sample rate", "Rate of the host output stream; the N64 audio is resampled to it.", cw);
+    row_begin("Sample rate", "Preferred rate of the output stream; the N64 audio is resampled to it. The device's own "
+                              "rate is used when it can't be changed.", cw);
     {
         const char* items[] = {"44.1 kHz", "48 kHz"};
         int cur = settings_.sample_rate == 48000 ? 1 : 0;
@@ -389,7 +409,7 @@ void App::settings_audio() {
         const int sizes[] = {256, 512, 1024, 2048, 4096};
         char labels[5][40];
         const char* items[5];
-        int cur = 2;
+        int cur = 1;
         for (int i = 0; i < 5; ++i) {
             std::snprintf(labels[i], sizeof labels[i], "%d samples (%.0f ms)", sizes[i], sizes[i] * 1000.0 / settings_.sample_rate);
             items[i] = labels[i];

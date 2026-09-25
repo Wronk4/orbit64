@@ -7,6 +7,8 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 namespace ui {
 
@@ -47,6 +49,14 @@ struct EmuCore::FrameClock {
     std::uint64_t frame_counter = 0;
     std::uint64_t last_gfx = 0, last_audio = 0, last_dl = 0;
     double uptime = 0.0;
+    bool normal_speed = true;
+    double pacing = 0.0; // last audio pacing trim (relative frame period change)
+    // ORBIT64_PACING_LOG=<file>: one line per second of pacing and audio
+    // figures, for measuring smoothness on a real device.
+    std::FILE* log = nullptr;
+    Clock::time_point log_start = Clock::now(), log_window = Clock::now(), last_frame_end = Clock::now();
+    int log_frames = 0;
+    double log_max_gap_ms = 0.0, log_sum_gap_ms = 0.0, log_sum_gap2 = 0.0;
 };
 
 bool EmuCore::start(const std::filesystem::path& rom, std::string& error) {
@@ -56,7 +66,8 @@ bool EmuCore::start(const std::filesystem::path& rom, std::string& error) {
         error = "The file could not be read or is not a valid Nintendo 64 ROM.";
         return false;
     }
-    emu->set_audio_output_rate(audio_rate_);
+    emu->get_ai().set_sink(&audio_);
+    audio_.flush();
 
     {
         std::lock_guard<std::mutex> lk(stats_mutex_);
@@ -119,6 +130,7 @@ void EmuCore::stop() {
         std::lock_guard<std::mutex> lk(poke_mutex_);
         pokes_.clear();
     }
+    audio_.flush();
     audio_peak_ = 0.0f;
     std::lock_guard<std::mutex> lk(stats_mutex_);
     stats_.fps = 0;
@@ -241,6 +253,7 @@ bool EmuCore::load_state_now(const std::vector<std::uint8_t>& state, FrameClock&
         std::lock_guard<std::mutex> al(audio_mutex_);
         if (!emu_->load_state(state, error)) return false;
     }
+    audio_.flush(); // what was queued belongs to the machine that was replaced
     // Show the loaded machine right away, also while paused.
     int w = 0, h = 0, scale = 1;
     emu_->render_frame(fc.pixels, w, h, &scale);
@@ -327,25 +340,27 @@ CoreStats EmuCore::stats() {
     return stats_;
 }
 
-void EmuCore::set_audio_rate(std::uint32_t rate) {
-    std::lock_guard<std::mutex> lk(audio_mutex_);
-    audio_rate_ = rate;
-    if (emu_) emu_->set_audio_output_rate(rate);
+void EmuCore::set_audio_output(std::uint32_t rate, std::uint32_t device_frames) {
+    audio_.configure(rate, device_frames);
+    audio_open_ = rate != 0;
 }
 
 void EmuCore::pull_audio(float* out, std::size_t count, float volume) {
-    std::unique_lock<std::mutex> lk(audio_mutex_, std::try_to_lock);
-    if (!lk.owns_lock() || !emu_ || state_ != RunState::Running) {
-        std::fill(out, out + count, 0.0f);
-        audio_peak_ = audio_peak_.load() * 0.85f;
-        return;
-    }
-    emu_->get_audio_samples(out, count);
+    const std::size_t frames = count / 2;
+    audio_.set_playing(state_ == RunState::Running);
+    audio_.pull(out, frames);
+    // Volume changes (slider, mute on focus loss) ramp over the buffer
+    // instead of stepping, which would click.
+    const float v0 = audio_volume_;
+    const float dv = frames ? (volume - v0) / static_cast<float>(frames) : 0.0f;
     float peak = 0.0f;
-    for (std::size_t i = 0; i < count; ++i) {
-        out[i] *= volume;
-        peak = std::fmax(peak, std::fabs(out[i]));
+    for (std::size_t i = 0; i < frames; ++i) {
+        const float v = v0 + dv * static_cast<float>(i + 1);
+        out[i * 2] *= v;
+        out[i * 2 + 1] *= v;
+        peak = std::fmax(peak, std::fmax(std::fabs(out[i * 2]), std::fabs(out[i * 2 + 1])));
     }
+    audio_volume_ = volume;
     // Fast attack, slow release for a pleasant meter.
     float prev = audio_peak_.load();
     audio_peak_ = peak > prev ? peak : prev * 0.9f + peak * 0.1f;
@@ -506,6 +521,11 @@ void EmuCore::run_one_frame(FrameClock& fc) {
         stats_.audio_abi = aud > 0 ? rsp.get_audio_hle().get_abi_index() : -1;
         stats_.vi_hz = vi_hz;
         stats_.ai_rate = emu_->get_ai().get_native_sample_rate();
+        const AudioStream::Stats as = audio_.stats();
+        stats_.audio_latency_ms = static_cast<float>(as.latency_ms);
+        stats_.audio_target_ms = static_cast<float>(as.target_ms);
+        stats_.audio_underruns = as.underruns;
+        stats_.pacing_pct = static_cast<float>(-fc.pacing * 100.0);
         fc.last_gfx = gfx;
         fc.last_audio = aud;
         fc.last_dl = dl;
@@ -528,8 +548,34 @@ void EmuCore::publish_frame(FrameClock& fc, int w, int h, int scale) {
     frame_serial_++;
 }
 
+void EmuCore::log_pacing(FrameClock& fc) {
+    const auto now = Clock::now();
+    const double gap = std::chrono::duration<double, std::milli>(now - fc.last_frame_end).count();
+    fc.last_frame_end = now;
+    fc.log_frames++;
+    fc.log_sum_gap_ms += gap;
+    fc.log_sum_gap2 += gap * gap;
+    fc.log_max_gap_ms = std::max(fc.log_max_gap_ms, gap);
+    if (now - fc.log_window < std::chrono::seconds(1)) return;
+    const AudioStream::Stats a = audio_.stats();
+    const double n = fc.log_frames, avg = fc.log_sum_gap_ms / n;
+    std::fprintf(fc.log, "%.1f %d %.3f %.3f %.2f %.1f %.1f %.1f %llu %llu %+.3f\n",
+                 std::chrono::duration<double>(now - fc.log_start).count(), fc.log_frames, avg,
+                 std::sqrt(std::max(0.0, fc.log_sum_gap2 / n - avg * avg)), fc.log_max_gap_ms, a.queued_ms, a.target_ms,
+                 a.latency_ms, static_cast<unsigned long long>(a.underruns),
+                 static_cast<unsigned long long>(a.dropped_frames), -fc.pacing * 100.0);
+    std::fflush(fc.log);
+    fc.log_window = now;
+    fc.log_frames = 0;
+    fc.log_sum_gap_ms = fc.log_sum_gap2 = fc.log_max_gap_ms = 0.0;
+}
+
 void EmuCore::thread_main() {
     FrameClock fc;
+    if (const char* path = std::getenv("ORBIT64_PACING_LOG")) {
+        fc.log = std::fopen(path, "w");
+        if (fc.log) std::fprintf(fc.log, "t_s frames gap_avg_ms gap_sd_ms gap_max_ms queued_ms target_ms latency_ms underruns dropped trim_pct\n");
+    }
     while (!quit_) {
         if (state_ == RunState::Paused) {
             {
@@ -542,6 +588,7 @@ void EmuCore::thread_main() {
             if (reset_req_) {
                 std::lock_guard<std::mutex> al(audio_mutex_);
                 emu_->reset();
+                audio_.flush();
                 reset_req_ = false;
                 fc.frame_counter = 0;
                 debug_dirty_ = true;
@@ -575,6 +622,7 @@ void EmuCore::thread_main() {
         if (reset_req_) {
             std::lock_guard<std::mutex> al(audio_mutex_);
             emu_->reset();
+            audio_.flush();
             reset_req_ = false;
             fc.frame_counter = 0;
             fc.uptime = 0.0;
@@ -582,6 +630,7 @@ void EmuCore::thread_main() {
         process_state_requests(fc);
         debug_dirty_ = false;
         run_one_frame(fc);
+        if (fc.log) log_pacing(fc);
 
         // Frame pacing: console refresh rate, a user FPS limit, or unlimited.
         const int vi_hz = static_cast<int>(emu_->get_vi().get_refresh_hz());
@@ -589,17 +638,32 @@ void EmuCore::thread_main() {
         const double period = 1.0 / (limit > 0 ? limit : vi_hz);
         bool ff = fast_forward_.load() || turbo_.load();
         int mult = ff_multiplier_.load();
+        // Sound queued at another speed is stale once normal speed is back:
+        // start the queue over rather than carry the extra latency.
+        const bool normal_speed = limit_speed_ && !ff && limit <= 0;
+        if (normal_speed && !fc.normal_speed) audio_.flush();
+        fc.normal_speed = normal_speed;
         if (!limit_speed_ || (ff && mult == 0)) {
             fc.next = Clock::now();
             continue;
         }
         double target = ff ? period / mult : period;
+        // At the console's own speed the emulator follows the sound device's
+        // clock: a slightly longer or shorter frame keeps the audio queue on
+        // target without ever bending the pitch.
+        fc.pacing = (normal_speed && audio_open_) ? audio_.pacing_adjust() : 0.0;
+        target *= 1.0 + fc.pacing;
         fc.next += std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(target));
         auto now = Clock::now();
         if (fc.next < now - std::chrono::milliseconds(100)) fc.next = now; // running slow: don't spiral
-        std::unique_lock<std::mutex> lk(wake_mutex_);
-        wake_.wait_until(lk, fc.next, [&] { return quit_.load() || state_ == RunState::Paused; });
+        // In slices, so a pause or quit still takes effect promptly.
+        while (!quit_ && state_ != RunState::Paused) {
+            const auto t = Clock::now();
+            if (t >= fc.next) break;
+            platform::sleep_until_precise(std::min(fc.next, t + std::chrono::milliseconds(20)));
+        }
     }
+    if (fc.log) std::fclose(fc.log);
 }
 
 } // namespace ui

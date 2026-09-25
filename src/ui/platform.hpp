@@ -7,6 +7,7 @@
 // conversion. The rest of the UI only ever talks to these functions, so no
 // other file needs an #ifdef.
 
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -20,6 +21,13 @@ enum class OS { Windows, MacOS, Linux, Other };
 
 OS current_os();
 const char* os_display_name();
+
+// ---- Timing ----------------------------------------------------------------
+// Sleeps until `t` with sub-millisecond precision. On Windows the ordinary
+// waits round to the system timer (15.6 ms unless raised, and Windows 11
+// doesn't raise it for a window that is hidden or minimized): this uses a
+// high-resolution waitable timer and spins the last fraction of a ms.
+void sleep_until_precise(std::chrono::steady_clock::time_point t);
 
 // ---- Paths ---------------------------------------------------------------
 // UTF-8 safe conversions (std::filesystem uses wchar_t on Windows).
