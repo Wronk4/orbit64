@@ -1,0 +1,59 @@
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <array>
+#include <iostream>
+#include <iomanip>
+#include <algorithm>
+#include <memory>
+#include <cmath>
+
+using u8  = std::uint8_t;
+using u16 = std::uint16_t;
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+
+using s8  = std::int8_t;
+using s16 = std::int16_t;
+using s32 = std::int32_t;
+using s64 = std::int64_t;
+
+using f32 = float;
+using f64 = double;
+
+// Endianness swap helpers
+#if defined(_MSC_VER)
+#include <cstdlib>
+inline u16 bswap16(u16 v) { return _byteswap_ushort(v); }
+inline u32 bswap32(u32 v) { return _byteswap_ulong(v); }
+inline u64 bswap64(u64 v) { return _byteswap_uint64(v); }
+#else
+inline u16 bswap16(u16 v) { return __builtin_bswap16(v); }
+inline u32 bswap32(u32 v) { return __builtin_bswap32(v); }
+inline u64 bswap64(u64 v) { return __builtin_bswap64(v); }
+#endif
+
+// System constants
+constexpr u64 CPU_CLOCK_RATE = 93750000ULL; // 93.75 MHz
+constexpr u64 CYCLES_PER_FRAME = CPU_CLOCK_RATE / 60; // 1,562,500 cycles per frame at 60Hz
+constexpr u64 AI_VIDEO_CLOCK_NTSC = 48681812ULL; // Video clock used to derive the AI DAC sample rate
+constexpr u32 RDRAM_SIZE = 8 * 1024 * 1024; // 8 MB RDRAM (Expansion Pak)
+constexpr u32 DMEM_SIZE = 4096;
+constexpr u32 IMEM_SIZE = 4096;
+constexpr u32 PIF_ROM_SIZE = 2048;
+constexpr u32 PIF_RAM_SIZE = 64;
+
+// Sign extension helpers
+inline s64 sign_extend_32_64(s32 val) {
+    return static_cast<s64>(val);
+}
+inline s64 sign_extend_16_64(s16 val) {
+    return static_cast<s64>(val);
+}
+inline s64 sign_extend_8_64(s8 val) {
+    return static_cast<s64>(val);
+}

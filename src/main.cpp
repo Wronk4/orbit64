@@ -1,0 +1,209 @@
+#include "emulator.hpp"
+#include "ui/app.hpp"
+#include <SDL.h>
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <chrono>
+#include <thread>
+#include <limits>
+
+namespace fs = std::filesystem;
+
+static bool save_bmp(const std::string& filename, const u32* pixels, int width, int height) {
+    std::ofstream f(filename, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    u32 file_size = 54 + (width * height * 4);
+    u32 data_offset = 54;
+    u32 header_size = 40;
+    u16 planes = 1;
+    u16 bpp = 32;
+
+    // Bitmap File Header
+    f.put('B').put('M');
+    f.write(reinterpret_cast<const char*>(&file_size), 4);
+    u32 reserved = 0;
+    f.write(reinterpret_cast<const char*>(&reserved), 4);
+    f.write(reinterpret_cast<const char*>(&data_offset), 4);
+
+    // DIB Header
+    f.write(reinterpret_cast<const char*>(&header_size), 4);
+    f.write(reinterpret_cast<const char*>(&width), 4);
+    f.write(reinterpret_cast<const char*>(&height), 4);
+    f.write(reinterpret_cast<const char*>(&planes), 2);
+    f.write(reinterpret_cast<const char*>(&bpp), 2);
+    u32 compression = 0;
+    f.write(reinterpret_cast<const char*>(&compression), 4);
+    u32 image_size = width * height * 4;
+    f.write(reinterpret_cast<const char*>(&image_size), 4);
+    u32 ppm = 2835;
+    f.write(reinterpret_cast<const char*>(&ppm), 4);
+    f.write(reinterpret_cast<const char*>(&ppm), 4);
+    u32 colors = 0;
+    f.write(reinterpret_cast<const char*>(&colors), 4);
+    f.write(reinterpret_cast<const char*>(&colors), 4);
+
+    // Pixels (BMP stores bottom-to-top, BGRA)
+    for (int y = height - 1; y >= 0; --y) {
+        for (int x = 0; x < width; ++x) {
+            u32 pixel = pixels[y * width + x];
+            u8 b = pixel & 0xFF;
+            u8 g = (pixel >> 8) & 0xFF;
+            u8 r = (pixel >> 16) & 0xFF;
+            u8 a = (pixel >> 24) & 0xFF;
+            f.put(b).put(g).put(r).put(a);
+        }
+    }
+
+    return true;
+}
+
+int main(int argc, char* argv[]) {
+    std::string rom_path;
+    bool headless = false;
+    std::string ui_test_dir;
+    int headless_frames = 180;
+    int internal_scale = 1;
+    std::string screenshot_path;
+    std::string dump_ram_path;
+    std::string mash_btn;
+    std::vector<std::pair<int, std::string>> scheduled_presses;
+    std::vector<std::pair<int, std::string>> scheduled_screenshots;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--headless" && i + 1 < argc) {
+            headless = true;
+            headless_frames = std::stoi(argv[++i]);
+        } else if (arg == "--scale" && i + 1 < argc) {
+            internal_scale = std::stoi(argv[++i]);
+        } else if (arg == "--screenshot" && i + 1 < argc) {
+            screenshot_path = argv[++i];
+        } else if (arg == "--screenshot-at" && i + 1 < argc) {
+            std::string p = argv[++i];
+            size_t colon = p.find(':');
+            if (colon != std::string::npos) {
+                int frame = std::stoi(p.substr(0, colon));
+                std::string path = p.substr(colon + 1);
+                scheduled_screenshots.emplace_back(frame, path);
+            }
+        } else if (arg == "--ui-test" && i + 1 < argc) {
+            ui_test_dir = argv[++i];
+        } else if (arg == "--dump-ram" && i + 1 < argc) {
+            dump_ram_path = argv[++i];
+        } else if (arg == "--mash" && i + 1 < argc) {
+            mash_btn = argv[++i];
+        } else if (arg == "--press" && i + 1 < argc) {
+            std::string p = argv[++i];
+            size_t colon = p.find(':');
+            if (colon != std::string::npos) {
+                int frame = std::stoi(p.substr(0, colon));
+                std::string btn = p.substr(colon + 1);
+                scheduled_presses.emplace_back(frame, btn);
+            }
+        } else if (rom_path.empty() && arg[0] != '-') {
+            rom_path = arg;
+        }
+    }
+
+    if (!headless) {
+        // Graphical frontend. A ROM passed on the command line starts immediately;
+        // otherwise the game library is shown.
+        ui::App app;
+        if (!ui_test_dir.empty()) app.enable_ui_test(ui_test_dir);
+        return app.run(rom_path);
+    }
+
+    if (rom_path.empty()) {
+        std::vector<std::string> found_roms;
+        for (const auto& entry : fs::directory_iterator(".")) {
+            if (entry.is_regular_file()) {
+                std::string ext = entry.path().extension().string();
+                if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
+                    found_roms.push_back(entry.path().string());
+                }
+            }
+        }
+        if (found_roms.empty()) {
+            std::cerr << "Usage: n64 [rom_file] [--headless <frames>] [--scale <1-8>] [--screenshot <path.bmp>] [--mash <btn>] [--press <frame:btn>]\n";
+            return 1;
+        }
+        std::sort(found_roms.begin(), found_roms.end());
+        // Non-interactive mode: just pick the first ROM found.
+        rom_path = found_roms[0];
+        std::cout << "[Main] No ROM specified, using: " << rom_path << "\n";
+    }
+
+    Emulator emu;
+    if (!emu.load_rom(rom_path)) {
+        std::cerr << "[Main] Failed to load ROM: " << rom_path << "\n";
+        return 1;
+    }
+    // Internal resolution of the RDP (screenshots come out that many times larger).
+    emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
+
+    std::vector<u32> frame_pixels;
+    int frame_w = 320, frame_h = 240;
+
+    if (headless) {
+        std::cout << "[Main] Running in headless mode for " << headless_frames << " frames...\n";
+        for (int frame = 0; frame < headless_frames; ++frame) {
+            // Apply scheduled button presses
+            for (const auto& sp : scheduled_presses) {
+                if (frame == sp.first) {
+                    std::cout << "[Main] Frame " << frame << ": Pressing " << sp.second << "\n";
+                    emu.get_controller(0).press_named_button(sp.second, true);
+                } else if (frame == sp.first + 10) {
+                    emu.get_controller(0).press_named_button(sp.second, false);
+                }
+            }
+
+            // Apply mashing
+            if (!mash_btn.empty()) {
+                bool state = ((frame / 6) % 2) == 0;
+                emu.get_controller(0).press_named_button(mash_btn, state);
+            }
+
+            emu.step_frame();
+
+            for (const auto& ss : scheduled_screenshots) {
+                if (frame == ss.first) {
+                    emu.render_frame(frame_pixels, frame_w, frame_h);
+                    if (save_bmp(ss.second, frame_pixels.data(), frame_w, frame_h)) {
+                        std::cout << "[Main] Scheduled screenshot saved to: " << ss.second << " (frame " << frame << ")\n";
+                    }
+                }
+            }
+
+            if (frame % 60 == 0) {
+                std::cout << "[Main] Frame " << frame << " / " << headless_frames << "\n";
+            }
+        }
+
+        emu.render_frame(frame_pixels, frame_w, frame_h);
+
+        if (!screenshot_path.empty()) {
+            if (save_bmp(screenshot_path, frame_pixels.data(), frame_w, frame_h)) {
+                std::cout << "[Main] Screenshot saved to: " << screenshot_path << "\n";
+            } else {
+                std::cerr << "[Main] Failed to save screenshot to: " << screenshot_path << "\n";
+            }
+        }
+
+        if (!dump_ram_path.empty()) {
+            std::ofstream f(dump_ram_path, std::ios::binary);
+            if (f.is_open()) {
+                f.write(reinterpret_cast<const char*>(emu.get_bus().get_rdram()), emu.get_bus().get_rdram_size());
+                std::cout << "[Main] RAM dumped to: " << dump_ram_path << " (" << emu.get_bus().get_rdram_size() << " bytes)\n";
+            } else {
+                std::cerr << "[Main] Failed to dump RAM to: " << dump_ram_path << "\n";
+            }
+        }
+
+        std::cout << "[Main] Headless run completed successfully.\n";
+        return 0;
+    }
+}

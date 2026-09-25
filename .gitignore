@@ -1,0 +1,19 @@
+# Build output
+build/
+bin/
+out/
+
+# ROMs, saves, and other emulator run artifacts (not source, often copyrighted)
+*.z64
+*.n64
+*.sav
+*.ram
+*.bmp
+*.bin
+
+# OS/editor cruft
+.DS_Store
+*.gch
+
+# Backups
+backup_before_*/

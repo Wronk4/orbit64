@@ -1,0 +1,2789 @@
+#include "rdp.hpp"
+#include "mi.hpp"
+#include <algorithm>
+#include <climits>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <unordered_set>
+
+static u32 stat_tri_called = 0;
+static u32 stat_incount[4] = {0, 0, 0, 0};
+static u32 stat_rast_called = 0;
+static u32 stat_cull_back = 0;
+static u32 stat_cull_front = 0;
+static u32 stat_scissor_reject = 0;
+static u32 stat_pixels_drawn = 0;
+static u32 stat_pixels_z_fail = 0;
+static u32 stat_pixels_a_fail = 0;
+
+// SHIFT_S/T applied to a texture coordinate (used by the debugger capture;
+// the rasterizer uses raster::TexUnit).
+static inline f32 apply_tile_shift(f32 coord, u8 shift) {
+    if (shift == 0) return coord;
+    if (shift > 10) {
+        return coord * static_cast<f32>(1 << (16 - shift));
+    } else {
+        return coord / static_cast<f32>(1 << shift);
+    }
+}
+
+// Hands the pixels a draw produces at native resolution to write_pixel().
+struct RDP::NativeSink {
+    RDP& rdp;
+    const DrawState& st;
+    u8* rdram;
+    size_t rdram_size;
+    void write(u32 x, u32 y, u32 color, f32 z) { rdp.write_pixel(st, x, y, color, z, rdram, rdram_size); }
+};
+
+Matrix4x4 Matrix4x4::identity() {
+    Matrix4x4 res{};
+    for (int i = 0; i < 4; ++i) res.m[i][i] = 1.0f;
+    return res;
+}
+
+Matrix4x4 Matrix4x4::multiply(const Matrix4x4& a, const Matrix4x4& b) {
+    Matrix4x4 res{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            res.m[i][j] = a.m[i][0] * b.m[0][j] +
+                          a.m[i][1] * b.m[1][j] +
+                          a.m[i][2] * b.m[2][j] +
+                          a.m[i][3] * b.m[3][j];
+        }
+    }
+    return res;
+}
+
+void Matrix4x4::transform_point(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz, f32& ow) const {
+    ox = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
+    oy = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
+    oz = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
+    ow = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
+    if (ow == 0.0f) ow = 0.0001f;
+}
+
+RDP::RDP() {
+    reset();
+}
+
+RDP::~RDP() = default;
+
+void RDP::reset() {
+    dpc_start = 0;
+    dpc_end = 0;
+    dpc_current = 0;
+    dpc_status = 0;
+    dpc_clock = 0;
+    dpc_bufbusy = 0;
+    dpc_pipebusy = 0;
+    dpc_tmem = 0;
+
+    dps_tbist = 0;
+    dps_test_mode = 0;
+    dps_buftest_addr = 0;
+    dps_buftest_data = 0;
+
+    std::fill(segments.begin(), segments.end(), 0);
+    modelview_stack.clear();
+    modelview_stack.push_back(Matrix4x4::identity());
+    projection_matrix = Matrix4x4::identity();
+    combined_matrix = Matrix4x4::identity();
+    combined_matrix_dirty = false;
+
+    std::fill(tmem.begin(), tmem.end(), 0);
+    std::fill(tmem_word_dxt_zero.begin(), tmem_word_dxt_zero.end(), false);
+    for (auto& t : tiles) t = {};
+    active_tile = 0;
+
+    timg_addr = 0;
+    timg_format = 0;
+    timg_size = 0;
+    timg_width = 0;
+
+    color_image_addr = 0;
+    color_image_format = 0;
+    color_image_size = 2;
+    color_image_width = 320;
+    depth_image_addr = 0;
+
+    fill_color = 0;
+    prim_color = 0xFFFFFFFF;
+    env_color = 0xFFFFFFFF;
+    blend_color = 0;
+    fog_color = 0;
+    prim_depth = 0;
+    prim_dz = 0;
+    geometry_mode = 0;
+    texture_enabled = true;
+    texture_scale_s = 1.0f;
+    texture_scale_t = 1.0f;
+
+    combine_mode_w0 = 0;
+    combine_mode_w1 = 0;
+    combine_mode_set = false;
+
+    other_mode_l = 0x00000030; // Z_CMP | Z_UPD enabled by default
+    other_mode_h = 0;
+
+    vp_scale_x = 160.0f; vp_scale_y = 120.0f; vp_scale_z = 511.5f;
+    vp_trans_x = 160.0f; vp_trans_y = 120.0f; vp_trans_z = 511.5f;
+
+    ambient_light = {128, 128, 128, 0, 0, 0};
+    lookat_x = {0, 0, 0, 1.0f, 0.0f, 0.0f};
+    lookat_y = {0, 0, 0, 0.0f, 1.0f, 0.0f};
+    lookat_set = false;
+    dir_lights.clear();
+    num_lights = 0;
+
+    scissor_ulx = 0;
+    scissor_uly = 0;
+    scissor_lrx = 320;
+    scissor_lry = 240;
+    rdp_half1 = 0;
+    rdp_half2 = 0;
+    ucode_type = MicrocodeType::Auto;
+
+    std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
+    obj2d_matrix = Obj2DMatrix{};
+    obj_render_mode = 0;
+    s2d_pending_flag = 0;
+    s2d_pending_sid = 0;
+    s2d_pending_addr_lo = 0;
+    s2d_pending_valid = false;
+
+    internal_zbuffer.assign(640 * 480, 1e30f);
+
+    draw_state_dirty_ = true;
+    ++tmem_gen_;
+    hires_shadow_ = nullptr;
+    if (hires_) {
+        // Start over from an empty set of high-resolution buffers.
+        const u32 scale = hires_->scale();
+        hires_.reset();
+        hires_ = std::make_unique<HiResRenderer>(scale);
+    }
+}
+
+void RDP::clear_zbuffer() {
+    std::fill(internal_zbuffer.begin(), internal_zbuffer.end(), 1e30f);
+    if (hires_) hires_->clear_depth();
+}
+
+void RDP::set_hires_scale(u32 scale) {
+    scale = std::clamp<u32>(scale, 1, HiResRenderer::kMaxScale);
+    if (scale == hires_scale()) return;
+    hires_shadow_ = nullptr;
+    hires_.reset();
+    if (scale > 1) hires_ = std::make_unique<HiResRenderer>(scale);
+}
+
+HiResTarget* RDP::hires_target(u8* rdram, size_t rdram_size) {
+    hires_shadow_ = nullptr;
+    hires_shadow_len_ = 0;
+    if (!hires_ || color_image_addr >= rdram_size) return nullptr;
+    // Filling the depth image clears the depth buffer; there is no colour to show.
+    if (color_image_addr != 0 && color_image_addr == depth_image_addr) return nullptr;
+    const u32 fb_w = color_image_width ? color_image_width : 320;
+    HiResTarget* t = hires_->bind(color_image_addr, fb_w, color_image_size, rdram, rdram_size);
+    if (t) {
+        hires_shadow_ = t->shadow.data();
+        hires_shadow_len_ = t->shadow.size();
+    }
+    return t;
+}
+
+const DrawState& RDP::draw_state() {
+    if (draw_state_dirty_) {
+        DrawState& s = draw_state_;
+        s.other_mode_h = other_mode_h;
+        s.other_mode_l = other_mode_l;
+        s.combine_w0 = combine_mode_w0;
+        s.combine_w1 = combine_mode_w1;
+        s.prim_color = prim_color;
+        s.env_color = env_color;
+        s.blend_color = blend_color;
+        s.fog_color = fog_color;
+        s.scissor_ulx = scissor_ulx;
+        s.scissor_uly = scissor_uly;
+        s.scissor_lrx = scissor_lrx;
+        s.scissor_lry = scissor_lry;
+        s.fb_addr = color_image_addr;
+        s.fb_w = color_image_width ? color_image_width : 320;
+        s.fb_size = color_image_size;
+        s.combine_set = combine_mode_set;
+        s.texture_enabled = texture_enabled;
+        s.smooth_shading = (current_ucode_active == MicrocodeType::F3DEX2) ? (geometry_mode & 0x00200000) != 0
+                                                                          : (geometry_mode & 0x00000200) != 0;
+        s.active_tile = active_tile;
+        s.tmem = tmem.data();
+        s.tmem_dxt = tmem_word_dxt_zero.data();
+        for (int i = 0; i < 8; ++i) s.tex[i].prepare(tiles[i]);
+        s.finalize();
+        draw_state_dirty_ = false;
+        ++draw_state_serial_;
+    }
+    return draw_state_;
+}
+
+// Display list commands that can't change anything draw_state() captures
+// (geometry, flow control, syncs, TMEM loads, draws). Everything else marks
+// the draw state dirty.
+static bool keeps_draw_state(u8 opcode) {
+    switch (opcode) {
+        case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08:
+        case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB8: case 0xBC: case 0xBD:
+        case 0xBE: case 0xBF: case 0xC0: case 0xD8: case 0xDA: case 0xDB: case 0xDC: case 0xDE: case 0xDF:
+        case 0xE1: case 0xE4: case 0xE5: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xEE:
+        case 0xF0: case 0xF1: case 0xF3: case 0xF4: case 0xF6: case 0xF7: case 0xFD: case 0xFE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+u32 RDP::read_dpc_reg(u32 addr) const {
+    u32 reg = (addr & 0x1F) >> 2;
+    switch (reg) {
+        case 0: return dpc_start;
+        case 1: return dpc_end;
+        case 2: return dpc_current;
+        case 3: return dpc_status;
+        case 4: return dpc_clock;
+        case 5: return dpc_bufbusy;
+        case 6: return dpc_pipebusy;
+        case 7: return dpc_tmem;
+        default: return 0;
+    }
+}
+
+void RDP::write_dpc_reg(u32 addr, u32 val, MI& mi, u8* rdram, size_t rdram_size) {
+    u32 reg = (addr & 0x1F) >> 2;
+    switch (reg) {
+        case 0: // DPC_START_REG
+            dpc_start = val & 0x00FFFFFF;
+            dpc_current = dpc_start;
+            break;
+        case 1: // DPC_END_REG
+            dpc_end = val & 0x00FFFFFF;
+            if (dpc_current < dpc_end) {
+                process_display_list(dpc_current, rdram, rdram_size, mi);
+                dpc_current = dpc_end;
+            }
+            break;
+        case 2: // DPC_CURRENT_REG (read only)
+            break;
+        case 3: { // DPC_STATUS_REG
+            if (val & (1 << 0)) dpc_status &= ~(1 << 0); // Clr xbus
+            if (val & (1 << 1)) dpc_status |= (1 << 0);  // Set xbus
+            if (val & (1 << 2)) dpc_status &= ~(1 << 1); // Clr freeze
+            if (val & (1 << 3)) dpc_status |= (1 << 1);  // Set freeze
+            if (val & (1 << 4)) dpc_status &= ~(1 << 2); // Clr flush
+            if (val & (1 << 5)) dpc_status |= (1 << 2);  // Set flush
+            break;
+        }
+    }
+}
+
+u32 RDP::read_dps_reg(u32 addr) const {
+    u32 reg = (addr & 0xF) >> 2;
+    switch (reg) {
+        case 0: return dps_tbist;
+        case 1: return dps_test_mode;
+        case 2: return dps_buftest_addr;
+        case 3: return dps_buftest_data;
+        default: return 0;
+    }
+}
+
+void RDP::write_dps_reg(u32 addr, u32 val) {
+    u32 reg = (addr & 0xF) >> 2;
+    switch (reg) {
+        case 0: dps_tbist = val; break;
+        case 1: dps_test_mode = val; break;
+        case 2: dps_buftest_addr = val; break;
+        case 3: dps_buftest_data = val; break;
+    }
+}
+
+u32 RDP::segment_to_physical(u32 seg_addr) const {
+    u32 seg = (seg_addr >> 24) & 0x0F;
+    return (segments[seg] + (seg_addr & 0x00FFFFFF)) & 0x00FFFFFF;
+}
+
+void RDP::update_combined_matrix() {
+    if (combined_matrix_dirty) {
+        const auto& mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
+        // N64 uses row vectors: v_clip = v × MV × Proj, so combined = MV × Proj
+        combined_matrix = Matrix4x4::multiply(mv, projection_matrix);
+        combined_matrix_dirty = false;
+    }
+}
+
+void RDP::execute_mtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size) {
+    u32 mtx_addr = segment_to_physical(w1);
+    capture_mtx_addr = mtx_addr;
+    if (mtx_addr + 64 <= rdram_size) {
+        Matrix4x4 mat{};
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                int idx = (i * 4 + j) * 2;
+                s16 int_part = static_cast<s16>((rdram[mtx_addr + idx] << 8) | rdram[mtx_addr + idx + 1]);
+                u16 frac_part = static_cast<u16>((rdram[mtx_addr + 32 + idx] << 8) | rdram[mtx_addr + 32 + idx + 1]);
+                mat.m[i][j] = int_part + (frac_part / 65536.0f);
+            }
+        }
+
+        // The matrix format in RDRAM directly matches the row-vector convention of transform_point.
+        // DO NOT transpose here!
+
+        bool is_proj = false;
+        bool is_load = false;
+        bool is_push = false;
+
+        if (ucode == MicrocodeType::F3DEX2) {
+            // In F3DEX2: gsSPMatrix(m, p) -> gsDma2p(G_MTX, m, sizeof(Mtx), (p) ^ G_MTX_PUSH, 0)
+            // Parameters are in w0 & 0xFF.
+            // G_MTX_PUSH (0x01) was inverted with XOR in SDK macro, so bit 0 == 0 means PUSH!
+            u8 param_byte = w0 & 0xFF;
+            is_push = (param_byte & 0x01) == 0;
+            is_load = (param_byte & 0x02) != 0;
+            is_proj = (param_byte & 0x04) != 0;
+        } else {
+            // Fast3D / F3DEX: gsSPMatrix(m, p) -> gsDma1p(G_MTX, m, sizeof(Mtx), p)
+            // Parameters are in (w0 >> 16) & 0xFF.
+            // G_MTX_PROJECTION = 0x01, G_MTX_LOAD = 0x02, G_MTX_PUSH = 0x04
+            u8 param_byte = (w0 >> 16) & 0xFF;
+            is_proj = (param_byte & 0x01) != 0;
+            is_load = (param_byte & 0x02) != 0;
+            is_push = (param_byte & 0x04) != 0;
+            if (stat_tri_called > 395000 && stat_tri_called < 420000) {
+                std::cout << "[MTXFLAGDBG] tri=" << stat_tri_called << " w0=0x" << std::hex << w0
+                          << " param=0x" << (int)param_byte << std::dec
+                          << " proj=" << is_proj << " load=" << is_load << " push=" << is_push << "\n";
+            }
+        }
+
+        if (is_proj) {
+            if (stat_tri_called > 395000 && stat_tri_called < 420000) {
+                std::cout << "[PROJRAW] tri=" << stat_tri_called << " load=" << is_load << ":\n";
+                for (int r = 0; r < 4; ++r) {
+                    std::cout << "  [" << mat.m[r][0] << ", " << mat.m[r][1] << ", " << mat.m[r][2] << ", " << mat.m[r][3] << "]\n";
+                }
+            }
+            if (is_load) projection_matrix = mat;
+            else projection_matrix = Matrix4x4::multiply(mat, projection_matrix);
+        } else {
+            if (is_push && modelview_stack.size() < 32) {
+                modelview_stack.push_back(modelview_stack.back());
+            }
+            if (is_load) {
+                if (!modelview_stack.empty()) modelview_stack.back() = mat;
+                else modelview_stack.push_back(mat);
+            } else {
+                // Row-vector convention (v' = v*M): the incoming matrix transforms the
+                // object-space point FIRST, so it must be the left operand, matching
+                // the projection-matrix MUL branch above (mat * existing, not existing * mat).
+                if (!modelview_stack.empty()) modelview_stack.back() = Matrix4x4::multiply(mat, modelview_stack.back());
+                else modelview_stack.push_back(mat);
+            }
+        }
+        combined_matrix_dirty = true;
+    }
+}
+
+void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size) {
+    update_combined_matrix();
+
+    u32 count = 0;
+    u32 dest = 0;
+
+    if (ucode == MicrocodeType::F3DEX2) {
+        // F3DEX2: bits 19..12 = count, bits 7..1 = end_idx * 2
+        count = (w0 >> 12) & 0xFF;
+        u32 end_idx = (w0 >> 1) & 0x7F;
+        dest = (end_idx >= count) ? (end_idx - count) : 0;
+    } else if (ucode == MicrocodeType::F3DEX) {
+        // F3DEX: bits 15..10 = count, bits 23..16 = dest * 2
+        count = (w0 >> 10) & 0x3F;
+        if (count == 0) count = ((w0 >> 20) & 0x0F) + 1;
+        dest = ((w0 >> 16) & 0xFF) / 2;
+    } else {
+        // Fast3D: bits 23..20 = count - 1, bits 19..16 = dest
+        count = ((w0 >> 20) & 0x0F) + 1;
+        dest = (w0 >> 16) & 0x0F;
+    }
+
+    u32 vtx_addr = segment_to_physical(w1);
+
+    for (u32 i = 0; i < count; ++i) {
+        u32 cur_vtx = vtx_addr + i * 16;
+        if (cur_vtx + 16 > rdram_size) break;
+        u32 dest_idx = (dest + i) % vertex_cache.size();
+
+        s16 vx = static_cast<s16>((rdram[cur_vtx + 0] << 8) | rdram[cur_vtx + 1]);
+        s16 vy = static_cast<s16>((rdram[cur_vtx + 2] << 8) | rdram[cur_vtx + 3]);
+        s16 vz = static_cast<s16>((rdram[cur_vtx + 4] << 8) | rdram[cur_vtx + 5]);
+        s16 tu = static_cast<s16>((rdram[cur_vtx + 8] << 8) | rdram[cur_vtx + 9]);
+        s16 tv = static_cast<s16>((rdram[cur_vtx + 10] << 8) | rdram[cur_vtx + 11]);
+
+        Vertex& v = vertex_cache[dest_idx];
+        raw_vertex[dest_idx] = {static_cast<f32>(vx), static_cast<f32>(vy), static_cast<f32>(vz), cur_vtx};
+        combined_matrix.transform_point(vx, vy, vz, v.x, v.y, v.z, v.w);
+        compute_screen_coords(v);
+
+        f32 tnx = 0.0f, tny = 0.0f, tnz = 1.0f;
+        if ((geometry_mode & 0x00020000) || (geometry_mode & 0x00040000)) {
+            s8 nx_i = static_cast<s8>(rdram[cur_vtx + 12]);
+            s8 ny_i = static_cast<s8>(rdram[cur_vtx + 13]);
+            s8 nz_i = static_cast<s8>(rdram[cur_vtx + 14]);
+            f32 nx = nx_i / 127.0f;
+            f32 ny = ny_i / 127.0f;
+            f32 nz = nz_i / 127.0f;
+
+            const auto& mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
+            tnx = nx * mv.m[0][0] + ny * mv.m[1][0] + nz * mv.m[2][0];
+            tny = nx * mv.m[0][1] + ny * mv.m[1][1] + nz * mv.m[2][1];
+            tnz = nx * mv.m[0][2] + ny * mv.m[1][2] + nz * mv.m[2][2];
+            f32 tlen = std::sqrt(tnx * tnx + tny * tny + tnz * tnz);
+            if (tlen > 0.0f) { tnx /= tlen; tny /= tlen; tnz /= tlen; }
+        }
+
+        if (geometry_mode & 0x00040000) { // G_TEXTURE_GEN (spherical mapping)
+            f32 dot_x = tnx, dot_y = tny;
+            if (lookat_set) {
+                s8 nx_i = static_cast<s8>(rdram[cur_vtx + 12]);
+                s8 ny_i = static_cast<s8>(rdram[cur_vtx + 13]);
+                s8 nz_i = static_cast<s8>(rdram[cur_vtx + 14]);
+                f32 nx = nx_i / 127.0f;
+                f32 ny = ny_i / 127.0f;
+                f32 nz = nz_i / 127.0f;
+                dot_x = nx * lookat_x.dx + ny * lookat_x.dy + nz * lookat_x.dz;
+                dot_y = nx * lookat_y.dx + ny * lookat_y.dy + nz * lookat_y.dz;
+            }
+            v.u = (dot_x * 0.5f + 0.5f) * 32.0f * texture_scale_s;
+            v.v = (dot_y * 0.5f + 0.5f) * 32.0f * texture_scale_t;
+        } else {
+            v.u = (tu / 32.0f) * texture_scale_s;
+            v.v = (tv / 32.0f) * texture_scale_t;
+        }
+
+        if (geometry_mode & 0x00020000) { // G_LIGHTING
+            u8 ca = rdram[cur_vtx + 15];
+            f32 lit_r = ambient_light.r;
+            f32 lit_g = ambient_light.g;
+            f32 lit_b = ambient_light.b;
+
+            for (const auto& l : dir_lights) {
+                f32 dot = tnx * l.dx + tny * l.dy + tnz * l.dz;
+                if (dot > 0.0f) {
+                    lit_r += l.r * dot;
+                    lit_g += l.g * dot;
+                    lit_b += l.b * dot;
+                }
+            }
+
+            v.r = static_cast<u8>(std::clamp(lit_r, 0.0f, 255.0f));
+            v.g = static_cast<u8>(std::clamp(lit_g, 0.0f, 255.0f));
+            v.b = static_cast<u8>(std::clamp(lit_b, 0.0f, 255.0f));
+            v.a = ca; // Alpha=0 is a valid, common value (fades, transparency) - must not be forced opaque
+        } else {
+            u8 cr = rdram[cur_vtx + 12];
+            u8 cg = rdram[cur_vtx + 13];
+            u8 cb = rdram[cur_vtx + 14];
+            u8 ca = rdram[cur_vtx + 15];
+            v.r = cr; v.g = cg; v.b = cb;
+            v.a = ca;
+        }
+    }
+}
+
+void RDP::compute_screen_coords(Vertex& v) const {
+    f32 inv_w = (v.w != 0.0f) ? (1.0f / v.w) : 1.0f;
+    v.sx = vp_trans_x + (v.x * inv_w) * vp_scale_x;
+    v.sy = vp_trans_y - (v.y * inv_w) * vp_scale_y;
+    f32 scr_z = vp_trans_z + (v.z * inv_w) * vp_scale_z;
+    v.sz = std::clamp(scr_z / 1023.0f, 0.0f, 1.0f);
+
+    v.clip_flags = 0;
+    if (v.x > v.w)  v.clip_flags |= 0x01; // Right
+    if (v.x < -v.w) v.clip_flags |= 0x02; // Left
+    if (v.y > v.w)  v.clip_flags |= 0x04; // Top
+    if (v.y < -v.w) v.clip_flags |= 0x08; // Bottom
+    if (v.z > v.w)  v.clip_flags |= 0x10; // Far
+    if (v.z < -v.w) v.clip_flags |= 0x20; // Near
+}
+
+static Vertex lerp_vertex(const Vertex& a, const Vertex& b, f32 t) {
+    Vertex res;
+    res.x = a.x + t * (b.x - a.x);
+    res.y = a.y + t * (b.y - a.y);
+    res.z = a.z + t * (b.z - a.z);
+    res.w = a.w + t * (b.w - a.w);
+    res.u = a.u + t * (b.u - a.u);
+    res.v = a.v + t * (b.v - a.v);
+    res.r = static_cast<u8>(std::clamp(a.r + t * (b.r - a.r), 0.0f, 255.0f));
+    res.g = static_cast<u8>(std::clamp(a.g + t * (b.g - a.g), 0.0f, 255.0f));
+    res.b = static_cast<u8>(std::clamp(a.b + t * (b.b - a.b), 0.0f, 255.0f));
+    res.a = static_cast<u8>(std::clamp(a.a + t * (b.a - a.a), 0.0f, 255.0f));
+    return res;
+}
+
+template <typename PlaneFn>
+static void clip_polygon_plane(const std::vector<Vertex>& in_poly, std::vector<Vertex>& out_poly, PlaneFn plane_eval) {
+    out_poly.clear();
+    if (in_poly.empty()) return;
+
+    for (size_t i = 0; i < in_poly.size(); ++i) {
+        const Vertex& cur = in_poly[i];
+        const Vertex& prev = in_poly[(i + in_poly.size() - 1) % in_poly.size()];
+
+        f32 d_cur = plane_eval(cur);
+        f32 d_prev = plane_eval(prev);
+
+        if (d_cur >= 0.0f) {
+            if (d_prev < 0.0f) {
+                f32 t = d_prev / (d_prev - d_cur);
+                out_poly.push_back(lerp_vertex(prev, cur, t));
+            }
+            out_poly.push_back(cur);
+        } else if (d_prev >= 0.0f) {
+            f32 t = d_prev / (d_prev - d_cur);
+            out_poly.push_back(lerp_vertex(prev, cur, t));
+        }
+    }
+}
+
+void RDP::finish_texture_run() {
+    if (!tex_run.active) return;
+    tex_run.active = false;
+    if (tex_run.index < 0 || tex_run.index >= static_cast<s32>(capture_textures.size())) return;
+    CapturedTexture& t = capture_textures[tex_run.index];
+    // Decode the texel range the triangles actually use, so repeats and mirrors
+    // are baked in. Large ranges (tiled terrain) are sampled with a stride to
+    // keep the image at most 256 pixels per axis.
+    s32 s0 = static_cast<s32>(std::floor(tex_run.min_s)), s1 = static_cast<s32>(std::ceil(tex_run.max_s));
+    s32 t0 = static_cast<s32>(std::floor(tex_run.min_t)), t1 = static_cast<s32>(std::ceil(tex_run.max_t));
+    s1 = std::clamp(s1, s0 + 1, s0 + 8192);
+    t1 = std::clamp(t1, t0 + 1, t0 + 8192);
+    const s32 step_s = std::max(1, (s1 - s0 + 255) / 256), step_t = std::max(1, (t1 - t0 + 255) / 256);
+    const u32 w = static_cast<u32>((s1 - s0 + step_s - 1) / step_s), h = static_cast<u32>((t1 - t0 + step_t - 1) / step_t);
+    u64 key = tex_run.key;
+    for (s32 v : {s0, t0, s1, t1}) { key ^= static_cast<u32>(v); key *= 1099511628211ull; }
+    auto cached = texture_decode_cache.find(key);
+    if (cached != texture_decode_cache.end()) {
+        t = cached->second;
+        return;
+    }
+    t.key = key;
+    t.origin_s = static_cast<f32>(s0);
+    t.origin_t = static_cast<f32>(t0);
+    t.width = w;
+    t.height = h;
+    t.span_s = static_cast<f32>(w * step_s);
+    t.span_t = static_cast<f32>(h * step_t);
+    t.argb.resize(static_cast<size_t>(w) * h);
+    raster::TexUnit tu;
+    tu.prepare(tex_run.tile);
+    for (u32 y = 0; y < h; ++y)
+        for (u32 x = 0; x < w; ++x)
+            t.argb[y * w + x] = raster::fetch_texel(tu, tex_run.tmem.data(), tex_run.dxt.data(), tex_run.tlut,
+                                                    s0 + static_cast<s32>(x) * step_s, t0 + static_cast<s32>(y) * step_t);
+    if (texture_decode_cache.size() > 512) texture_decode_cache.clear();
+    texture_decode_cache.emplace(key, t);
+}
+
+void RDP::emit_triangle(u32 a, u32 b, u32 c, u8* rdram, size_t rdram_size) {
+    if (capture_enabled && capture_tris < 400000) {
+        const Matrix4x4 mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
+        if (capture_frame.empty() || std::memcmp(&capture_frame.back().modelview, &mv, sizeof(Matrix4x4)) != 0) {
+            if (capture_frame.size() < 8192) {
+                CapturedMesh m;
+                m.modelview = mv;
+                m.mtx_addr = capture_mtx_addr;
+                m.vtx_addr = raw_vertex[a % raw_vertex.size()].src;
+                m.dl_addr = capture_dl_addr;
+                capture_frame.push_back(std::move(m));
+            }
+        }
+        if (!capture_frame.empty()) {
+            CapturedMesh& m = capture_frame.back();
+            for (u32 idx : {a, b, c}) {
+                const RawVertex& rv = raw_vertex[idx % raw_vertex.size()];
+                m.pos.push_back(rv.x);
+                m.pos.push_back(rv.y);
+                m.pos.push_back(rv.z);
+            }
+            const Vertex& cv = vertex_cache[a % vertex_cache.size()];
+            m.col.push_back((u32(cv.r) << 24) | (u32(cv.g) << 16) | (u32(cv.b) << 8) | u32(cv.a));
+            capture_tris++;
+
+            // Texture of the selected mesh: remember the active tile + TMEM for this
+            // run of triangles and their texel coordinates.
+            if (capture_texture_vtx != 0 && m.vtx_addr == capture_texture_vtx && texture_enabled) {
+                const Tile& tile = tiles[active_tile & 7];
+                const u32 tlut = (other_mode_h >> 14) & 0x3;
+                u64 key = tex_last_key;
+                if (tmem_dirty || tlut != tex_last_tlut || std::memcmp(&tile, &tex_last_tile, sizeof tile) != 0) {
+                    key = 1469598103934665603ull;
+                    auto mixb = [&](const void* p, size_t n) {
+                        const u8* b = static_cast<const u8*>(p);
+                        for (size_t i = 0; i < n; ++i) { key ^= b[i]; key *= 1099511628211ull; }
+                    };
+                    mixb(&tile, sizeof tile);
+                    mixb(&tlut, sizeof tlut);
+                    mixb(tmem.data(), tmem.size());
+                    tex_last_key = key;
+                    tex_last_tile = tile;
+                    tex_last_tlut = tlut;
+                    tmem_dirty = false;
+                }
+                if (!tex_run.active || key != tex_run.key) {
+                    finish_texture_run();
+                    tex_run.active = true;
+                    tex_run.key = key;
+                    tex_run.index = static_cast<s32>(capture_textures.size());
+                    capture_textures.emplace_back();
+                    tex_run.tile = tile;
+                    tex_run.tlut = tlut;
+                    tex_run.tmem = tmem;
+                    tex_run.dxt = tmem_word_dxt_zero;
+                    tex_run.min_s = tex_run.min_t = 1e9f;
+                    tex_run.max_s = tex_run.max_t = -1e9f;
+                }
+                for (u32 idx : {a, b, c}) {
+                    const Vertex& v = vertex_cache[idx % vertex_cache.size()];
+                    f32 st = apply_tile_shift(v.u, tile.shift_s) - tile.sl / 4.0f;
+                    f32 tt = apply_tile_shift(v.v, tile.shift_t) - tile.tl / 4.0f;
+                    m.uv.push_back(st);
+                    m.uv.push_back(tt);
+                    tex_run.min_s = std::min(tex_run.min_s, st);
+                    tex_run.max_s = std::max(tex_run.max_s, st);
+                    tex_run.min_t = std::min(tex_run.min_t, tt);
+                    tex_run.max_t = std::max(tex_run.max_t, tt);
+                }
+                m.tex.push_back(tex_run.index);
+            } else if (capture_texture_vtx != 0 && m.vtx_addr == capture_texture_vtx) {
+                for (int k = 0; k < 6; ++k) m.uv.push_back(0.0f);
+                m.tex.push_back(-1);
+            }
+        }
+    }
+    clip_and_rasterize_triangle(vertex_cache[a], vertex_cache[b], vertex_cache[c], rdram, rdram_size);
+}
+
+void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram, size_t rdram_size) {
+    stat_tri_called++;
+
+    const f32 NEAR_W = 0.1f;
+
+    // Trivial rejection tests: if all 3 vertices are behind the near plane, drop the triangle
+    if (v0.w < NEAR_W && v1.w < NEAR_W && v2.w < NEAR_W) return;
+
+    // Trivial rejection against frustum sides is only valid when w >= NEAR_W for all vertices,
+    // because dividing/multiplying inequalities by negative w flips the inequality signs.
+    if (v0.w >= NEAR_W && v1.w >= NEAR_W && v2.w >= NEAR_W) {
+        if (v0.x > v0.w && v1.x > v1.w && v2.x > v2.w) return;
+        if (v0.x < -v0.w && v1.x < -v1.w && v2.x < -v2.w) return;
+        if (v0.y > v0.w && v1.y > v1.w && v2.y > v2.w) return;
+        if (v0.y < -v0.w && v1.y < -v1.w && v2.y < -v2.w) return;
+        if (v0.z > v0.w && v1.z > v1.w && v2.z > v2.w) return;
+        if (v0.z < -v0.w && v1.z < -v1.w && v2.z < -v2.w) return;
+    }
+
+    // Trivial acceptance: if all 3 vertices are completely inside all frustum planes
+    bool v0_in = (v0.w >= NEAR_W && v0.x >= -v0.w && v0.x <= v0.w && v0.y >= -v0.w && v0.y <= v0.w && v0.z >= -v0.w && v0.z <= v0.w);
+    bool v1_in = (v1.w >= NEAR_W && v1.x >= -v1.w && v1.x <= v1.w && v1.y >= -v1.w && v1.y <= v1.w && v1.z >= -v1.w && v1.z <= v1.w);
+    bool v2_in = (v2.w >= NEAR_W && v2.x >= -v2.w && v2.x <= v2.w && v2.y >= -v2.w && v2.y <= v2.w && v2.z >= -v2.w && v2.z <= v2.w);
+
+    if (v0_in && v1_in && v2_in) {
+        rasterize_triangle(v0, v1, v2, rdram, rdram_size);
+        return;
+    }
+
+    // Straddling triangle: Sutherland-Hodgman 4D clipping
+    std::vector<Vertex> poly1 = {v0, v1, v2};
+    std::vector<Vertex> poly2;
+
+    auto clip_against = [&](auto plane_eval) {
+        clip_polygon_plane(poly1, poly2, plane_eval);
+        poly1 = std::move(poly2);
+    };
+
+    clip_against([&](const Vertex& v) { return v.w - NEAR_W; });
+    if (poly1.size() < 3) return;
+    clip_against([&](const Vertex& v) { return v.w + v.x; });
+    if (poly1.size() < 3) return;
+    clip_against([&](const Vertex& v) { return v.w - v.x; });
+    if (poly1.size() < 3) return;
+    clip_against([&](const Vertex& v) { return v.w + v.y; });
+    if (poly1.size() < 3) return;
+    clip_against([&](const Vertex& v) { return v.w - v.y; });
+    if (poly1.size() < 3) return;
+    clip_against([&](const Vertex& v) { return v.w + v.z; });
+    if (poly1.size() < 3) return;
+    clip_against([&](const Vertex& v) { return v.w - v.z; });
+    if (poly1.size() < 3) return;
+
+    for (auto& v : poly1) {
+        compute_screen_coords(v);
+    }
+
+    for (size_t i = 1; i + 1 < poly1.size(); ++i) {
+        rasterize_triangle(poly1[0], poly1[i], poly1[i + 1], rdram, rdram_size);
+    }
+}
+
+void RDP::clip_and_rasterize_line(Vertex v0, Vertex v1, u8* rdram, size_t rdram_size) {
+    const f32 NEAR_W = 0.1f;
+    if (v0.w < NEAR_W && v1.w < NEAR_W) return;
+
+    if (v0.w < NEAR_W) {
+        f32 t = (NEAR_W - v0.w) / (v1.w - v0.w);
+        v0 = lerp_vertex(v0, v1, t);
+    } else if (v1.w < NEAR_W) {
+        f32 t = (NEAR_W - v1.w) / (v0.w - v1.w);
+        v1 = lerp_vertex(v1, v0, t);
+    }
+
+    compute_screen_coords(v0);
+    compute_screen_coords(v1);
+
+    int x0 = static_cast<int>(v0.sx);
+    int y0 = static_cast<int>(v0.sy);
+    int x1 = static_cast<int>(v1.sx);
+    int y1 = static_cast<int>(v1.sy);
+
+    int dx = std::abs(x1 - x0);
+    int dy = std::abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+
+    int steps = std::max(dx, dy);
+    int step = 0;
+
+    const DrawState& st = draw_state();
+    HiResTarget* hr = hires_target(rdram, rdram_size);
+    hires_line_px_.clear();
+    while (true) {
+        f32 t = steps > 0 ? static_cast<f32>(step) / steps : 0.0f;
+        f32 z = (1.0f - t) * v0.sz + t * v1.sz;
+        u8 r = static_cast<u8>((1.0f - t) * v0.r + t * v1.r);
+        u8 g = static_cast<u8>((1.0f - t) * v0.g + t * v1.g);
+        u8 b = static_cast<u8>((1.0f - t) * v0.b + t * v1.b);
+        u8 a = static_cast<u8>((1.0f - t) * v0.a + t * v1.a);
+        u32 color = (static_cast<u32>(a) << 24) | (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | b;
+        write_pixel(st, x0, y0, color, z, rdram, rdram_size);
+        // The high-resolution pass draws each line pixel as a block.
+        if (hr && x0 >= 0 && y0 >= 0 && x0 < 4096 && y0 < static_cast<int>(kFbLines))
+            hires_line_px_.push_back({static_cast<u16>(x0), static_cast<u16>(y0), color, z});
+
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx) { err += dx; y0 += sy; }
+        step++;
+    }
+    if (hr) hires_->pixels(hr, st, draw_state_serial_, hires_line_px_);
+}
+
+void RDP::execute_moveword(u32 w0, u32 w1, MicrocodeType current_ucode) {
+    u8 type;
+    u32 offset;
+    if (current_ucode == MicrocodeType::F3DEX2) {
+        type = (w0 >> 16) & 0xFF;
+        offset = w0 & 0xFFFF;
+    } else {
+        type = w0 & 0xFF;
+        offset = (w0 >> 8) & 0xFFFF;
+    }
+
+    if (type == 0x06) { // G_MW_SEGMENT: offset in bytes = segment * 4
+        u32 seg_idx = offset / 4;
+        if (seg_idx < segments.size()) {
+            segments[seg_idx] = w1;
+        }
+    } else if (type == 0x02) { // G_MW_NUMLIGHT
+        u32 raw = w1 & 0x7FFFFFFF;
+        if (current_ucode == MicrocodeType::F3DEX2) {
+            num_lights = (raw / 24 > 0) ? (raw / 24) : 0;
+        } else {
+            num_lights = (raw / 32 > 0) ? (raw / 32 - 1) : 0;
+        }
+        if (num_lights > 8) num_lights = 8;
+        dir_lights.resize(num_lights);
+    } else if (type == 0x0A) { // G_MW_LIGHTCOL
+        u8 r = (w1 >> 24) & 0xFF;
+        u8 g = (w1 >> 16) & 0xFF;
+        u8 b = (w1 >> 8) & 0xFF;
+        u32 slot = (current_ucode == MicrocodeType::F3DEX2) ? (offset / 24) : (offset / 32);
+        if (slot < dir_lights.size()) {
+            dir_lights[slot].r = r;
+            dir_lights[slot].g = g;
+            dir_lights[slot].b = b;
+        } else if (slot == num_lights) {
+            ambient_light.r = r;
+            ambient_light.g = g;
+            ambient_light.b = b;
+        }
+    } else if (type == 0x08 && is_s2dex_ucode(current_ucode)) { // G_MW_GENSTAT (S2DEX gSPSetStatus)
+        u32 slot = offset / 4;
+        if (slot < 4) s2d_genstat[slot] = w1;
+    } else if (type == 0x0C) { // G_MW_POINTS (Fast3D gsSPModifyVertex)
+        u32 vtx_idx = offset / 40;
+        u8 where = offset % 40;
+        if (vtx_idx < vertex_cache.size()) {
+            Vertex& v = vertex_cache[vtx_idx];
+            switch (where) {
+                case 0x10: // G_MWO_POINT_RGBA
+                    v.r = (w1 >> 24) & 0xFF;
+                    v.g = (w1 >> 16) & 0xFF;
+                    v.b = (w1 >> 8) & 0xFF;
+                    v.a = w1 & 0xFF;
+                    break;
+                case 0x14: // G_MWO_POINT_ST
+                    v.u = (static_cast<s16>(w1 >> 16) / 32.0f) * texture_scale_s;
+                    v.v = (static_cast<s16>(w1 & 0xFFFF) / 32.0f) * texture_scale_t;
+                    break;
+                case 0x18: // G_MWO_POINT_XYSCREEN
+                    v.sx = static_cast<s16>(w1 >> 16) / 4.0f;
+                    v.sy = static_cast<s16>(w1 & 0xFFFF) / 4.0f;
+                    break;
+                case 0x1C: // G_MWO_POINT_ZSCREEN
+                    v.sz = std::clamp((static_cast<s16>(w1 >> 16)) / 1024.0f, 0.0f, 1.0f);
+                    break;
+            }
+        }
+    }
+}
+
+void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi) {
+    display_list_count++;
+    dir_lights.clear();
+    num_lights = 0;
+
+    // The CPU may have changed RDRAM (and the microcode) since the last list.
+    draw_state_dirty_ = true;
+    if (hires_) hires_->unbind();
+    // Whatever this list draws at high resolution can start right away.
+    struct FlushOnExit {
+        HiResRenderer* hr;
+        ~FlushOnExit() { if (hr) hr->flush(); }
+    } flush_on_exit{hires_.get()};
+
+    MicrocodeType current_ucode = ucode_type;
+
+    // The banner sniff (rsp.cpp / G_LOAD_UCODE below) can find a real, but
+    // *stale or unrelated*, ucode credit string sitting in RDRAM: some ROMs
+    // keep several microcode blobs resident even though only one is actually
+    // driving a given display list (e.g. Dr. Mario 64 keeps a genuine
+    // "RSP Gfx ucode S2DEX 1.07" banner around while a given task's actual
+    // command stream is really F3DEX2). Blindly trusting that banner makes
+    // every opcode of an unrelated F3D display list get misread as an S2DEX
+    // command, drawing garbage or nothing (F3D's own G_VTX/G_TRI* opcodes
+    // alias exactly the low-numbered opcodes S2DEX repurposes for BG/OBJ
+    // drawing). So require *positive* evidence before trusting it: every
+    // S2DEX opcode that carries a DMA pointer (BG/OBJ draws) is emitted with
+    // a fixed zero low-24-bit word, so a well-formed one is proof the stream
+    // really is S2DEX, and G_GEOMETRYMODE (0xD9, not part of the S2DEX
+    // command set in either GBI generation) or a malformed low-24-bit word
+    // on one of those same opcodes is proof it isn't. Ambiguous/no evidence
+    // defaults to "not S2DEX", since a real S2DEX list is normally saturated
+    // with BG/OBJ commands and should confirm itself almost immediately.
+    if (current_ucode == MicrocodeType::S2DEX || current_ucode == MicrocodeType::S2DEX2) {
+        bool confirmed_s2dex = false;
+        bool confirmed_not_s2dex = false;
+        u32 scan_pc = dl_addr;
+        int depth = 0; // how many G_DL branches we've followed while scanning
+        for (int i = 0; i < 400 && depth < 12 && !confirmed_not_s2dex; ++i) {
+            u32 phys = segment_to_physical(scan_pc);
+            if (phys + 8 > rdram_size) break;
+            u8 op = rdram[phys];
+            u32 w0 = (static_cast<u32>(rdram[phys + 0]) << 24) |
+                     (static_cast<u32>(rdram[phys + 1]) << 16) |
+                     (static_cast<u32>(rdram[phys + 2]) << 8)  |
+                      static_cast<u32>(rdram[phys + 3]);
+            u32 w1 = (static_cast<u32>(rdram[phys + 4]) << 24) |
+                     (static_cast<u32>(rdram[phys + 5]) << 16) |
+                     (static_cast<u32>(rdram[phys + 6]) << 8)  |
+                      static_cast<u32>(rdram[phys + 7]);
+            if (op == 0xD9) { confirmed_not_s2dex = true; break; }
+            bool is_zero_l_opcode = (current_ucode == MicrocodeType::S2DEX2)
+                ? (op == 0x01 || op == 0x02 || op == 0x09 || op == 0x0a)   // OBJ_RECT/SPRITE, BG_1CYC/COPY
+                : (op == 0x01 || op == 0x02 || op == 0x03 || op == 0x04);  // BG_1CYC/COPY, OBJ_RECT/SPRITE
+            if (is_zero_l_opcode) {
+                if ((w0 & 0x00FFFFFF) != 0) { confirmed_not_s2dex = true; break; }
+                if (w1 != 0) confirmed_s2dex = true; // a real DMA pointer, not just a zeroed-out slot
+            }
+            if (op == 0xDE) { // G_DL: most top-level S2DEX/F3D lists are mostly
+                               // branches to sub-lists, so follow it to actually
+                               // sample real content instead of scanning pointers.
+                scan_pc = w1;
+                depth++;
+                continue;
+            }
+            if (op == 0xDF) break; // G_ENDDL: nothing more to learn from this branch
+            scan_pc += 8;
+        }
+        if (!confirmed_s2dex || confirmed_not_s2dex) {
+            current_ucode = MicrocodeType::Auto;
+            ucode_type = MicrocodeType::Auto; // correct the persistent guess too
+        }
+    }
+
+    if (current_ucode == MicrocodeType::Auto) {
+        u32 scan_pc = dl_addr;
+        for (int i = 0; i < 512; ++i) {
+            u32 phys = segment_to_physical(scan_pc);
+            if (phys + 8 > rdram_size) break;
+            u8 op = rdram[phys];
+            u32 w0 = (static_cast<u32>(rdram[phys + 0]) << 24) |
+                     (static_cast<u32>(rdram[phys + 1]) << 16) |
+                     (static_cast<u32>(rdram[phys + 2]) << 8)  |
+                      static_cast<u32>(rdram[phys + 3]);
+            // F3DEX2 unique opcodes
+            if (op == 0xDF || op == 0xDE || op == 0xDA || op == 0xD9 ||
+                op == 0xD8 || op == 0xD7 || op == 0x05 || op == 0x07 ||
+                op == 0xE2 || op == 0xE3) {
+                current_ucode = MicrocodeType::F3DEX2;
+                break;
+            }
+            // F3DEX 1 unique opcodes
+            if (op == 0xB1 || op == 0xB0 || op == 0xAF) {
+                current_ucode = MicrocodeType::F3DEX;
+                break;
+            }
+            // G_VTX (0x04) in Fast3D vs F3DEX 1
+            if (op == 0x04) {
+                // In Fast3D, length is n * 16, so low 4 bits are 0.
+                // In F3DEX 1, length is n * 16 - 1, so low 4 bits are 0xF.
+                if ((w0 & 0x0F) == 0x0F) {
+                    current_ucode = MicrocodeType::F3DEX;
+                    break;
+                } else if ((w0 & 0x0F) == 0x00 && (w0 & 0xFFFF) > 0) {
+                    current_ucode = MicrocodeType::Fast3D;
+                    break;
+                }
+            }
+            scan_pc += 8;
+        }
+        if (current_ucode == MicrocodeType::Auto) {
+            current_ucode = MicrocodeType::Fast3D;
+        }
+    }
+    current_ucode_active = current_ucode;
+
+    std::vector<u32> dl_stack;
+    u32 pc = dl_addr;
+
+    const u32 MAX_COMMANDS = 100000;
+    u32 cmd_count = 0;
+
+    while (cmd_count++ < MAX_COMMANDS) {
+        u32 phys_pc = segment_to_physical(pc);
+        if (phys_pc + 8 > rdram_size) break;
+        capture_dl_addr = phys_pc;
+
+        u32 w0 = (static_cast<u32>(rdram[phys_pc + 0]) << 24) |
+                 (static_cast<u32>(rdram[phys_pc + 1]) << 16) |
+                 (static_cast<u32>(rdram[phys_pc + 2]) << 8)  |
+                  static_cast<u32>(rdram[phys_pc + 3]);
+
+        u32 w1 = (static_cast<u32>(rdram[phys_pc + 4]) << 24) |
+                 (static_cast<u32>(rdram[phys_pc + 5]) << 16) |
+                 (static_cast<u32>(rdram[phys_pc + 6]) << 8)  |
+                  static_cast<u32>(rdram[phys_pc + 7]);
+
+        pc += 8;
+        u8 opcode = (w0 >> 24) & 0xFF;
+
+        if (is_s2dex_ucode(current_ucode) &&
+            execute_s2dex_command(opcode, w0, w1, current_ucode, pc, dl_stack, rdram, rdram_size)) {
+            draw_state_dirty_ = true;
+            continue;
+        }
+        if (!keeps_draw_state(opcode)) draw_state_dirty_ = true;
+
+        switch (opcode) {
+            case 0x00: // G_SPNOOP
+                break;
+
+            case 0x01: {
+                if (current_ucode == MicrocodeType::F3DEX2) {
+                    execute_vtx(w0, w1, current_ucode, rdram, rdram_size);
+                } else {
+                    execute_mtx(w0, w1, current_ucode, rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0xDA: { // G_MTX (F3DEX2)
+                execute_mtx(w0, w1, current_ucode, rdram, rdram_size);
+                break;
+            }
+
+            case 0x02: {
+                if (current_ucode == MicrocodeType::F3DEX2) {
+                    // G_MODIFYVTX (F3DEX2)
+                    u32 vtx_idx = (w0 & 0xFFFF) / 2;
+                    u8 where = (w0 >> 16) & 0xFF;
+                    if (vtx_idx < vertex_cache.size()) {
+                        Vertex& v = vertex_cache[vtx_idx];
+                        switch (where) {
+                            case 0x10: // G_MWO_POINT_RGBA
+                                v.r = (w1 >> 24) & 0xFF;
+                                v.g = (w1 >> 16) & 0xFF;
+                                v.b = (w1 >> 8) & 0xFF;
+                                v.a = w1 & 0xFF;
+                                break;
+                            case 0x14: // G_MWO_POINT_ST
+                                v.u = (static_cast<s16>(w1 >> 16) / 32.0f) * texture_scale_s;
+                                v.v = (static_cast<s16>(w1 & 0xFFFF) / 32.0f) * texture_scale_t;
+                                break;
+                            case 0x18: // G_MWO_POINT_XYSCREEN
+                                v.sx = static_cast<s16>(w1 >> 16) / 4.0f;
+                                v.sy = static_cast<s16>(w1 & 0xFFFF) / 4.0f;
+                                break;
+                            case 0x1C: // G_MWO_POINT_ZSCREEN
+                                v.sz = std::clamp((static_cast<s16>(w1 >> 16)) / 1024.0f, 0.0f, 1.0f);
+                                break;
+                        }
+                    }
+                } else {
+                    // G_POPMTX (Fast3D older)
+                    if (modelview_stack.size() > 1) {
+                        modelview_stack.pop_back();
+                        combined_matrix_dirty = true;
+                    }
+                }
+                break;
+            }
+
+            case 0xD8: { // G_POPMTX (F3DEX / F3DEX2)
+                u32 pop_count = 1;
+                if (current_ucode == MicrocodeType::F3DEX2 && w1 >= 64) {
+                    pop_count = w1 / 64;
+                }
+                while (pop_count-- > 0 && modelview_stack.size() > 1) {
+                    modelview_stack.pop_back();
+                }
+                combined_matrix_dirty = true;
+                break;
+            }
+
+            case 0xBD: { // G_POPMTX (Fast3D) or G_MOVEWORD (F3DGOLDEN)
+                if (current_ucode == MicrocodeType::F3DGOLDEN) {
+                    execute_moveword(w0, w1, current_ucode);
+                    break;
+                }
+                if (modelview_stack.size() > 1) {
+                    modelview_stack.pop_back();
+                    combined_matrix_dirty = true;
+                }
+                break;
+            }
+
+            case 0x03: { // G_CULLDL in F3DEX2, G_MOVEMEM in Fast3D
+                if (current_ucode == MicrocodeType::F3DEX2) {
+                    u32 vstart = (w0 & 0xFFFF) / 2;
+                    u32 vend = (w1 & 0xFFFF) / 2;
+                    if (vend < vertex_cache.size() && vstart <= vend) {
+                        bool all_left = true, all_right = true, all_bottom = true, all_top = true, all_far = true, all_near = true;
+                        for (u32 i = vstart; i <= vend; ++i) {
+                            const auto& v = vertex_cache[i];
+                            if (v.x >= -v.w) all_left = false;
+                            if (v.x <= v.w) all_right = false;
+                            if (v.y >= -v.w) all_bottom = false;
+                            if (v.y <= v.w) all_top = false;
+                            if (v.z <= v.w) all_far = false;
+                            if (v.w >= 0.1f) all_near = false;
+                        }
+                        if (all_left || all_right || all_top || all_bottom || all_far || all_near) {
+                            if (!dl_stack.empty()) {
+                                pc = dl_stack.back();
+                                dl_stack.pop_back();
+                            } else {
+                                mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                }
+                [[fallthrough]];
+            }
+            case 0xDC: { // G_MOVEMEM (F3DEX / F3DEX2)
+                u32 src_addr = segment_to_physical(w1);
+                bool is_viewport = false;
+                bool is_light = false;
+                u32 light_n = 0;
+
+                if (current_ucode == MicrocodeType::F3DEX2) {
+                    u8 idx = w0 & 0xFF;
+                    is_viewport = (idx == 8);
+                    if (idx == 10) { // G_MV_LIGHT
+                        u32 ofs = ((w0 >> 8) & 0xFF) * 8;
+                        if (ofs == 0) { // G_MVO_LOOKATX
+                            if (src_addr + 16 <= rdram_size) {
+                                s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                                s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                                s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+                                lookat_x = {rdram[src_addr + 0], rdram[src_addr + 1], rdram[src_addr + 2],
+                                            dx / 127.0f, dy / 127.0f, dz / 127.0f};
+                                lookat_set = true;
+                            }
+                        } else if (ofs == 24) { // G_MVO_LOOKATY
+                            if (src_addr + 16 <= rdram_size) {
+                                s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                                s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                                s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+                                lookat_y = {rdram[src_addr + 0], rdram[src_addr + 1], rdram[src_addr + 2],
+                                            dx / 127.0f, dy / 127.0f, dz / 127.0f};
+                                lookat_set = true;
+                            }
+                        } else if (ofs >= 48) {
+                            is_light = true;
+                            light_n = (ofs / 24) - 1;
+                        }
+                    }
+                } else {
+                    u8 type_idx = (w0 >> 16) & 0xFF;
+                    if (type_idx == 0) type_idx = w0 & 0xFF;
+
+                    is_viewport = (type_idx == 0x80) || (type_idx == 8);
+                    if (type_idx == 0x84) { // LookAtX
+                        if (src_addr + 16 <= rdram_size) {
+                            s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                            s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                            s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+                            lookat_x = {rdram[src_addr + 0], rdram[src_addr + 1], rdram[src_addr + 2],
+                                        dx / 127.0f, dy / 127.0f, dz / 127.0f};
+                            lookat_set = true;
+                        }
+                    } else if (type_idx == 0x82) { // LookAtY
+                        if (src_addr + 16 <= rdram_size) {
+                            s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                            s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                            s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+                            lookat_y = {rdram[src_addr + 0], rdram[src_addr + 1], rdram[src_addr + 2],
+                                        dx / 127.0f, dy / 127.0f, dz / 127.0f};
+                            lookat_set = true;
+                        }
+                    } else if (type_idx >= 0x86 && type_idx <= 0x94) {
+                        is_light = true;
+                        light_n = (type_idx - 0x86) / 2 + 1;
+                    } else if (type_idx == 10) {
+                        u32 ofs = ((w0 >> 8) & 0xFF) * 8;
+                        if (ofs == 0) {
+                            if (src_addr + 16 <= rdram_size) {
+                                s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                                s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                                s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+                                lookat_x = {rdram[src_addr + 0], rdram[src_addr + 1], rdram[src_addr + 2],
+                                            dx / 127.0f, dy / 127.0f, dz / 127.0f};
+                                lookat_set = true;
+                            }
+                        } else if (ofs == 24) {
+                            if (src_addr + 16 <= rdram_size) {
+                                s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                                s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                                s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+                                lookat_y = {rdram[src_addr + 0], rdram[src_addr + 1], rdram[src_addr + 2],
+                                            dx / 127.0f, dy / 127.0f, dz / 127.0f};
+                                lookat_set = true;
+                            }
+                        } else if (ofs >= 48) {
+                            is_light = true;
+                            light_n = (ofs / 24) - 1;
+                        }
+                    }
+                }
+
+                if (is_viewport) {
+                    if (src_addr + 16 <= rdram_size) {
+                        s16 vscale_x = static_cast<s16>((rdram[src_addr + 0] << 8) | rdram[src_addr + 1]);
+                        s16 vscale_y = static_cast<s16>((rdram[src_addr + 2] << 8) | rdram[src_addr + 3]);
+                        s16 vscale_z = static_cast<s16>((rdram[src_addr + 4] << 8) | rdram[src_addr + 5]);
+                        s16 vtrans_x = static_cast<s16>((rdram[src_addr + 8] << 8) | rdram[src_addr + 9]);
+                        s16 vtrans_y = static_cast<s16>((rdram[src_addr + 10] << 8) | rdram[src_addr + 11]);
+                        s16 vtrans_z = static_cast<s16>((rdram[src_addr + 12] << 8) | rdram[src_addr + 13]);
+
+                        vp_scale_x = vscale_x / 4.0f;
+                        vp_scale_y = std::abs(vscale_y / 4.0f);
+                        vp_scale_z = (vscale_z != 0) ? (vscale_z / 4.0f) : 511.5f;
+                        vp_trans_x = vtrans_x / 4.0f;
+                        vp_trans_y = vtrans_y / 4.0f;
+                        vp_trans_z = (vtrans_z != 0) ? (vtrans_z / 4.0f) : 511.5f;
+                    }
+                } else if (is_light) {
+                    if (src_addr + 16 <= rdram_size) {
+                        u8 r = rdram[src_addr + 0];
+                        u8 g = rdram[src_addr + 1];
+                        u8 b = rdram[src_addr + 2];
+                        s8 dx = static_cast<s8>(rdram[src_addr + 8]);
+                        s8 dy = static_cast<s8>(rdram[src_addr + 9]);
+                        s8 dz = static_cast<s8>(rdram[src_addr + 10]);
+
+                        bool is_ambient = (num_lights == 0) || (light_n > num_lights) || (dx == 0 && dy == 0 && dz == 0);
+                        if (is_ambient) {
+                            ambient_light = {r, g, b, 0, 0, 0};
+                        } else {
+                            f32 len = std::sqrt(static_cast<f32>(dx * dx + dy * dy + dz * dz));
+                            f32 ndx = (len > 0.0f) ? (dx / len) : 0.0f;
+                            f32 ndy = (len > 0.0f) ? (dy / len) : 0.0f;
+                            f32 ndz = (len > 0.0f) ? (dz / len) : 1.0f;
+                            u32 slot = (light_n >= 1) ? (light_n - 1) : 0;
+                            if (dir_lights.size() <= slot) {
+                                dir_lights.resize(slot + 1);
+                            }
+                            dir_lights[slot] = {r, g, b, ndx, ndy, ndz};
+                        }
+                    }
+                }
+                break;
+            }
+
+            case 0x04: {
+                if (current_ucode == MicrocodeType::F3DEX2) {
+                    // G_BRANCH_Z in F3DEX2
+                    u32 vtx = (w0 & 0xFFF) / 2;
+                    u32 zval = w1;
+                    if (vtx < vertex_cache.size()) {
+                        f32 v_z = vertex_cache[vtx].sz * 1023.0f;
+                        f32 thresh = (zval > 1024) ? (static_cast<f32>(zval) / 65536.0f) : static_cast<f32>(zval);
+                        if (v_z <= thresh) {
+                            if (rdp_half1 != 0) {
+                                pc = rdp_half1;
+                            }
+                        }
+                    }
+                    break;
+                }
+                execute_vtx(w0, w1, current_ucode, rdram, rdram_size);
+                break;
+            }
+
+            case 0xB0: { // G_BRANCH_Z (F3DEX)
+                u32 vtx = (w0 & 0xFFF) / 2;
+                u32 zval = w1;
+                if (vtx < vertex_cache.size()) {
+                    f32 v_z = vertex_cache[vtx].sz * 1023.0f;
+                    f32 thresh = (zval > 1024) ? (static_cast<f32>(zval) / 65536.0f) : static_cast<f32>(zval);
+                    if (v_z <= thresh) {
+                        if (rdp_half1 != 0) {
+                            pc = rdp_half1;
+                        }
+                    }
+                }
+                break;
+            }
+
+            case 0x05: { // G_TRI1 (F3DEX2)
+                u32 v0 = ((w0 >> 16) & 0xFF) / 2;
+                u32 v1 = ((w0 >> 8) & 0xFF) / 2;
+                u32 v2 = (w0 & 0xFF) / 2;
+                if (v0 < vertex_cache.size() && v1 < vertex_cache.size() && v2 < vertex_cache.size()) {
+                    emit_triangle(v0, v1, v2, rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0xBF: { // G_TRI1 (Fast3D or F3DEX)
+                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) ? 10 : 2;
+                u32 v0 = ((w1 >> 16) & 0xFF) / div;
+                u32 v1 = ((w1 >> 8) & 0xFF) / div;
+                u32 v2 = (w1 & 0xFF) / div;
+                if (v0 < vertex_cache.size() && v1 < vertex_cache.size() && v2 < vertex_cache.size()) {
+                    emit_triangle(v0, v1, v2, rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0xB1: { // G_TRIX (F3DGOLDEN) / G_TRI2 (Fast3D or F3DEX)
+                if (current_ucode == MicrocodeType::F3DGOLDEN) {
+                    while (w1 != 0) {
+                        u32 v0 = w1 & 0x0F;
+                        w1 >>= 4;
+                        u32 v1 = w1 & 0x0F;
+                        w1 >>= 4;
+                        u32 v2 = w0 & 0x0F;
+                        w0 >>= 4;
+                        if (v0 < vertex_cache.size() && v1 < vertex_cache.size() && v2 < vertex_cache.size()) {
+                            emit_triangle(v0, v1, v2, rdram, rdram_size);
+                        }
+                    }
+                    break;
+                }
+                u32 div = (current_ucode == MicrocodeType::Fast3D) ? 10 : 2;
+                u32 v0 = ((w0 >> 16) & 0xFF) / div;
+                u32 v1 = ((w0 >> 8) & 0xFF) / div;
+                u32 v2 = (w0 & 0xFF) / div;
+                u32 v3 = ((w1 >> 16) & 0xFF) / div;
+                u32 v4 = ((w1 >> 8) & 0xFF) / div;
+                u32 v5 = (w1 & 0xFF) / div;
+                if (v0 < vertex_cache.size() && v1 < vertex_cache.size() && v2 < vertex_cache.size()) {
+                    emit_triangle(v0, v1, v2, rdram, rdram_size);
+                }
+                if (v3 < vertex_cache.size() && v4 < vertex_cache.size() && v5 < vertex_cache.size()) {
+                    emit_triangle(v3, v4, v5, rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0xB2: { // G_MODIFYVTX (F3DEX) / G_RDPHALF_CONT (Fast3D)
+                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) {
+                    rdp_half2 = w1;
+                    break;
+                }
+                u32 vtx_idx = (w0 & 0xFFFF) / 2;
+                u8 where = (w0 >> 16) & 0xFF;
+                if (vtx_idx < vertex_cache.size()) {
+                    Vertex& v = vertex_cache[vtx_idx];
+                    switch (where) {
+                        case 0x10: // G_MWO_POINT_RGBA
+                            v.r = (w1 >> 24) & 0xFF;
+                            v.g = (w1 >> 16) & 0xFF;
+                            v.b = (w1 >> 8) & 0xFF;
+                            v.a = w1 & 0xFF;
+                            break;
+                        case 0x14: // G_MWO_POINT_ST
+                            v.u = (static_cast<s16>(w1 >> 16) / 32.0f) * texture_scale_s;
+                            v.v = (static_cast<s16>(w1 & 0xFFFF) / 32.0f) * texture_scale_t;
+                            break;
+                        case 0x18: // G_MWO_POINT_XYSCREEN
+                            v.sx = static_cast<s16>(w1 >> 16) / 4.0f;
+                            v.sy = static_cast<s16>(w1 & 0xFFFF) / 4.0f;
+                            break;
+                        case 0x1C: // G_MWO_POINT_ZSCREEN
+                            v.sz = std::clamp((static_cast<s16>(w1 >> 16)) / 1024.0f, 0.0f, 1.0f);
+                            break;
+                    }
+                }
+                break;
+            }
+
+            case 0xBE: { // G_CULLDL (Fast3D / F3DEX)
+                u32 vstart = 0, vend = 0;
+                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) {
+                    vstart = ((w0 & 0xFFFF) / 40) & 0x0F;
+                    vend = (((w1 & 0xFFFF) / 40) > 0) ? (((w1 & 0xFFFF) / 40) - 1) & 0x0F : 0;
+                } else {
+                    vstart = (w0 & 0xFFFF) / 2;
+                    vend = (w1 & 0xFFFF) / 2;
+                }
+                if (vend >= vstart && vend < vertex_cache.size()) {
+                    u32 clip_all = 0x3F;
+                    for (u32 i = vstart; i <= vend; ++i) {
+                        clip_all &= vertex_cache[i].clip_flags;
+                    }
+                    if (clip_all != 0) {
+                        if (!dl_stack.empty()) {
+                            pc = dl_stack.back();
+                            dl_stack.pop_back();
+                        } else {
+                            mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+                            return;
+                        }
+                    }
+                }
+                break;
+            }
+
+            case 0xB5: { // G_LINE3D (Fast3D / F3DEX)
+                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) ? 10 : 2;
+                u32 v0 = ((w1 >> 16) & 0xFF) / div;
+                u32 v1 = ((w1 >> 8) & 0xFF) / div;
+                if (v0 < vertex_cache.size() && v1 < vertex_cache.size()) {
+                    clip_and_rasterize_line(vertex_cache[v0], vertex_cache[v1], rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0x06: { // G_DL in Fast3D & F3DEX, G_TRI2 in F3DEX2
+                if (current_ucode != MicrocodeType::F3DEX2) {
+                    u32 target = w1;
+                    u8 flag = (w0 >> 16) & 0xFF;
+                    if (flag == 0) {
+                        dl_stack.push_back(pc);
+                    }
+                    pc = target;
+                } else {
+                    u32 v0 = ((w0 >> 16) & 0xFF) / 2;
+                    u32 v1 = ((w0 >> 8) & 0xFF) / 2;
+                    u32 v2 = (w0 & 0xFF) / 2;
+                    u32 v3 = ((w1 >> 16) & 0xFF) / 2;
+                    u32 v4 = ((w1 >> 8) & 0xFF) / 2;
+                    u32 v5 = (w1 & 0xFF) / 2;
+                    if (v0 < vertex_cache.size() && v1 < vertex_cache.size() && v2 < vertex_cache.size()) {
+                        emit_triangle(v0, v1, v2, rdram, rdram_size);
+                    }
+                    if (v3 < vertex_cache.size() && v4 < vertex_cache.size() && v5 < vertex_cache.size()) {
+                        emit_triangle(v3, v4, v5, rdram, rdram_size);
+                    }
+                }
+                break;
+            }
+
+            case 0x07: { // G_QUAD (F3DEX2)
+                u32 v0 = ((w0 >> 16) & 0xFF) / 2;
+                u32 v1 = ((w0 >> 8) & 0xFF) / 2;
+                u32 v2 = (w0 & 0xFF) / 2;
+                u32 v3 = ((w1 >> 16) & 0xFF) / 2;
+                u32 v4 = ((w1 >> 8) & 0xFF) / 2;
+                u32 v5 = (w1 & 0xFF) / 2;
+                if (v0 < vertex_cache.size() && v1 < vertex_cache.size() && v2 < vertex_cache.size()) {
+                    emit_triangle(v0, v1, v2, rdram, rdram_size);
+                }
+                if (v3 < vertex_cache.size() && v4 < vertex_cache.size() && v5 < vertex_cache.size()) {
+                    emit_triangle(v3, v4, v5, rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0x08: { // G_LINE3D (F3DEX2)
+                u32 v0 = ((w0 >> 16) & 0xFF) / 2;
+                u32 v1 = ((w0 >> 8) & 0xFF) / 2;
+                if (v0 < vertex_cache.size() && v1 < vertex_cache.size()) {
+                    clip_and_rasterize_line(vertex_cache[v0], vertex_cache[v1], rdram, rdram_size);
+                }
+                break;
+            }
+
+            case 0xDE: { // G_DL (F3DEX / F3DEX2)
+                u32 target = w1;
+                u8 flag = (w0 >> 16) & 0xFF;
+                if (flag == 0) {
+                    dl_stack.push_back(pc);
+                }
+                pc = target;
+                break;
+            }
+
+            case 0xAF: // G_LOAD_UCODE (F3DEX)
+            case 0xDD: { // G_LOAD_UCODE (F3DEX2)
+                auto check_header = [&](u32 addr) -> bool {
+                    u32 ucode_phys = segment_to_physical(addr);
+                    if (ucode_phys + 256 <= rdram_size) {
+                        std::string header(reinterpret_cast<const char*>(&rdram[ucode_phys]), 256);
+                        // See the matching comment in rsp.cpp's banner detection: the
+                        // GBI-1/GBI-2 check must stay local to *this* banner match --
+                        // searching the whole window for "fifo 2" independently can
+                        // pick up an unrelated, adjacent ucode's banner.
+                        size_t s2dex_anchor = header.find("ucode S2DEX");
+                        if (s2dex_anchor != std::string::npos) {
+                            std::string local = header.substr(s2dex_anchor, 40);
+                            bool is_gbi2 = local.find("S2DEX2") != std::string::npos || local.find("fifo 2") != std::string::npos;
+                            current_ucode = is_gbi2 ? MicrocodeType::S2DEX2 : MicrocodeType::S2DEX;
+                            current_ucode_active = current_ucode;
+                            return true;
+                        } else if (header.find("F3DEX 2") != std::string::npos ||
+                            header.find("F3DEX2") != std::string::npos ||
+                            header.find("fifo 2") != std::string::npos ||
+                            header.find("F3DZEX") != std::string::npos) {
+                            current_ucode = MicrocodeType::F3DEX2;
+                            current_ucode_active = current_ucode;
+                            return true;
+                        } else if (header.find("F3DEX") != std::string::npos ||
+                                   header.find("F3DLX") != std::string::npos) {
+                            current_ucode = MicrocodeType::F3DEX;
+                            current_ucode_active = current_ucode;
+                            return true;
+                        } else if (header.find("Fast3D") != std::string::npos) {
+                            current_ucode = MicrocodeType::Fast3D;
+                            current_ucode_active = current_ucode;
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                if (!check_header(w1) && rdp_half1 != 0) {
+                    check_header(rdp_half1);
+                }
+                break;
+            }
+
+            case 0xB8: // G_ENDDL (Fast3D)
+            case 0xDF: { // G_ENDDL (F3DEX / F3DEX2)
+                if (!dl_stack.empty()) {
+                    pc = dl_stack.back();
+                    dl_stack.pop_back();
+                } else {
+                    // Finished entire display list!
+                    std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
+                              << " | incount: [0]=" << stat_incount[0] << " [1]=" << stat_incount[1] 
+                              << " [2]=" << stat_incount[2] << " [3]=" << stat_incount[3]
+                              << " | rasterize called: " << stat_rast_called
+                              << " | cull_back: " << stat_cull_back << " cull_front: " << stat_cull_front
+                              << " | scissor_rej: " << stat_scissor_reject
+                              << " | pixels: drawn=" << stat_pixels_drawn << " z_fail=" << stat_pixels_z_fail
+                              << " a_fail=" << stat_pixels_a_fail << "\n";
+                    mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+                    return;
+                }
+                break;
+            }
+
+            case 0xBC: // G_MOVEWORD (Fast3D / F3DEX)
+            case 0xDB: { // G_MOVEWORD (F3DEX2)
+                execute_moveword(w0, w1, current_ucode);
+                break;
+            }
+
+            case 0xBB: // G_TEXTURE (Fast3D)
+            case 0xD7: { // G_TEXTURE (F3DEX / F3DEX2)
+                active_tile = (w0 >> 8) & 0x7;
+                texture_scale_s = ((w1 >> 16) & 0xFFFF) / 65536.0f;
+                texture_scale_t = (w1 & 0xFFFF) / 65536.0f;
+                if (texture_scale_s == 0.0f) texture_scale_s = 1.0f;
+                if (texture_scale_t == 0.0f) texture_scale_t = 1.0f;
+                texture_enabled = ((w0 & 0xFF) != 0);
+                break;
+            }
+
+            case 0xB7: // G_SETGEOMETRYMODE
+                geometry_mode |= w1;
+                break;
+
+            case 0xB6: // G_CLEARGEOMETRYMODE
+                geometry_mode &= ~w1;
+                break;
+
+            case 0xD9: // G_GEOMETRYMODE (F3DEX2)
+                geometry_mode = (geometry_mode & (w0 & 0x00FFFFFF)) | (w1 & 0x00FFFFFF);
+                break;
+
+            case 0xB9: { // G_SETOTHERMODE_L (Fast3D)
+                u32 shift = (w0 >> 8) & 0xFF;
+                u32 len = w0 & 0xFF;
+                u32 mask = (len >= 32) ? 0xFFFFFFFFU : (((1ULL << len) - 1) << shift);
+                other_mode_l = (other_mode_l & ~mask) | (w1 & mask);
+                break;
+            }
+            case 0xE2: { // G_SETOTHERMODE_L (F3DEX2)
+                u32 len = (w0 & 0xFF) + 1;
+                u32 shift = 32 - ((w0 >> 8) & 0xFF) - len;
+                u32 mask = (len >= 32) ? 0xFFFFFFFFU : (((1ULL << len) - 1) << shift);
+                other_mode_l = (other_mode_l & ~mask) | (w1 & mask);
+                break;
+            }
+
+            case 0xBA: { // G_SETOTHERMODE_H (Fast3D)
+                u32 shift = (w0 >> 8) & 0xFF;
+                u32 len = w0 & 0xFF;
+                u32 mask = (len >= 32) ? 0xFFFFFFFFU : (((1ULL << len) - 1) << shift);
+                other_mode_h = (other_mode_h & ~mask) | (w1 & mask);
+                break;
+            }
+            case 0xE3: { // G_SETOTHERMODE_H (F3DEX2)
+                u32 len = (w0 & 0xFF) + 1;
+                u32 shift = 32 - ((w0 >> 8) & 0xFF) - len;
+                u32 mask = (len >= 32) ? 0xFFFFFFFFU : (((1ULL << len) - 1) << shift);
+                other_mode_h = (other_mode_h & ~mask) | (w1 & mask);
+                break;
+            }
+
+            case 0xC0: // G_NOOP
+            case 0xE6: // G_RDPLOADSYNC
+            case 0xE7: // G_RDPPIPESYNC
+            case 0xE8: // G_RDPTILESYNC
+            case 0xE9: // G_RDPFULLSYNC
+                break;
+
+            case 0xED: { // G_SETSCISSOR
+                scissor_ulx = ((w0 >> 12) & 0xFFF) / 4;
+                scissor_uly = (w0 & 0xFFF) / 4;
+                scissor_lrx = ((w1 >> 12) & 0xFFF) / 4;
+                scissor_lry = (w1 & 0xFFF) / 4;
+                if (scissor_lrx <= scissor_ulx) scissor_lrx = 320;
+                if (scissor_lry <= scissor_uly) scissor_lry = 240;
+                break;
+            }
+
+            case 0xB4: // G_RDPHALF_1 (Fast3D/F3DEX)
+            case 0xE1: // G_RDPHALF_1 (F3DEX2)
+                rdp_half1 = w1;
+                break;
+
+            case 0xB3: // G_RDPHALF_2 (Fast3D/F3DEX)
+            case 0xF1: // G_RDPHALF_2 (F3DEX2)
+                rdp_half2 = w1;
+                break;
+
+            case 0xF0: { // G_LOADTLUT
+                tmem_dirty = true;
+                ++tmem_gen_;
+                u32 tile_idx = (w1 >> 24) & 0x7;
+                u32 count = ((w1 >> 14) & 0x3FF) + 1;
+                u32 start_word = tiles[tile_idx].tmem;
+                u32 tmem_dest = start_word * 8;
+                u32 bytes = count * 2;
+
+                for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (timg_addr + b < rdram_size); ++b) {
+                    tmem[tmem_dest + b] = rdram[timg_addr + b];
+                }
+                u32 num_words = (bytes + 7) / 8;
+                for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
+                    tmem_word_dxt_zero[start_word + w] = false;
+                }
+                break;
+            }
+
+            case 0xF2: { // G_SETTILESIZE
+                u32 tile_idx = (w1 >> 24) & 0x7;
+                Tile& t = tiles[tile_idx];
+                t.sl = (w0 >> 12) & 0xFFF;
+                t.tl = w0 & 0xFFF;
+                t.sh = (w1 >> 12) & 0xFFF;
+                t.th = w1 & 0xFFF;
+                break;
+            }
+
+            case 0xF3: { // G_LOADBLOCK
+                tmem_dirty = true;
+                ++tmem_gen_;
+                u32 tile_idx = (w1 >> 24) & 0x7;
+                u32 lrs = (w1 >> 12) & 0xFFF;
+                u32 dxt = w1 & 0xFFF;
+
+                u32 src_addr = timg_addr;
+                u32 words = lrs + 1;
+                u32 start_word = tiles[tile_idx].tmem;
+                u32 tmem_dest = start_word * 8;
+
+                if (timg_size == 3) {
+                    u32 texels = words;
+                    for (u32 i = 0; i < texels; ++i) {
+                        u32 dram_idx = src_addr + i * 4;
+                        u32 rg_dest = tmem_dest + i * 2;
+                        u32 ba_dest = rg_dest + 0x800;
+                        if (dram_idx + 3 < rdram_size && ba_dest + 1 < tmem.size()) {
+                            tmem[rg_dest + 0] = rdram[dram_idx + 0];
+                            tmem[rg_dest + 1] = rdram[dram_idx + 1];
+                            tmem[ba_dest + 0] = rdram[dram_idx + 2];
+                            tmem[ba_dest + 1] = rdram[dram_idx + 3];
+                        }
+                    }
+                    u32 num_words = (texels * 2 + 7) / 8;
+                    bool is_dxt_zero = (dxt == 0);
+                    for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
+                        tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
+                    }
+                    for (u32 w = 0; w < num_words && (start_word + 256 + w < 512); ++w) {
+                        tmem_word_dxt_zero[start_word + 256 + w] = is_dxt_zero;
+                    }
+                } else {
+                    u32 bytes;
+                    switch (timg_size) {
+                        case 0: bytes = (words + 1) / 2; break; // 4-bit
+                        case 1: bytes = words; break;           // 8-bit
+                        case 2: bytes = words * 2; break;       // 16-bit
+                        default: bytes = words; break;
+                    }
+                    for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src_addr + b < rdram_size); ++b) {
+                        tmem[tmem_dest + b] = rdram[src_addr + b];
+                    }
+                    u32 num_words = (bytes + 7) / 8;
+                    bool is_dxt_zero = (dxt == 0);
+                    for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
+                        tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
+                    }
+                }
+                break;
+            }
+
+            case 0xF4: { // G_LOADTILE
+                tmem_dirty = true;
+                ++tmem_gen_;
+                u32 tile_idx = (w1 >> 24) & 0x7;
+                u32 uls = (w0 >> 12) & 0xFFF;
+                u32 ult = w0 & 0xFFF;
+                u32 lrs = (w1 >> 12) & 0xFFF;
+                u32 lrt = w1 & 0xFFF;
+
+                u32 start_s = uls / 4;
+                u32 start_t = ult / 4;
+                u32 end_s = lrs / 4;
+                u32 end_t = lrt / 4;
+
+                u32 num_rows = (end_t >= start_t) ? (end_t - start_t + 1) : 0;
+                u32 num_texels = (end_s >= start_s) ? (end_s - start_s + 1) : 0;
+
+                Tile& tile = tiles[tile_idx];
+                u32 tmem_dest = tile.tmem * 8;
+
+                if (timg_size == 3) {
+                    u32 dram_stride = timg_width * 4;
+                    u32 tmem_stride = tile.line > 0 ? (tile.line * 8) : (num_texels * 2);
+
+                    for (u32 row = 0; row < num_rows; ++row) {
+                        u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + (start_s * 4);
+                        u32 tmem_row_rg = tmem_dest + row * tmem_stride;
+                        u32 tmem_row_ba = tmem_row_rg + 0x800;
+
+                        for (u32 col = 0; col < num_texels; ++col) {
+                            u32 dram_idx = dram_row_start + col * 4;
+                            u32 rg_idx = tmem_row_rg + col * 2;
+                            u32 ba_idx = tmem_row_ba + col * 2;
+
+                            if (dram_idx + 3 < rdram_size && ba_idx + 1 < tmem.size()) {
+                                tmem[rg_idx + 0] = rdram[dram_idx + 0];
+                                tmem[rg_idx + 1] = rdram[dram_idx + 1];
+                                tmem[ba_idx + 0] = rdram[dram_idx + 2];
+                                tmem[ba_idx + 1] = rdram[dram_idx + 3];
+                            }
+                        }
+                        u32 rg_w0 = tmem_row_rg / 8;
+                        u32 rg_w1 = (tmem_row_rg + num_texels * 2 + 7) / 8;
+                        for (u32 w = rg_w0; w < rg_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                        u32 ba_w0 = tmem_row_ba / 8;
+                        u32 ba_w1 = (tmem_row_ba + num_texels * 2 + 7) / 8;
+                        for (u32 w = ba_w0; w < ba_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                    }
+                } else {
+                    u32 bpp_shift = (timg_size == 2) ? 1 : 0;
+                    u32 dram_stride = (timg_size == 0) ? ((timg_width + 1) / 2) : (timg_width << bpp_shift);
+                    u32 row_bytes = (timg_size == 0) ? ((num_texels + 1) / 2) : (num_texels << bpp_shift);
+                    u32 tmem_stride = tile.line > 0 ? (tile.line * 8) : row_bytes;
+
+                    for (u32 row = 0; row < num_rows; ++row) {
+                        u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + 
+                                             ((timg_size == 0) ? (start_s / 2) : (start_s << bpp_shift));
+                        u32 tmem_row_start = tmem_dest + row * tmem_stride;
+
+                        for (u32 b = 0; b < row_bytes; ++b) {
+                            if (tmem_row_start + b < tmem.size() && dram_row_start + b < rdram_size) {
+                                tmem[tmem_row_start + b] = rdram[dram_row_start + b];
+                            }
+                        }
+                        u32 w0 = tmem_row_start / 8;
+                        u32 w1 = (tmem_row_start + row_bytes + 7) / 8;
+                        for (u32 w = w0; w < w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                    }
+                }
+                break;
+            }
+
+            case 0xF5: { // G_SETTILE
+                u32 tile_idx = (w1 >> 24) & 0x7;
+                Tile& t = tiles[tile_idx];
+                t.format = (w0 >> 21) & 0x7;
+                t.size = (w0 >> 19) & 0x3;
+                t.line = (w0 >> 9) & 0x1FF;
+                t.tmem = w0 & 0x1FF;
+                t.palette = (w1 >> 20) & 0xF;
+                t.clamp_t = (w1 >> 19) & 0x1;
+                t.mirror_t = (w1 >> 18) & 0x1;
+                t.mask_t = (w1 >> 14) & 0xF;
+                t.shift_t = (w1 >> 10) & 0xF;
+                t.clamp_s = (w1 >> 9) & 0x1;
+                t.mirror_s = (w1 >> 8) & 0x1;
+                t.mask_s = (w1 >> 4) & 0xF;
+                t.shift_s = w1 & 0xF;
+                break;
+            }
+
+            case 0xF6: { // G_FILLRECT
+                u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
+                u32 lry = (w0 & 0xFFF) / 4;
+                u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
+                u32 uly = (w1 & 0xFFF) / 4;
+                rasterize_fill_rect(ulx, uly, lrx, lry, rdram, rdram_size);
+                break;
+            }
+
+            case 0xE4: // G_TEXRECT
+            case 0xE5: { // G_TEXRECTFLIP
+                bool flip = (opcode == 0xE5);
+                u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
+                u32 lry = (w0 & 0xFFF) / 4;
+                u32 tile_idx = (w1 >> 24) & 0x7;
+                u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
+                u32 uly = (w1 & 0xFFF) / 4;
+
+                if (ulx > lrx) std::swap(ulx, lrx);
+                if (uly > lry) std::swap(uly, lry);
+
+                f32 s = 0.0f, t = 0.0f, dsdx = 1.0f, dtdy = 1.0f;
+
+                phys_pc = segment_to_physical(pc);
+                if (phys_pc + 8 <= rdram_size) {
+                    u32 nw0 = (static_cast<u32>(rdram[phys_pc + 0]) << 24) |
+                              (static_cast<u32>(rdram[phys_pc + 1]) << 16) |
+                              (static_cast<u32>(rdram[phys_pc + 2]) << 8)  |
+                               static_cast<u32>(rdram[phys_pc + 3]);
+                    u32 nw1 = (static_cast<u32>(rdram[phys_pc + 4]) << 24) |
+                              (static_cast<u32>(rdram[phys_pc + 5]) << 16) |
+                              (static_cast<u32>(rdram[phys_pc + 6]) << 8)  |
+                               static_cast<u32>(rdram[phys_pc + 7]);
+
+                    u8 next_op = (nw0 >> 24) & 0xFF;
+                    if (next_op == 0xB4 || next_op == 0xB3 || next_op == 0xB2 ||
+                        next_op == 0xE1 || next_op == 0xF1) {
+                        s = static_cast<s16>((nw1 >> 16) & 0xFFFF) / 32.0f;
+                        t = static_cast<s16>(nw1 & 0xFFFF) / 32.0f;
+                        pc += 8;
+
+                        u32 phys_pc2 = segment_to_physical(pc);
+                        if (phys_pc2 + 8 <= rdram_size) {
+                            u32 nnw0 = (static_cast<u32>(rdram[phys_pc2 + 0]) << 24) |
+                                       (static_cast<u32>(rdram[phys_pc2 + 1]) << 16) |
+                                       (static_cast<u32>(rdram[phys_pc2 + 2]) << 8)  |
+                                        static_cast<u32>(rdram[phys_pc2 + 3]);
+                            u32 nnw1 = (static_cast<u32>(rdram[phys_pc2 + 4]) << 24) |
+                                       (static_cast<u32>(rdram[phys_pc2 + 5]) << 16) |
+                                       (static_cast<u32>(rdram[phys_pc2 + 6]) << 8)  |
+                                        static_cast<u32>(rdram[phys_pc2 + 7]);
+                            u8 next_op2 = (nnw0 >> 24) & 0xFF;
+                            if (next_op2 == 0xB3 || next_op2 == 0xB2 || next_op2 == 0xF1) {
+                                dsdx = static_cast<s16>((nnw1 >> 16) & 0xFFFF) / 1024.0f;
+                                dtdy = static_cast<s16>(nnw1 & 0xFFFF) / 1024.0f;
+                                pc += 8;
+                            }
+                        }
+                    } else {
+                        s = static_cast<s16>((nw0 >> 16) & 0xFFFF) / 32.0f;
+                        t = static_cast<s16>(nw0 & 0xFFFF) / 32.0f;
+                        dsdx = static_cast<s16>((nw1 >> 16) & 0xFFFF) / 1024.0f;
+                        dtdy = static_cast<s16>(nw1 & 0xFFFF) / 1024.0f;
+                        pc += 8;
+                    }
+                }
+                rasterize_tex_rect(ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip, rdram, rdram_size);
+                break;
+            }
+
+            case 0xEA: // G_SETKEYGB
+            case 0xEB: // G_SETKEYR
+            case 0xEC: // G_SETCONVERT
+                break;
+
+            case 0xEE: { // G_SETPRIMDEPTH
+                prim_depth = (w1 >> 16) & 0xFFFF;
+                prim_dz = w1 & 0xFFFF;
+                break;
+            }
+
+            case 0xEF: { // G_RDPSETOTHERMODE
+                other_mode_h = w0 & 0x00FFFFFF;
+                other_mode_l = w1;
+                break;
+            }
+
+            case 0xF7: // G_SETFILLCOLOR
+                fill_color = w1;
+                break;
+
+            case 0xF8: // G_SETFOGCOLOR
+                fog_color = w1;
+                break;
+
+            case 0xF9: // G_SETBLENDCOLOR
+                blend_color = w1;
+                break;
+
+            case 0xFA: // G_SETPRIMCOLOR
+                prim_color = w1;
+                break;
+
+            case 0xFB: // G_SETENVCOLOR
+                env_color = w1;
+                break;
+
+            case 0xFC: // G_SETCOMBINE
+                combine_mode_w0 = w0;
+                combine_mode_w1 = w1;
+                combine_mode_set = true;
+                break;
+
+            case 0xFD: { // G_SETTIMG
+                timg_format = (w0 >> 21) & 0x7;
+                timg_size = (w0 >> 19) & 0x3;
+                timg_width = (w0 & 0xFFF) + 1;
+                timg_addr = segment_to_physical(w1);
+                break;
+            }
+
+            case 0xFE: { // G_SETDEPTHIMAGE
+                depth_image_addr = segment_to_physical(w1);
+                break;
+            }
+
+            case 0xFF: { // G_SETCOLORIMAGE
+                color_image_format = (w0 >> 21) & 0x7;
+                color_image_size = (w0 >> 19) & 0x3;
+                color_image_width = (w0 & 0xFFF) + 1;
+                color_image_addr = segment_to_physical(w1);
+                if (hires_) hires_->unbind();
+                break;
+            }
+
+            default: {
+                static std::unordered_set<u8> logged_unknown_opcodes;
+                if (logged_unknown_opcodes.insert(opcode).second) {
+                    std::cerr << "[RDP] Unknown DL opcode: 0x" << std::hex << (int)opcode 
+                              << " at seg PC: 0x" << (pc - 8) << " phys: 0x" << phys_pc 
+                              << " w0: 0x" << w0 << " w1: 0x" << w1 
+                              << " ucode: " << (int)current_ucode << std::dec << "\n";
+                }
+                break;
+            }
+        }
+    }
+
+    std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
+              << " | incount: [0]=" << stat_incount[0] << " [1]=" << stat_incount[1] 
+              << " [2]=" << stat_incount[2] << " [3]=" << stat_incount[3]
+              << " | rasterize called: " << stat_rast_called
+              << " | cull_back: " << stat_cull_back << " cull_front: " << stat_cull_front
+              << " | scissor_rej: " << stat_scissor_reject
+              << " | pixels: drawn=" << stat_pixels_drawn << " z_fail=" << stat_pixels_z_fail
+              << " a_fail=" << stat_pixels_a_fail << "\n";
+
+    mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+}
+
+void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size) {
+    if (color_image_addr != 0 && color_image_addr == depth_image_addr) {
+        clear_zbuffer();
+    }
+    if (color_image_addr >= rdram_size) return;
+
+    u32 fb_w = color_image_width ? color_image_width : 320;
+    u32 max_x = std::min({lrx, fb_w, scissor_lrx});
+    u32 max_y = std::min({lry, 240U, scissor_lry});
+    u32 start_x = std::max(ulx, scissor_ulx);
+    u32 start_y = std::max(uly, scissor_uly);
+    // FILL/COPY rectangles include their lower-right pixel (the SDK macros pass
+    // x+w-1); an exclusive loop drops the last column and row.
+    u32 cycle_type = (other_mode_h >> 20) & 0x3;
+    if (cycle_type == 2 || cycle_type == 3) {
+        max_x = std::min({lrx + 1, fb_w, scissor_lrx});
+        max_y = std::min({lry + 1, 240U, scissor_lry});
+    }
+
+    if (start_x >= max_x || start_y >= max_y) return;
+
+    HiResTarget* hr = hires_target(rdram, rdram_size);
+    if (color_image_size == 2) { // 16-bit
+        u16 color16 = static_cast<u16>(fill_color & 0xFFFF);
+        for (u32 y = start_y; y < max_y; ++y) {
+            for (u32 x = start_x; x < max_x; ++x) {
+                u32 idx = color_image_addr + (y * fb_w + x) * 2;
+                if (idx + 1 < rdram_size) {
+                    rdram[idx + 0] = (color16 >> 8) & 0xFF;
+                    rdram[idx + 1] = color16 & 0xFF;
+                    if (y * fb_w + x < hires_shadow_len_) hires_shadow_[y * fb_w + x] = color16;
+                }
+            }
+        }
+        if (hr) hires_->fill_rect(hr, start_x, start_y, max_x, max_y, fb_pixel_to_argb(color16, 2));
+    } else if (color_image_size == 3) { // 32-bit
+        for (u32 y = start_y; y < max_y; ++y) {
+            for (u32 x = start_x; x < max_x; ++x) {
+                u32 idx = color_image_addr + (y * fb_w + x) * 4;
+                if (idx + 3 < rdram_size) {
+                    rdram[idx + 0] = (fill_color >> 24) & 0xFF;
+                    rdram[idx + 1] = (fill_color >> 16) & 0xFF;
+                    rdram[idx + 2] = (fill_color >> 8) & 0xFF;
+                    rdram[idx + 3] = fill_color & 0xFF;
+                    if (y * fb_w + x < hires_shadow_len_) hires_shadow_[y * fb_w + x] = fill_color;
+                }
+            }
+        }
+        if (hr) hires_->fill_rect(hr, start_x, start_y, max_x, max_y, fb_pixel_to_argb(fill_color, 4));
+    }
+}
+
+void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size) {
+    u32 fb_w = st.fb_w;
+    if (x >= fb_w || y >= kFbLines) return;
+    u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? st.scissor_lrx : fb_w;
+    u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? st.scissor_lry : kFbLines;
+    if (x < st.scissor_ulx || x >= eff_lrx || y < st.scissor_uly || y >= eff_lry) return;
+
+    u8 a = (color >> 24) & 0xFF;
+    if (st.alpha_compare == 1) { // G_AC_THRESHOLD
+        if (a < st.alpha_threshold) return;
+    } else if (st.alpha_compare == 3) { // G_AC_DITHER
+        if (a == 0) return;
+    }
+
+    // Alpha check for coverage/blending modes (CVG_X_ALPHA: 0x1000, ALPHA_CVG_SEL: 0x2000, FORCE_BL: 0x4000, ZMODE_XLU: 0x800, IM_RD: 0x40, AA_EN: 0x8)
+    if (a == 0 && st.alpha_zero_kill) {
+        stat_pixels_a_fail++;
+        return;
+    }
+
+    // Depth test
+    u32 pixel_idx = y * fb_w + x;
+    if (st.z_compare && pixel_idx < internal_zbuffer.size()) {
+        if (z > internal_zbuffer[pixel_idx]) {
+            stat_pixels_z_fail++;
+            return; // Behind existing pixel
+        }
+    }
+    if (st.z_update && pixel_idx < internal_zbuffer.size()) {
+        internal_zbuffer[pixel_idx] = z;
+    }
+
+    stat_pixels_drawn++;
+
+    if (st.fb_size == 2) { // 16-bit RGBA 5-5-5-1
+        u8 r = (color >> 16) & 0xFF;
+        u8 g = (color >> 8) & 0xFF;
+        u8 b = color & 0xFF;
+
+        u32 idx = st.fb_addr + pixel_idx * 2;
+        if (idx + 1 < rdram_size) {
+            if (st.blend_enabled && a < 255) {
+                u16 dest_p = (static_cast<u16>(rdram[idx + 0]) << 8) | static_cast<u16>(rdram[idx + 1]);
+                u8 dest_r = ((dest_p >> 11) & 0x1F) * 255 / 31;
+                u8 dest_g = ((dest_p >> 6) & 0x1F) * 255 / 31;
+                u8 dest_b = ((dest_p >> 1) & 0x1F) * 255 / 31;
+                u8 dest_a = (dest_p & 1) ? 255 : 0;
+                raster::blend_rgb(st, color, dest_r, dest_g, dest_b, dest_a, r, g, b);
+            }
+
+            u16 p = (((r * 31 / 255) & 0x1F) << 11) |
+                    (((g * 31 / 255) & 0x1F) << 6)  |
+                    (((b * 31 / 255) & 0x1F) << 1)  |
+                    (a > 0 ? 1 : 0);
+
+            rdram[idx + 0] = (p >> 8) & 0xFF;
+            rdram[idx + 1] = p & 0xFF;
+            if (pixel_idx < hires_shadow_len_) hires_shadow_[pixel_idx] = p;
+        }
+    } else if (st.fb_size == 3) { // 32-bit RGBA
+        u32 idx = st.fb_addr + pixel_idx * 4;
+        if (idx + 3 < rdram_size) {
+            u8 r = (color >> 16) & 0xFF;
+            u8 g = (color >> 8) & 0xFF;
+            u8 b = color & 0xFF;
+
+            if (st.blend_enabled && a < 255) {
+                u8 dest_r = rdram[idx + 0];
+                u8 dest_g = rdram[idx + 1];
+                u8 dest_b = rdram[idx + 2];
+                u8 dest_a = rdram[idx + 3];
+                raster::blend_rgb(st, color, dest_r, dest_g, dest_b, dest_a, r, g, b);
+            }
+
+            rdram[idx + 0] = r;
+            rdram[idx + 1] = g;
+            rdram[idx + 2] = b;
+            rdram[idx + 3] = a;
+            if (pixel_idx < hires_shadow_len_)
+                hires_shadow_[pixel_idx] = (static_cast<u32>(r) << 24) | (static_cast<u32>(g) << 16) | (static_cast<u32>(b) << 8) | a;
+        }
+    }
+}
+
+void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t, f32 dsdx, f32 dtdy, bool flip, u8* rdram, size_t rdram_size) {
+    if (color_image_addr >= rdram_size) return;
+    const DrawState& st = draw_state();
+    HiResTarget* hr = hires_target(rdram, rdram_size);
+    NativeSink sink{*this, st, rdram, rdram_size};
+    raster::tex_rect(st, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip, 1, 0, INT_MAX, sink);
+    if (hr) hires_->tex_rect(hr, st, draw_state_serial_, tmem_gen_, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip);
+}
+
+void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size) {
+    stat_rast_called++;
+    if (color_image_addr >= rdram_size) return;
+
+    if (v0.w <= 0.0001f || v1.w <= 0.0001f || v2.w <= 0.0001f) return;
+
+    // Backface culling: signed 2D area
+    f32 area = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
+    bool cull_front = false;
+    bool cull_back = false;
+    if (current_ucode_active == MicrocodeType::F3DEX2) {
+        cull_front = (geometry_mode & 0x00000200) != 0;
+        cull_back  = (geometry_mode & 0x00000400) != 0;
+    } else {
+        cull_front = (geometry_mode & 0x00001000) != 0;
+        cull_back  = (geometry_mode & 0x00002000) != 0;
+    }
+
+    if (cull_back && area >= 0.0f) { stat_cull_back++; return; }
+    if (cull_front && area <= 0.0f) { stat_cull_front++; return; }
+    if (std::abs(area) < 0.001f) return;
+
+    const DrawState& st = draw_state();
+    HiResTarget* hr = hires_target(rdram, rdram_size);
+    NativeSink sink{*this, st, rdram, rdram_size};
+    if (!raster::triangle(st, v0, v1, v2, area, 1, 0, INT_MAX, sink)) {
+        stat_scissor_reject++;
+        return;
+    }
+    if (hr) hires_->triangle(hr, st, draw_state_serial_, tmem_gen_, v0, v1, v2, area);
+}
+
+// ===========================================================================
+// S2DEX / S2DEX2 microcode (HLE)
+// ===========================================================================
+//
+// S2DEX is a 2D sprite/background microcode "derived from F3DEX" (per the
+// N64 programming manual, ch.25.5): it reuses F3DEX's shared RDP-level GBI
+// (gDPSetTextureImage, gDPSetTile, scissoring, sync, colour/combine setup,
+// gSPDisplayList/gSPEndDisplayList/gSPBranchList, gSPSegment, ...) and only
+// replaces the 3D-primitive opcodes (matrices, vertices, triangles, lights)
+// with its own low-numbered opcodes for BG planes, 2D sprites/rectangles,
+// a single (stack-less) 2D transform matrix, TMEM texture loading, and a
+// status-word-based conditional display-list branch.
+//
+// Because the replaced opcodes reuse the same numeric values as F3D's own
+// vertex/triangle/matrix commands (0x01-0x0b, 0xB0-0xB2, 0xC1-0xC4, 0xDA,
+// 0xDC, 0xE4), they can't be added as ordinary switch cases in
+// process_display_list's shared switch without colliding. Instead,
+// execute_s2dex_command() intercepts every opcode up front whenever the
+// active microcode is S2DEX/S2DEX2, consuming the ones that are S2DEX
+// opcodes (returning true) and falling through (returning false) for the
+// genuinely shared opcodes (G_DL, G_ENDDL, G_SETTIMG/G_SETTILE/..., sync,
+// scissor, combine/colour setup) which the common switch already decodes
+// correctly for both GBI generations.
+//
+// Sprites/rectangles (G_OBJ_SPRITE/RECTANGLE/RECTANGLE_R) draw from texel
+// data that a prior G_OBJ_LOADTXTR-family command already placed in TMEM, so
+// those reuse the existing tile/TMEM/sample_texture/rasterize_tex_rect
+// machinery, just like a normal F3D G_TEXRECT. Backgrounds (G_BG_1CYC /
+// G_BG_COPY) are conceptually a texture "streamed" through TMEM in slices by
+// the real microcode purely because TMEM is only 4KB; since our HLE can
+// address RDRAM directly, s2dex_draw_bg() skips that streaming and samples
+// the source image directly out of RDRAM instead, which is visually
+// equivalent without needing to reproduce the RSP's TMEM-slicing algorithm.
+
+namespace {
+
+inline u16 s2d_read_u16(const u8* rdram, u32 addr) {
+    return (static_cast<u16>(rdram[addr]) << 8) | static_cast<u16>(rdram[addr + 1]);
+}
+inline s16 s2d_read_s16(const u8* rdram, u32 addr) {
+    return static_cast<s16>(s2d_read_u16(rdram, addr));
+}
+inline u32 s2d_read_u32(const u8* rdram, u32 addr) {
+    return (static_cast<u32>(rdram[addr + 0]) << 24) | (static_cast<u32>(rdram[addr + 1]) << 16) |
+           (static_cast<u32>(rdram[addr + 2]) << 8)  |  static_cast<u32>(rdram[addr + 3]);
+}
+inline s32 s2d_read_s32(const u8* rdram, u32 addr) {
+    return static_cast<s32>(s2d_read_u32(rdram, addr));
+}
+
+// Fetches one texel directly out of a plain row-major RDRAM image (used by
+// BG drawing, which bypasses TMEM entirely). Mirrors fetch_texel()'s format
+// decode (see above), but with a linear RDRAM stride instead of TMEM's
+// tile/line addressing -- CI textures still look their palette up in TMEM,
+// since a real G_OBJ_LOADTXTR TLUT load (or plain G_LOADTLUT) already placed
+// it there.
+// row_stride_bytes must be the real hardware row stride (see
+// s2d_bg_row_stride_bytes below) -- it is *not* generally image_w_texels
+// (or half/double of it): the S2DEX microcode derives it via a lossy
+// fixed-point computation on the raw (undivided) imageW field, and BG
+// assets with a non-"round" imageW rely on that exact truncation, so a
+// naively-recomputed stride shifts every row by a texel or so (visible as
+// a diagonal shear across the whole image).
+u32 fetch_bg_texel_raw(const u8* rdram, size_t rdram_size, const std::array<u8, 4096>& tmem,
+                        u32 image_addr, u8 fmt, u8 siz, u8 pal, u32 tlut_type,
+                        u32 row_stride_bytes, s32 ix, s32 iy) {
+    if (row_stride_bytes == 0) return 0;
+    if (siz == 0) { // 4-bit
+        u32 offset = image_addr + static_cast<u32>(iy) * row_stride_bytes + (static_cast<u32>(ix) / 2);
+        if (offset >= rdram_size) return 0;
+        u8 byte_val = rdram[offset];
+        u8 val = (ix & 1) ? (byte_val & 0xF) : ((byte_val >> 4) & 0xF);
+        if (fmt == 2) { // CI4
+            if (tlut_type == 0) { u8 i = static_cast<u8>(val * 17); return (static_cast<u32>(i) << 24) | (i << 16) | (i << 8) | i; }
+            return raster::lookup_tlut(tmem.data(), pal * 16u + val, tlut_type);
+        } else if (fmt == 3) { // IA4
+            u8 i = static_cast<u8>(((val >> 1) & 0x7) * 255 / 7);
+            u8 a = (val & 1) ? 255 : 0;
+            return (static_cast<u32>(a) << 24) | (static_cast<u32>(i) << 16) | (static_cast<u32>(i) << 8) | i;
+        }
+        u8 i = static_cast<u8>(val * 17);
+        return (static_cast<u32>(i) << 24) | (i << 16) | (i << 8) | i;
+    } else if (siz == 1) { // 8-bit
+        u32 offset = image_addr + static_cast<u32>(iy) * row_stride_bytes + static_cast<u32>(ix);
+        if (offset >= rdram_size) return 0;
+        u8 val = rdram[offset];
+        if (fmt == 2) { // CI8
+            if (tlut_type == 0) return 0xFF000000u | (static_cast<u32>(val) << 16) | (val << 8) | val;
+            return raster::lookup_tlut(tmem.data(), val, tlut_type);
+        } else if (fmt == 3) { // IA8
+            u8 i = static_cast<u8>(((val >> 4) & 0xF) * 17);
+            u8 a = static_cast<u8>((val & 0xF) * 17);
+            return (static_cast<u32>(a) << 24) | (static_cast<u32>(i) << 16) | (static_cast<u32>(i) << 8) | i;
+        }
+        return (static_cast<u32>(val) << 24) | (val << 16) | (val << 8) | val;
+    } else if (siz == 2) { // 16-bit
+        u32 offset = image_addr + static_cast<u32>(iy) * row_stride_bytes + static_cast<u32>(ix) * 2;
+        if (offset + 1 >= rdram_size) return 0;
+        u16 p = (static_cast<u16>(rdram[offset]) << 8) | static_cast<u16>(rdram[offset + 1]);
+        if (fmt == 3) { // IA16
+            u8 i = (p >> 8) & 0xFF, a = p & 0xFF;
+            return (static_cast<u32>(a) << 24) | (static_cast<u32>(i) << 16) | (static_cast<u32>(i) << 8) | i;
+        }
+        return raster::rgba16_to_rgba32(p);
+    } else { // 32-bit: plain R,G,B,A bytes in RDRAM (no TMEM bank split -- that's a TMEM-only quirk)
+        u32 offset = image_addr + static_cast<u32>(iy) * row_stride_bytes + static_cast<u32>(ix) * 4;
+        if (offset + 3 >= rdram_size) return 0;
+        u8 r = rdram[offset], g = rdram[offset + 1], b = rdram[offset + 2], a = rdram[offset + 3];
+        return (static_cast<u32>(a) << 24) | (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | b;
+    }
+}
+
+// The BG image's row byte-stride, replicating the exact fixed-point
+// computation guS2DEmuBgRect1Cyc (us2dex_emu.c) performs on the *raw*
+// (undivided) imageW field:
+//   imageSrcW      = imageWraw << 3;                 // raw field, not imageW/4
+//   imageSrcWsize  = (imageSrcW / TMEMSHIFT[siz]) << 3;
+// This is a genuinely lossy computation (integer division truncates), and
+// BG assets whose imageW isn't a "round" multiple for their format/size
+// rely on that exact truncation -- so this can differ from the naive
+// texel_count * bytes_per_texel stride by a texel or so per row, which
+// shows up as a diagonal shear across the whole image if not replicated.
+u32 s2d_bg_row_stride_bytes(u16 image_w_raw, u8 siz) {
+    static const u32 TMEM_SHIFT[4] = {0x200, 0x100, 0x80, 0x40};
+    u32 image_src_w = static_cast<u32>(image_w_raw) << 3;
+    return (image_src_w / TMEM_SHIFT[siz & 0x3]) << 3;
+}
+
+} // namespace
+
+void RDP::s2dex_tmem_load_block(u32 tmem_dest_words, u32 src_addr, u32 lrs, u8* rdram, size_t rdram_size) {
+    tmem_dirty = true;
+    ++tmem_gen_;
+    // Mirrors the G_LOADBLOCK opcode handler: a (mostly) format-agnostic raw
+    // copy of (lrs+1) TMEM words. uObjTxtrBlock_t doesn't carry its own
+    // format/size (S2DEX derives them from the ambient G_SETTIMG state, same
+    // as a plain F3D G_LOADBLOCK would), hence the use of timg_size here.
+    u32 tmem_dest = tmem_dest_words * 8;
+    u32 words = lrs + 1;
+    if (timg_size == 3) { // 32-bit: split into RG/BA TMEM banks
+        for (u32 i = 0; i < words; ++i) {
+            u32 dram_idx = src_addr + i * 4;
+            u32 rg_dest = tmem_dest + i * 2;
+            u32 ba_dest = rg_dest + 0x800;
+            if (dram_idx + 3 < rdram_size && ba_dest + 1 < tmem.size()) {
+                tmem[rg_dest + 0] = rdram[dram_idx + 0];
+                tmem[rg_dest + 1] = rdram[dram_idx + 1];
+                tmem[ba_dest + 0] = rdram[dram_idx + 2];
+                tmem[ba_dest + 1] = rdram[dram_idx + 3];
+            }
+        }
+        for (u32 w = 0; w < words && (tmem_dest_words + w < 512); ++w) {
+            tmem_word_dxt_zero[tmem_dest_words + w] = false;
+        }
+    } else {
+        u32 bytes;
+        switch (timg_size) {
+            case 0: bytes = (words + 1) / 2; break;
+            case 1: bytes = words; break;
+            default: bytes = words * 2; break;
+        }
+        for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src_addr + b < rdram_size); ++b) {
+            tmem[tmem_dest + b] = rdram[src_addr + b];
+        }
+        u32 num_words = (bytes + 7) / 8;
+        for (u32 w = 0; w < num_words && (tmem_dest_words + w < 512); ++w) {
+            tmem_word_dxt_zero[tmem_dest_words + w] = false;
+        }
+    }
+}
+
+void RDP::s2dex_tmem_load_tile(u32 tmem_dest_words, u32 src_addr, u32 texel_w, u32 texel_h, u8* rdram, size_t rdram_size) {
+    tmem_dirty = true;
+    ++tmem_gen_;
+    // Approximates G_LOADTILE for the OBJ_LOADTXTR "tile" load type: copies a
+    // texel_w x texel_h block, using the ambient G_SETTIMG width as the
+    // source row stride and packing TMEM tightly (no destination line
+    // padding, since uObjTxtrTile_t doesn't give us one).
+    u32 tmem_dest = tmem_dest_words * 8;
+    u32 src_row_texels = timg_width ? timg_width : texel_w;
+
+    if (timg_size == 3) { // 32-bit
+        for (u32 row = 0; row < texel_h; ++row) {
+            u32 dram_row = src_addr + row * src_row_texels * 4;
+            u32 tmem_row_rg = tmem_dest + row * texel_w * 2;
+            u32 tmem_row_ba = tmem_row_rg + 0x800;
+            for (u32 col = 0; col < texel_w; ++col) {
+                u32 dram_idx = dram_row + col * 4;
+                u32 rg_idx = tmem_row_rg + col * 2;
+                u32 ba_idx = tmem_row_ba + col * 2;
+                if (dram_idx + 3 < rdram_size && ba_idx + 1 < tmem.size()) {
+                    tmem[rg_idx + 0] = rdram[dram_idx + 0];
+                    tmem[rg_idx + 1] = rdram[dram_idx + 1];
+                    tmem[ba_idx + 0] = rdram[dram_idx + 2];
+                    tmem[ba_idx + 1] = rdram[dram_idx + 3];
+                }
+            }
+            u32 rg_w0 = tmem_row_rg / 8;
+            u32 rg_w1 = (tmem_row_rg + texel_w * 2 + 7) / 8;
+            for (u32 w = rg_w0; w < rg_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+            u32 ba_w0 = (tmem_row_rg + 0x800) / 8;
+            u32 ba_w1 = (tmem_row_rg + 0x800 + texel_w * 2 + 7) / 8;
+            for (u32 w = ba_w0; w < ba_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+        }
+        return;
+    }
+
+    u32 bpp_shift = (timg_size == 2) ? 1 : 0;
+    u32 src_row_bytes = (timg_size == 0) ? ((src_row_texels + 1) / 2) : (src_row_texels << bpp_shift);
+    u32 dst_row_bytes = (timg_size == 0) ? ((texel_w + 1) / 2) : (texel_w << bpp_shift);
+
+    for (u32 row = 0; row < texel_h; ++row) {
+        u32 dram_row = src_addr + row * src_row_bytes;
+        u32 tmem_row = tmem_dest + row * dst_row_bytes;
+        for (u32 b = 0; b < dst_row_bytes; ++b) {
+            if (tmem_row + b < tmem.size() && dram_row + b < rdram_size) {
+                tmem[tmem_row + b] = rdram[dram_row + b];
+            }
+        }
+        u32 w0 = tmem_row / 8;
+        u32 w1 = (tmem_row + dst_row_bytes + 7) / 8;
+        for (u32 w = w0; w < w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+    }
+}
+
+void RDP::s2dex_load_txtr(u32 tx_addr, u8* rdram, size_t rdram_size) {
+    if (tx_addr + 24 > rdram_size) return;
+    u32 type = s2d_read_u32(rdram, tx_addr);
+    u32 image_ptr = segment_to_physical(s2d_read_u32(rdram, tx_addr + 4));
+
+    if (type == 0x00000030) { // G_OBJLT_TLUT
+        tmem_dirty = true;
+        ++tmem_gen_;
+        u16 phead = s2d_read_u16(rdram, tx_addr + 8);
+        u16 pnum  = s2d_read_u16(rdram, tx_addr + 10);
+        u32 pal_index_base = (phead >= 256) ? (phead - 256) : 0;
+        u32 count = static_cast<u32>(pnum) + 1;
+        for (u32 i = 0; i < count; ++i) {
+            u32 off = 0x800 + (pal_index_base + i) * 2;
+            u32 src = image_ptr + i * 2;
+            if (off + 1 < tmem.size() && src + 1 < rdram_size) {
+                tmem[off + 0] = rdram[src + 0];
+                tmem[off + 1] = rdram[src + 1];
+            }
+            if (off / 8 < 512) tmem_word_dxt_zero[off / 8] = false;
+        }
+    } else if (type == 0x00fc1034) { // G_OBJLT_TXTRTILE
+        u16 tmem_word = s2d_read_u16(rdram, tx_addr + 8);
+        u16 twidth  = s2d_read_u16(rdram, tx_addr + 10);
+        u16 theight = s2d_read_u16(rdram, tx_addr + 12);
+        u32 texel_w = (twidth  >> 2) + 1;
+        u32 texel_h = (theight >> 2) + 1;
+        s2dex_tmem_load_tile(tmem_word, image_ptr, texel_w, texel_h, rdram, rdram_size);
+    } else { // G_OBJLT_TXTRBLOCK (0x00001033) and anything else defaults to a raw block load
+        u16 tmem_word = s2d_read_u16(rdram, tx_addr + 8);
+        u16 tsize = s2d_read_u16(rdram, tx_addr + 10);
+        s2dex_tmem_load_block(tmem_word, image_ptr, tsize, rdram, rdram_size);
+    }
+}
+
+RDP::S2DObjSpriteInfo RDP::s2dex_setup_obj_tile(u32 sp_addr, const u8* rdram, size_t rdram_size) {
+    S2DObjSpriteInfo info{};
+    if (sp_addr + 24 > rdram_size) return info;
+
+    s16 objX = s2d_read_s16(rdram, sp_addr + 0);
+    u16 scaleWraw = s2d_read_u16(rdram, sp_addr + 2);
+    u16 imageWraw = s2d_read_u16(rdram, sp_addr + 4);
+    s16 objY = s2d_read_s16(rdram, sp_addr + 8);
+    u16 scaleHraw = s2d_read_u16(rdram, sp_addr + 10);
+    u16 imageHraw = s2d_read_u16(rdram, sp_addr + 12);
+    u16 imageStride = s2d_read_u16(rdram, sp_addr + 16);
+    u16 imageAdrs   = s2d_read_u16(rdram, sp_addr + 18);
+    u8  imageFmt  = rdram[sp_addr + 20];
+    u8  imageSiz  = rdram[sp_addr + 21];
+    u8  imagePal  = rdram[sp_addr + 22];
+    u8  imageFlags = rdram[sp_addr + 23];
+
+    info.objX = objX / 4.0f;
+    info.objY = objY / 4.0f;
+    info.scaleW = (scaleWraw ? scaleWraw : 1024) / 1024.0f;
+    info.scaleH = (scaleHraw ? scaleHraw : 1024) / 1024.0f;
+    info.imageW = imageWraw / 32.0f;
+    info.imageH = imageHraw / 32.0f;
+    info.imageFlags = imageFlags;
+
+    Tile& t = tiles[0];
+    t = Tile{};
+    t.format = imageFmt;
+    t.size = imageSiz;
+    t.line = imageStride;
+    t.tmem = imageAdrs;
+    t.palette = imagePal;
+    t.clamp_s = t.clamp_t = 1;
+    t.mask_s = t.mask_t = 0;
+    u32 tex_w = std::max<u32>(1, static_cast<u32>(info.imageW));
+    u32 tex_h = std::max<u32>(1, static_cast<u32>(info.imageH));
+    t.sl = 0; t.tl = 0;
+    t.sh = static_cast<u16>((tex_w - 1) * 4);
+    t.th = static_cast<u16>((tex_h - 1) * 4);
+
+    active_tile = 0;
+    texture_enabled = true;
+    draw_state_dirty_ = true;
+    return info;
+}
+
+void RDP::s2dex_draw_obj_rect(u32 sp_addr, bool use_matrix, u8* rdram, size_t rdram_size) {
+    S2DObjSpriteInfo info = s2dex_setup_obj_tile(sp_addr, rdram, rdram_size);
+    if (info.imageW <= 0.0f || info.imageH <= 0.0f) return;
+
+    f32 obj_w = info.imageW / info.scaleW;
+    f32 obj_h = info.imageH / info.scaleH;
+
+    f32 screen_x0, screen_y0, screen_w, screen_h;
+    if (use_matrix) {
+        f32 base_x = (obj2d_matrix.baseScaleX != 0.0f) ? obj2d_matrix.baseScaleX : 1.0f;
+        f32 base_y = (obj2d_matrix.baseScaleY != 0.0f) ? obj2d_matrix.baseScaleY : 1.0f;
+        screen_x0 = obj2d_matrix.X + info.objX / base_x;
+        screen_y0 = obj2d_matrix.Y + info.objY / base_y;
+        screen_w = obj_w / base_x;
+        screen_h = obj_h / base_y;
+    } else {
+        screen_x0 = info.objX;
+        screen_y0 = info.objY;
+        screen_w = obj_w;
+        screen_h = obj_h;
+    }
+    if (screen_w <= 0.0f || screen_h <= 0.0f) return;
+
+    bool flipS = (info.imageFlags & 0x01) != 0;
+    bool flipT = (info.imageFlags & 0x10) != 0;
+
+    f32 dsdx = info.imageW / screen_w;
+    f32 dtdy = info.imageH / screen_h;
+
+    f32 fx0 = screen_x0, fy0 = screen_y0;
+    f32 fx1 = screen_x0 + screen_w, fy1 = screen_y0 + screen_h;
+
+    f32 clip_x0 = std::max(fx0, static_cast<f32>(scissor_ulx));
+    f32 clip_y0 = std::max(fy0, static_cast<f32>(scissor_uly));
+    f32 clip_x1 = std::min(fx1, static_cast<f32>(scissor_lrx));
+    f32 clip_y1 = std::min(fy1, static_cast<f32>(scissor_lry));
+    if (clip_x1 <= clip_x0 || clip_y1 <= clip_y0) return;
+
+    f32 skip_left = clip_x0 - fx0;
+    f32 skip_top  = clip_y0 - fy0;
+    f32 skip_right = fx1 - clip_x1;
+    f32 skip_bottom = fy1 - clip_y1;
+
+    f32 s0 = flipS ? (info.imageW - skip_right * dsdx) : (skip_left * dsdx);
+    f32 t0 = flipT ? (info.imageH - skip_bottom * dtdy) : (skip_top * dtdy);
+    f32 dsdx_signed = flipS ? -dsdx : dsdx;
+    f32 dtdy_signed = flipT ? -dtdy : dtdy;
+    // Sample from the centre of the first texel to avoid an off-by-one at
+    // the mirrored edge (floor(imageW - epsilon) must land on imageW-1).
+    if (flipS) s0 -= 0.001f;
+    if (flipT) t0 -= 0.001f;
+
+    u32 ulx = static_cast<u32>(clip_x0);
+    u32 uly = static_cast<u32>(clip_y0);
+    u32 lrx = static_cast<u32>(clip_x1);
+    u32 lry = static_cast<u32>(clip_y1);
+
+    rasterize_tex_rect(ulx, uly, lrx, lry, 0, s0, t0, dsdx_signed, dtdy_signed, false, rdram, rdram_size);
+}
+
+void RDP::s2dex_draw_obj_sprite(u32 sp_addr, u8* rdram, size_t rdram_size) {
+    S2DObjSpriteInfo info = s2dex_setup_obj_tile(sp_addr, rdram, rdram_size);
+    if (info.imageW <= 0.0f || info.imageH <= 0.0f) return;
+
+    f32 obj_w = info.imageW / info.scaleW;
+    f32 obj_h = info.imageH / info.scaleH;
+    bool flipS = (info.imageFlags & 0x01) != 0;
+    bool flipT = (info.imageFlags & 0x10) != 0;
+
+    f32 ox0 = info.objX, oy0 = info.objY;
+    f32 ox1 = info.objX + obj_w, oy1 = info.objY + obj_h;
+
+    f32 u0 = flipS ? info.imageW : 0.0f, u1 = flipS ? 0.0f : info.imageW;
+    f32 v0 = flipT ? info.imageH : 0.0f, v1 = flipT ? 0.0f : info.imageH;
+
+    auto transform = [&](f32 ox, f32 oy, f32 u, f32 v) {
+        Vertex vert{};
+        vert.sx = obj2d_matrix.A * ox + obj2d_matrix.B * oy + obj2d_matrix.X;
+        vert.sy = obj2d_matrix.C * ox + obj2d_matrix.D * oy + obj2d_matrix.Y;
+        vert.sz = 0.0f;
+        vert.x = vert.y = vert.z = 0.0f;
+        vert.w = 1.0f;
+        vert.u = u;
+        vert.v = v;
+        vert.r = vert.g = vert.b = vert.a = 255;
+        return vert;
+    };
+
+    Vertex p00 = transform(ox0, oy0, u0, v0);
+    Vertex p10 = transform(ox1, oy0, u1, v0);
+    Vertex p11 = transform(ox1, oy1, u1, v1);
+    Vertex p01 = transform(ox0, oy1, u0, v1);
+
+    // No combine table set up for S2DEX (it doesn't support gDPSetCombineMode
+    // the way F3D triangles need it to look right without vertex-colour
+    // modulation): draw the raw sampled texel colour directly.
+    bool had_combine = combine_mode_set;
+    combine_mode_set = false;
+    draw_state_dirty_ = true;
+    rasterize_triangle(p00, p10, p11, rdram, rdram_size);
+    rasterize_triangle(p00, p11, p01, rdram, rdram_size);
+    combine_mode_set = had_combine;
+    draw_state_dirty_ = true;
+}
+
+void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) {
+    if (bg_addr + 32 > rdram_size) return;
+
+    u16 imageX = s2d_read_u16(rdram, bg_addr + 0);
+    u16 imageWraw = s2d_read_u16(rdram, bg_addr + 2);
+    s16 frameX = s2d_read_s16(rdram, bg_addr + 4);
+    u16 frameWraw = s2d_read_u16(rdram, bg_addr + 6);
+    u16 imageY = s2d_read_u16(rdram, bg_addr + 8);
+    u16 imageHraw = s2d_read_u16(rdram, bg_addr + 10);
+    s16 frameY = s2d_read_s16(rdram, bg_addr + 12);
+    u16 frameHraw = s2d_read_u16(rdram, bg_addr + 14);
+    // NOTE: uObjBg_t's "imagePtr" field is declared `u64 *`, but on the N64's
+    // 32-bit MIPS target a pointer is 4 bytes regardless of what it points
+    // to -- it is NOT an 8-byte field. Every offset below matches the real
+    // (4+2+2+2+2+2+2+2 = 16, +4-byte pointer = 20, ...) 40-byte layout from
+    // gs2dex.h; treating the pointer as 8 bytes shifts every subsequent
+    // field (format/size/palette/flip/scale) by 4 bytes and reads garbage.
+    u32 imagePtr = segment_to_physical(s2d_read_u32(rdram, bg_addr + 16));
+    u8 imageFmt = rdram[bg_addr + 22];
+    u8 imageSiz = rdram[bg_addr + 23];
+    u16 imagePal = s2d_read_u16(rdram, bg_addr + 24);
+    u16 imageFlip = s2d_read_u16(rdram, bg_addr + 26);
+
+    f32 scaleW = 1024.0f, scaleH = 1024.0f;
+    if (scaled && bg_addr + 40 <= rdram_size) {
+        u16 sw = s2d_read_u16(rdram, bg_addr + 28);
+        u16 sh = s2d_read_u16(rdram, bg_addr + 30);
+        scaleW = sw ? sw : 1024.0f;
+        scaleH = sh ? sh : 1024.0f;
+    }
+    f32 sW = scaleW / 1024.0f, sH = scaleH / 1024.0f;
+
+    f32 frameX0 = frameX / 4.0f, frameW = frameWraw / 4.0f;
+    f32 frameY0 = frameY / 4.0f, frameH = frameHraw / 4.0f;
+    f32 imageX0 = imageX / 32.0f, imageY0 = imageY / 32.0f;
+    f32 imageW = imageWraw / 4.0f, imageH = imageHraw / 4.0f;
+    if (imageW <= 0.0f || imageH <= 0.0f || frameW <= 0.0f || frameH <= 0.0f) return;
+
+    bool flipS = (imageFlip & 0x01) != 0; // G_BG_FLAG_FLIPS
+
+    f32 fx0 = frameX0, fx1 = frameX0 + frameW;
+    f32 fy0 = frameY0, fy1 = frameY0 + frameH;
+    f32 clip_x0 = std::max(fx0, static_cast<f32>(scissor_ulx));
+    f32 clip_y0 = std::max(fy0, static_cast<f32>(scissor_uly));
+    f32 clip_x1 = std::min(fx1, static_cast<f32>(scissor_lrx));
+    f32 clip_y1 = std::min(fy1, static_cast<f32>(scissor_lry));
+    if (clip_x1 <= clip_x0 || clip_y1 <= clip_y0) return;
+
+    f32 skip_left = clip_x0 - fx0;
+    f32 skip_top = clip_y0 - fy0;
+    f32 skip_right = fx1 - clip_x1;
+
+    // img_x_for(x)=img_x_start + x*sW assuming no flip; a flip mirrors which
+    // screen column maps to the image's left edge.
+    f32 img_x_start = imageX0 + (flipS ? skip_right : skip_left) * sW;
+    f32 img_y_start = imageY0 + skip_top * sH;
+
+    u32 image_w_texels = std::max<u32>(1, static_cast<u32>(imageW));
+    u32 image_h_texels = std::max<u32>(1, static_cast<u32>(imageH));
+    u32 row_stride_bytes = s2d_bg_row_stride_bytes(imageWraw, imageSiz);
+
+    u32 out_w = static_cast<u32>(clip_x1 - clip_x0);
+    u32 out_h = static_cast<u32>(clip_y1 - clip_y0);
+    u32 screen_x0 = static_cast<u32>(clip_x0);
+    u32 screen_y0 = static_cast<u32>(clip_y0);
+
+    u32 tlut_type = (other_mode_h >> 14) & 0x3;
+    bool bilerp = (obj_render_mode & 0x08) != 0; // G_OBJRM_BILERP; BG only interpolates horizontally
+
+    const DrawState& st = draw_state();
+    HiResTarget* hr = hires_target(rdram, rdram_size);
+    if (hr) hires_bg_px_.assign(static_cast<size_t>(out_w) * out_h, 0);
+
+    for (u32 y = 0; y < out_h; ++y) {
+        f32 fyc = img_y_start + static_cast<f32>(y) * sH;
+        s32 iy = static_cast<s32>(std::floor(fyc)) % static_cast<s32>(image_h_texels);
+        if (iy < 0) iy += image_h_texels;
+
+        for (u32 x = 0; x < out_w; ++x) {
+            u32 col = flipS ? (out_w - 1 - x) : x;
+            f32 fxc = img_x_start + static_cast<f32>(col) * sW;
+            f32 fx_floor = std::floor(fxc);
+            s32 ix = static_cast<s32>(fx_floor) % static_cast<s32>(image_w_texels);
+            if (ix < 0) ix += image_w_texels;
+
+            u32 color;
+            if (bilerp) {
+                s32 ix2 = (ix + 1) % static_cast<s32>(image_w_texels);
+                f32 frac = fxc - fx_floor;
+                u32 c0 = fetch_bg_texel_raw(rdram, rdram_size, tmem, imagePtr, imageFmt, imageSiz,
+                                             static_cast<u8>(imagePal), tlut_type, row_stride_bytes, ix, iy);
+                u32 c1 = fetch_bg_texel_raw(rdram, rdram_size, tmem, imagePtr, imageFmt, imageSiz,
+                                             static_cast<u8>(imagePal), tlut_type, row_stride_bytes, ix2, iy);
+                u8 out[4];
+                for (int i = 0; i < 4; ++i) {
+                    int shift = 24 - i * 8;
+                    u8 a = (c0 >> shift) & 0xFF, b = (c1 >> shift) & 0xFF;
+                    out[i] = static_cast<u8>(a + frac * (static_cast<f32>(b) - static_cast<f32>(a)));
+                }
+                color = (static_cast<u32>(out[0]) << 24) | (static_cast<u32>(out[1]) << 16) |
+                        (static_cast<u32>(out[2]) << 8) | out[3];
+            } else {
+                color = fetch_bg_texel_raw(rdram, rdram_size, tmem, imagePtr, imageFmt, imageSiz,
+                                            static_cast<u8>(imagePal), tlut_type, row_stride_bytes, ix, iy);
+            }
+
+            if (st.combine_set) {
+                color = raster::combine(st, color, color, 255, 255, 255, 255);
+            }
+            write_pixel(st, screen_x0 + x, screen_y0 + y, color, 0.0f, rdram, rdram_size);
+            if (hr) hires_bg_px_[static_cast<size_t>(y) * out_w + x] = color;
+        }
+    }
+    // The high-resolution pass draws each background pixel as a block.
+    if (hr) hires_->blit(hr, st, draw_state_serial_, screen_x0, screen_y0, out_w, out_h, hires_bg_px_.data());
+}
+
+bool RDP::execute_s2dex_command(u8 opcode, u32 w0, u32 w1, MicrocodeType ucode,
+                                 u32& pc, std::vector<u32>& dl_stack,
+                                 u8* rdram, size_t rdram_size) {
+    bool gbi2 = (ucode == MicrocodeType::S2DEX2);
+
+    enum class Op {
+        None, BgCyc, BgCopy, ObjRect, ObjSprite, ObjMoveMem, SelectDL, ObjRenderMode,
+        ObjRectR, ObjLoadTxtr, ObjLdTxSprite, ObjLdTxRect, ObjLdTxRectR, RdpHalf0
+    };
+    Op op = Op::None;
+
+    if (gbi2) {
+        switch (opcode) {
+            case 0x01: op = Op::ObjRect; break;
+            case 0x02: op = Op::ObjSprite; break;
+            case 0x04: op = Op::SelectDL; break;
+            case 0x05: op = Op::ObjLoadTxtr; break;
+            case 0x06: op = Op::ObjLdTxSprite; break;
+            case 0x07: op = Op::ObjLdTxRect; break;
+            case 0x08: op = Op::ObjLdTxRectR; break;
+            case 0x09: op = Op::BgCyc; break;
+            case 0x0a: op = Op::BgCopy; break;
+            case 0x0b: op = Op::ObjRenderMode; break;
+            case 0xda: op = Op::ObjRectR; break;
+            case 0xdc: op = Op::ObjMoveMem; break;
+            case 0xe4: op = Op::RdpHalf0; break;
+            default: return false;
+        }
+    } else {
+        switch (opcode) {
+            case 0x01: op = Op::BgCyc; break;
+            case 0x02: op = Op::BgCopy; break;
+            case 0x03: op = Op::ObjRect; break;
+            case 0x04: op = Op::ObjSprite; break;
+            case 0x05: op = Op::ObjMoveMem; break;
+            case 0xb0: op = Op::SelectDL; break;
+            case 0xb1: op = Op::ObjRenderMode; break;
+            case 0xb2: op = Op::ObjRectR; break;
+            case 0xc1: op = Op::ObjLoadTxtr; break;
+            case 0xc2: op = Op::ObjLdTxSprite; break;
+            case 0xc3: op = Op::ObjLdTxRect; break;
+            case 0xc4: op = Op::ObjLdTxRectR; break;
+            case 0xe4: op = Op::RdpHalf0; break;
+            default: return false;
+        }
+    }
+
+    switch (op) {
+        case Op::BgCyc:
+            s2dex_draw_bg(segment_to_physical(w1), true, rdram, rdram_size);
+            return true;
+        case Op::BgCopy:
+            s2dex_draw_bg(segment_to_physical(w1), false, rdram, rdram_size);
+            return true;
+        case Op::ObjRect:
+            s2dex_draw_obj_rect(segment_to_physical(w1), false, rdram, rdram_size);
+            return true;
+        case Op::ObjRectR:
+            s2dex_draw_obj_rect(segment_to_physical(w1), true, rdram, rdram_size);
+            return true;
+        case Op::ObjSprite:
+            s2dex_draw_obj_sprite(segment_to_physical(w1), rdram, rdram_size);
+            return true;
+        case Op::ObjMoveMem: {
+            u32 index = (w0 >> 16) & 0xFF;
+            u32 addr = segment_to_physical(w1);
+            if (index == 23 && addr + 24 <= rdram_size) { // full uObjMtx
+                obj2d_matrix.A = s2d_read_s32(rdram, addr + 0) / 65536.0f;
+                obj2d_matrix.B = s2d_read_s32(rdram, addr + 4) / 65536.0f;
+                obj2d_matrix.C = s2d_read_s32(rdram, addr + 8) / 65536.0f;
+                obj2d_matrix.D = s2d_read_s32(rdram, addr + 12) / 65536.0f;
+                obj2d_matrix.X = s2d_read_s16(rdram, addr + 16) / 4.0f;
+                obj2d_matrix.Y = s2d_read_s16(rdram, addr + 18) / 4.0f;
+                u16 bx = s2d_read_u16(rdram, addr + 20), by = s2d_read_u16(rdram, addr + 22);
+                obj2d_matrix.baseScaleX = (bx ? bx : 1024) / 1024.0f;
+                obj2d_matrix.baseScaleY = (by ? by : 1024) / 1024.0f;
+            } else if (index == 7 && addr + 8 <= rdram_size) { // uObjSubMtx
+                obj2d_matrix.X = s2d_read_s16(rdram, addr + 0) / 4.0f;
+                obj2d_matrix.Y = s2d_read_s16(rdram, addr + 2) / 4.0f;
+                u16 bx = s2d_read_u16(rdram, addr + 4), by = s2d_read_u16(rdram, addr + 6);
+                obj2d_matrix.baseScaleX = (bx ? bx : 1024) / 1024.0f;
+                obj2d_matrix.baseScaleY = (by ? by : 1024) / 1024.0f;
+            }
+            return true;
+        }
+        case Op::ObjRenderMode:
+            obj_render_mode = w1;
+            return true;
+        case Op::ObjLoadTxtr:
+            s2dex_load_txtr(segment_to_physical(w1), rdram, rdram_size);
+            return true;
+        case Op::ObjLdTxSprite: {
+            u32 addr = segment_to_physical(w1);
+            s2dex_load_txtr(addr, rdram, rdram_size);
+            s2dex_draw_obj_sprite(addr + 24, rdram, rdram_size);
+            return true;
+        }
+        case Op::ObjLdTxRect: {
+            u32 addr = segment_to_physical(w1);
+            s2dex_load_txtr(addr, rdram, rdram_size);
+            s2dex_draw_obj_rect(addr + 24, false, rdram, rdram_size);
+            return true;
+        }
+        case Op::ObjLdTxRectR: {
+            u32 addr = segment_to_physical(w1);
+            s2dex_load_txtr(addr, rdram, rdram_size);
+            s2dex_draw_obj_rect(addr + 24, true, rdram, rdram_size);
+            return true;
+        }
+        case Op::RdpHalf0:
+            s2d_pending_flag = w1;
+            s2d_pending_sid = (w0 >> 16) & 0xFF;
+            s2d_pending_addr_lo = w0 & 0xFFFF;
+            s2d_pending_valid = true;
+            return true;
+        case Op::SelectDL: {
+            if (!s2d_pending_valid) return true; // malformed stream: ignore
+            s2d_pending_valid = false;
+            u32 mask = w1;
+            bool push = ((w0 >> 16) & 0xFF) != 0;
+            u32 addr_hi = w0 & 0xFFFF;
+            u32 target = s2d_pending_addr_lo | (addr_hi << 16); // pc stays in segment space, like G_DL's target
+            u32 slot = s2d_pending_sid / 4;
+            if (slot >= 4) return true;
+
+            if ((s2d_genstat[slot] & mask) == (s2d_pending_flag & mask)) {
+                // Condition true: per spec, do nothing.
+                return true;
+            }
+            s2d_genstat[slot] = (s2d_genstat[slot] & ~mask) | (s2d_pending_flag & mask);
+            if (push) dl_stack.push_back(pc);
+            pc = target;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
