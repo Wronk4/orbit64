@@ -18,6 +18,9 @@ public:
 
     u32 get_status() const { return status; }
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) { s(dram_addr, pif_addr_rd64b, pif_addr_wr64b, status); }
+
 private:
     u32 dram_addr{0};
     u32 pif_addr_rd64b{0};

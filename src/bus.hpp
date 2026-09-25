@@ -29,6 +29,8 @@ struct TLBEntry {
     u64 entry_lo0{0};
     u64 entry_lo1{0};
     bool initialized{false};
+
+    template <class S> void serialize(S& s) { s(page_mask, entry_hi, entry_lo0, entry_lo1, initialized); }
 };
 
 class Bus {
@@ -73,6 +75,12 @@ public:
     // TLB management
     void set_tlb_entry(size_t index, const TLBEntry& entry);
     const TLBEntry& get_tlb_entry(size_t index) const;
+
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) {
+        s.fixed(rdram);
+        s(tlb_entries, ri_mode, ri_config, ri_current_load, ri_select, ri_refresh, ri_latency, ri_error, ri_werror);
+    }
 
 private:
     Cartridge& cart;

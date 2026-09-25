@@ -114,6 +114,31 @@ public:
         u32 drawn{0}, z_fail{0}, a_fail{0};
     };
 
+    // Save states (savestate.hpp): the microcode's and the RDP's state
+    // between display lists. Only valid between them (queued draws are
+    // flushed at the end of every list); state_loaded() then drops what was
+    // derived from the replaced state.
+    template <class S> void serialize(S& s) {
+        s(dpc_start, dpc_end, dpc_current, dpc_status, dpc_clock, dpc_bufbusy, dpc_pipebusy, dpc_tmem);
+        s(dps_tbist, dps_test_mode, dps_buftest_addr, dps_buftest_data);
+        s(segments, modelview_stack, projection_matrix, combined_matrix, combined_matrix_dirty, vertex_cache);
+        s(vp_scale_x, vp_scale_y, vp_scale_z, vp_trans_x, vp_trans_y, vp_trans_z);
+        s(tmem, tmem_word_dxt_zero, tiles, active_tile, timg_addr, timg_format, timg_size, timg_width);
+        s(color_image_addr, color_image_format, color_image_size, color_image_width, depth_image_addr);
+        s(fill_color, prim_color, env_color, blend_color, fog_color, prim_depth, prim_dz, geometry_mode,
+          texture_enabled, texture_scale_s, texture_scale_t);
+        s(combine_mode_w0, combine_mode_w1, combine_mode_set, other_mode_l, other_mode_h);
+        s(ambient_light, lookat_x, lookat_y, lookat_set, dir_lights, num_lights);
+        s(scissor_ulx, scissor_uly, scissor_lrx, scissor_lry);
+        s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2);
+        s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
+          s2d_pending_valid);
+        s.fixed(internal_zbuffer);
+        // G_MTX pushes a copy of the top of the stack, which must exist.
+        if (modelview_stack.empty() || modelview_stack.size() > 32) s.fail("the RDP matrix stack is invalid");
+    }
+    void state_loaded();
+
 private:
     // DPC registers
     u32 dpc_start{0};
@@ -222,6 +247,8 @@ private:
     struct Light {
         u8 r{255}, g{255}, b{255};
         f32 dx{0.0f}, dy{1.0f}, dz{0.0f};
+
+        template <class S> void serialize(S& s) { s(r, g, b, dx, dy, dz); }
     };
     Light ambient_light{128, 128, 128, 0, 0, 0};
     Light lookat_x{0, 0, 0, 1.0f, 0.0f, 0.0f};

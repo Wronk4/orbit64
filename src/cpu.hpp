@@ -156,6 +156,11 @@ public:
     void jit_fpu_compare_s(size_t fs, size_t ft, u32 cond);
     void jit_fpu_compare_d(size_t fs, size_t ft, u32 cond);
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) {
+        s(gpr, pc, hi, lo, cur_pc, in_delay_slot, delay_slot_active, branch_target, pc_overridden, cp0, fpr, fcsr);
+    }
+
 private:
     Bus& bus;
 

@@ -37,6 +37,12 @@ public:
     // Field rate derived from VI_V_SYNC: ~525 lines = NTSC/MPAL 60 Hz, ~625 = PAL 50 Hz.
     u32 get_refresh_hz() const { return (v_sync >= 600) ? 50 : 60; }
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) {
+        s(status, origin, width, v_intr, v_current, burst, v_sync, h_sync, leap, h_start, v_start, v_burst, x_scale,
+          y_scale);
+    }
+
 private:
     u32 status{0};
     u32 origin{0};

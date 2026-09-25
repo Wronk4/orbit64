@@ -48,6 +48,13 @@ public:
     void get_audio_samples(float* out_stream, size_t count);
     void set_audio_output_rate(u32 rate) { ai.set_output_sample_rate(rate); }
 
+    // Save states (savestate.hpp): the whole machine between two frames,
+    // i.e. after step_frame() (and render_frame()). load_state() leaves the
+    // machine as it was when the state doesn't fit - another game, another
+    // state version, damaged - and says why in `error`.
+    std::vector<u8> save_state();
+    bool load_state(const std::vector<u8>& state, std::string& error);
+
     Controller& get_controller(int index = 0) {
         return controllers[index & 3];
     }
@@ -65,6 +72,7 @@ private:
     // Consumes up to `budget` cycles at once while the CPU sits in an idle
     // loop; returns the cycles consumed (0 = not idle). See emulator.cpp.
     u32 skip_idle_loop(u32 budget);
+    template <class S> void serialize(S& s);
 
     Cartridge cart;
     PIF pif;

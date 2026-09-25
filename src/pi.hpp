@@ -16,6 +16,12 @@ public:
 
     u32 get_status() const { return status; }
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) {
+        s(dram_addr, cart_addr, rd_len, wr_len, status, dom1_lat, dom1_pwd, dom1_pgs, dom1_rls, dom2_lat, dom2_pwd,
+          dom2_pgs, dom2_rls);
+    }
+
 private:
     u32 dram_addr{0};
     u32 cart_addr{0};

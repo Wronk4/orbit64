@@ -30,6 +30,9 @@ public:
     u32 get_intr() const { return intr; }
     u32 get_intr_mask() const { return intr_mask; }
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) { s(mode, version, intr, intr_mask); }
+
 private:
     u32 mode{0};
     u32 version{0x02020102};

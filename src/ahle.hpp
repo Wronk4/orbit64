@@ -24,6 +24,14 @@ public:
     int get_abi_index() const { return static_cast<int>(current_abi); }
     u64 get_task_count() const { return task_count; }
 
+    // Save states (savestate.hpp): everything a command list leaves behind
+    // for the next one.
+    template <class S> void serialize(S& s) {
+        s(scratch, segments, codebook, buf_in, buf_out, buf_count, buf_dry_right, buf_wet_left, buf_wet_right, vol,
+          target, rate, dry, wet, loop_addr, adpcm_state, envmix_state, resample_state, polef_state, current_abi,
+          task_count, envsetup2, nead_env_values, nead_env_steps, nead_filter_count, nead_filter_lut);
+    }
+
 private:
     static constexpr u32 DMEM_BASE = 0x5C0;
     static constexpr size_t SCRATCH_SIZE = 0x1000;
@@ -63,6 +71,8 @@ private:
         s64 value[2]{0, 0};
         s32 exp_rate[2]{0, 0};
         s32 exp_seq[2]{0, 0};
+
+        template <class S> void serialize(S& s) { s(dry, wet, target, value, exp_rate, exp_seq); }
     };
     struct ResampleState {
         s16 hist[4]{0, 0, 0, 0};

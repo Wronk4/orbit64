@@ -2,8 +2,8 @@
 // frontend drives - without opening a window. The main thread plays the UI
 // (the way --ui-test does, but faster and in a loop): it toggles turbo, the
 // internal resolution, pause / frame advance / reset, debug capture, memory
-// pokes and freezes, and restarts the game, while constantly pulling frames,
-// audio, stats and debug snapshots. Build it with sanitizer-style checks
+// pokes and freezes, saves / loads / undoes save states, and restarts the
+// game, while constantly pulling frames, audio, stats and debug snapshots. Build it with sanitizer-style checks
 // (make core_stress enables _GLIBCXX_ASSERTIONS) to catch memory errors in the
 // act instead of as a later heap corruption.
 //
@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <random>
 #include <string>
 #include <thread>
@@ -38,6 +39,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Save states go to three slots in a scratch folder.
+    const std::filesystem::path state_dir = std::filesystem::temp_directory_path() / "orbit64_core_stress_states";
+    std::filesystem::remove_all(state_dir);
+    auto slot = [&](unsigned i) { return state_dir / ("slot" + std::to_string(i % 3) + ".state"); };
+    int saved = 0, loaded = 0, undone = 0, state_errors = 0;
+
     std::mt19937 rng(1234);
     std::vector<std::uint32_t> frame;
     std::vector<float> audio(1024);
@@ -50,6 +57,17 @@ int main(int argc, char** argv) {
         core.fetch_frame(frame, w, h, scale, seen);
         core.pull_audio(audio.data(), audio.size() / 2, 1.0f);
         (void)core.stats();
+        for (ui::StateEvent ev; core.poll_state_event(ev);) {
+            if (!ev.ok) {
+                // Expected: loading a slot nothing was saved to yet, undoing
+                // when there's nothing to undo (e.g. right after a restart).
+                if (ev.error == "the file couldn't be opened" || ev.error == "there is no load to undo") continue;
+                std::printf("STATE ERROR (op %d): %s\n", static_cast<int>(ev.op), ev.error.c_str());
+                ++state_errors;
+                continue;
+            }
+            (ev.op == ui::StateEvent::Op::Save ? saved : ev.op == ui::StateEvent::Op::Load ? loaded : undone)++;
+        }
         if (auto snap = core.debug_snapshot()) {
             volatile std::uint32_t sink = snap->u32(0x80000400) + static_cast<std::uint32_t>(snap->rdram.size());
             (void)sink;
@@ -83,7 +101,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        switch (rng() % 12) {
+        switch (rng() % 14) {
         case 0: core.set_turbo(rng() % 2); break;
         case 1: core.set_internal_scale(1 + static_cast<int>(rng() % 4)); break;
         case 2: core.set_debug_capture(rng() % 2, rng() % 2, rng() % 2); break;
@@ -110,11 +128,25 @@ int main(int argc, char** argv) {
                 }
             }
             break;
+        case 12: core.save_state(slot(rng())); break;
+        case 13:
+            if (rng() % 3 == 0) core.undo_load_state();
+            else core.load_state(slot(rng()));
+            break;
         }
         std::this_thread::sleep_for(milliseconds(rng() % 20));
     }
     const ui::CoreStats st = core.stats();
     core.stop();
-    std::printf("OK: %d UI steps, last frame %llu\n", step, static_cast<unsigned long long>(st.frame));
+    for (ui::StateEvent ev; core.poll_state_event(ev);) {
+        if (ev.ok) (ev.op == ui::StateEvent::Op::Save ? saved : ev.op == ui::StateEvent::Op::Load ? loaded : undone)++;
+    }
+    std::filesystem::remove_all(state_dir);
+    if (state_errors) {
+        std::printf("FAIL: %d save state errors\n", state_errors);
+        return 3;
+    }
+    std::printf("OK: %d UI steps, last frame %llu, states saved %d / loaded %d / undone %d\n", step,
+                static_cast<unsigned long long>(st.frame), saved, loaded, undone);
     return 0;
 }

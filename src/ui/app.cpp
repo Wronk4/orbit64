@@ -154,6 +154,7 @@ bool App::init() {
 
 void App::shutdown() {
     if (core_.loaded()) stop_now();
+    clear_state_slots();
     close_audio();
     save_settings();
     library_.save();
@@ -269,6 +270,7 @@ void App::main_loop() {
         update_scaled_texture();
         update_audio_volume();
         debug_update();
+        poll_state_events();
 
         // Native file dialog finished?
         if (native_job_ && native_job_->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -399,6 +401,9 @@ std::vector<Shortcut> App::shortcuts() const {
         {"Pause / Resume", shortcut_label(true, false, false, "P") + "  or  F5"},
         {"Stop emulation", shortcut_label(true, false, false, ".") + "  or  Shift+F5"},
         {"Reset", shortcut_label(true, false, false, "R")},
+        {"Save state to the current slot", shortcut_label(true, false, false, "S") + "  or  F2"},
+        {"Load state from the current slot", shortcut_label(true, true, false, "L") + "  or  F4"},
+        {"Choose state slot", shortcut_label(true, false, false, "1\xE2\x80\x93" "9")},
         {"Fast forward (hold)", "Tab"},
         {"Fullscreen", mac ? "Cmd+Ctrl+F  or  F11" : "F11  or  Alt+Enter"},
         {"Exit fullscreen", "Esc"},
@@ -427,7 +432,17 @@ bool App::handle_shortcut(const SDL_KeyboardEvent& k) {
                 return true;
             case SDLK_l:
                 if (modal_open) return false;
-                view_ = view_ == View::Library ? View::Game : View::Library;
+                if (shift) load_state(state_slot_);
+                else view_ = view_ == View::Library ? View::Game : View::Library;
+                return true;
+            case SDLK_s:
+                if (modal_open || shift) return false;
+                save_state(state_slot_);
+                return true;
+            case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
+            case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
+                if (modal_open || shift) return false;
+                select_state_slot(static_cast<int>(key - SDLK_0));
                 return true;
             case SDLK_p: if (!modal_open) toggle_pause(); return true;
             case SDLK_r: if (!modal_open) reset_game(); return true;
@@ -452,6 +467,14 @@ bool App::handle_shortcut(const SDL_KeyboardEvent& k) {
             if (shift) request_stop(); else toggle_pause();
             return true;
         case SDLK_F12: take_screenshot(); return true;
+        case SDLK_F2:
+            if (modal_open) return false;
+            save_state(state_slot_);
+            return true;
+        case SDLK_F4:
+            if (modal_open || alt) return false; // Alt+F4 closes the window
+            load_state(state_slot_);
+            return true;
         case SDLK_ESCAPE:
             if (fullscreen_ && !modal_open && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
                 set_fullscreen(false);
@@ -622,6 +645,7 @@ void App::stop_now() {
     save_thumbnail();
     double played = core_.stats().uptime_s;
     core_.stop();
+    clear_state_slots();
     library_.add_play_time(current_key_, static_cast<std::int64_t>(played));
     has_frame_ = false;
     // Debugger state refers to the stopped game's memory and scene.
@@ -723,30 +747,8 @@ void App::save_thumbnail() {
     std::vector<std::uint32_t> px;
     int w, h, scale = 1;
     if (!core_.snapshot(px, w, h, &scale) || w <= 0 || h <= 0) return;
-    if (scale > 1) {
-        // Library cards only need the game's own resolution: average each
-        // scale x scale block of a high-resolution frame.
-        const int nw = w / scale, nh = h / scale;
-        std::vector<std::uint32_t> small(static_cast<size_t>(nw) * nh);
-        for (int y = 0; y < nh; ++y) {
-            for (int x = 0; x < nw; ++x) {
-                std::uint32_t r = 0, g = 0, b = 0;
-                for (int j = 0; j < scale; ++j) {
-                    const std::uint32_t* row = px.data() + static_cast<size_t>(y * scale + j) * w + x * scale;
-                    for (int i = 0; i < scale; ++i) {
-                        r += (row[i] >> 16) & 0xFF;
-                        g += (row[i] >> 8) & 0xFF;
-                        b += row[i] & 0xFF;
-                    }
-                }
-                const std::uint32_t n = static_cast<std::uint32_t>(scale * scale);
-                small[static_cast<size_t>(y) * nw + x] = 0xFF000000u | (r / n) << 16 | (g / n) << 8 | (b / n);
-            }
-        }
-        px.swap(small);
-        w = nw;
-        h = nh;
-    }
+    // Library cards only need the game's own resolution.
+    downscale_frame(px, w, h, scale);
     // Skip all-black frames (boot, fades) so thumbnails stay meaningful.
     std::uint64_t sum = 0;
     for (size_t i = 0; i < px.size(); i += 37) sum += (px[i] & 0xFF) + ((px[i] >> 8) & 0xFF) + ((px[i] >> 16) & 0xFF);

@@ -62,6 +62,32 @@ Set `ORBIT64_CONFIG_DIR` to use a portable folder instead.
 Settings › Library. Games that have never been started show their box art. After a game is played, its card shows
 a screenshot from the last session instead.
 
+## Save states
+
+**Emulation › Save State / Load State** (also in the game screen's right-click menu) save the whole machine to one of
+nine slots per game and load it back. The shortcuts are Cmd/Ctrl+S (or F2) to save and Cmd/Ctrl+Shift+L (or F4) to
+load the current slot, and Cmd/Ctrl+1…9 to choose the slot. Hover over a slot in the menu to see its screenshot and
+when it was saved. *Undo Load State* returns to the moment before the last load. Saving and loading also work while
+the game is paused.
+
+States are stored in `<config>/states/<ROM title> [<CRC1>-<CRC2>]/slotN.state` (File › Show Save States Folder).
+Because the folder is named after the ROM header, states stay with the game when the ROM file is renamed or moved.
+A state includes the cartridge's save memory (EEPROM/SRAM), so after a load the `.sav` file matches the loaded state
+the next time it is written. A state only loads in the game it was saved from and in a build with the same state
+format (`savestate::kStateVersion`). Other states are refused with a message, and the running game is not changed.
+
+The state is written by a component's `serialize()` (`src/savestate.hpp`). The format is compressed with zlib from
+stb. The emulation thread only copies the state, which takes about 1 ms, and compressing and writing the file happens
+in the background. `make savestate_check` builds the regression test:
+
+```
+bin/savestate_check rom.z64 --at 900 --after 300 [--int] [--scale 2]
+```
+
+It checks that a loaded state continues frame for frame exactly like the machine it was saved from. It compares RDRAM,
+the image and the full state in a fresh emulator and in one that was already running. It also checks that saving a
+loaded state gives the same bytes and that a damaged state is refused.
+
 ## Internal resolution
 
 Settings › Graphics › *Internal resolution* (also in View › Internal Resolution and in Debug › Screen Resolution)
@@ -91,14 +117,14 @@ Open the **Debug** menu (or the bug button in the toolbar). Every tool works wit
 | File | Responsibility |
 |---|---|
 | `platform.*` | Everything OS-specific: config/user folders, drives and volumes, native file dialogs (Win32 / AppleScript / zenity or kdialog), "Show in Explorer/Finder", Ctrl vs Cmd, DPI scale |
-| `emu_core.*` | Runs the emulator on its own thread and exposes the frame buffer, input, audio and live stats (FPS, microcode, RSP/RDP activity, VI/AI rates) |
+| `emu_core.*` | Runs the emulator on its own thread and exposes the frame buffer, input, audio, save states and live stats (FPS, microcode, RSP/RDP activity, VI/AI rates) |
 | `input.*` | Keyboard and SDL GameController mapping with rebinding |
 | `boxart.*` | Box art matching (No-Intro / RetroArch `Named_Boxarts` folders) and asynchronous PNG/JPEG loading (stb_image) |
 | `library.*`, `rom_info.*` | Background ROM scanning, header parsing, favorites, recently played list, play time |
 | `settings.*` | INI-based persistent settings |
 | `theme.*`, `widgets.*`, `icons.*` | Design tokens, custom widgets, animations and a vector icon set |
 | `file_browser.*` | Built-in cross-platform ROM and folder picker with ROM header preview |
-| `app*.cpp` | Window and main loop, menu/toolbar/status bar, library, game screen, settings, dialogs |
+| `app*.cpp` | Window and main loop, menu/toolbar/status bar, library, game screen, settings, dialogs, save state slots (`app_states.cpp`) |
 | `app_debug*.cpp`, `debug_state.hpp` | DEBUG / MEMORY tools |
 
 Rendering goes through `SDL_Renderer`, so SDL picks Direct3D on Windows, Metal on macOS and OpenGL on Linux.

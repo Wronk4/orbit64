@@ -11,6 +11,7 @@
 #include "widgets.hpp"
 
 #include <SDL.h>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <filesystem>
@@ -83,6 +84,21 @@ private:
     void rescan_library();
     void action_choose_boxart_folder();
     void on_folder_picked(const std::filesystem::path& dir);
+
+    // ---- save states (app_states.cpp)
+    static constexpr int kStateSlots = 9;
+    std::filesystem::path states_dir() const; // the running game's folder
+    std::filesystem::path state_path(int slot) const;
+    void save_state(int slot);
+    void load_state(int slot);
+    void undo_load_state();
+    void select_state_slot(int slot);
+    void poll_state_events();
+    void refresh_state_slots();
+    void clear_state_slots();
+    void state_slot_tooltip(int slot);
+    void draw_state_menu();
+    void reveal_states_folder();
 
     // ---- chrome (app_chrome.cpp)
     void draw_root();
@@ -206,6 +222,17 @@ private:
     double last_thumb_time_ = 0.0;
     std::deque<float> fps_history_;
     double fps_sample_time_ = 0.0;
+
+    // save state slots of the running game (index = slot number, 0 unused)
+    struct StateSlot {
+        bool exists = false;
+        std::filesystem::file_time_type mtime{};
+        std::string when; // when it was saved, local time
+        SDL_Texture* thumb = nullptr;
+    };
+    std::array<StateSlot, kStateSlots + 1> state_slots_{};
+    int state_slot_ = 1;
+    double state_slots_checked_ = -1.0;
 
     // audio
     SDL_AudioDeviceID audio_dev_ = 0;

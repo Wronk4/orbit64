@@ -51,6 +51,12 @@ public:
     u64 get_audio_task_count() const { return audio_task_count; }
     const AudioHLE& get_audio_hle() const { return ahle; }
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) {
+        s(dmem, imem, mem_addr, dram_addr, rd_len, wr_len, status, semaphore, pc, task_pending, task_delay_cycles, ahle,
+          gfx_task_count, audio_task_count);
+    }
+
 private:
     std::array<u8, DMEM_SIZE> dmem{};
     std::array<u8, IMEM_SIZE> imem{};

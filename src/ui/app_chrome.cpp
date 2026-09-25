@@ -152,6 +152,7 @@ void App::draw_menubar() {
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Show Screenshots Folder")) platform::reveal_in_file_manager(platform::screenshots_dir());
+        if (ImGui::MenuItem("Show Save States Folder")) reveal_states_folder();
         if (ImGui::MenuItem("Show Configuration Folder")) platform::reveal_in_file_manager(platform::config_dir());
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", platform::current_os() == platform::OS::MacOS ? "Cmd+Q" : "Ctrl+Q")) request_quit();
@@ -162,6 +163,8 @@ void App::draw_menubar() {
         if (ImGui::MenuItem(running ? "Pause" : "Resume", shortcut_label(true, false, false, "P").c_str(), false, loaded)) toggle_pause();
         if (ImGui::MenuItem("Stop", shortcut_label(true, false, false, ".").c_str(), false, loaded)) request_stop();
         if (ImGui::MenuItem("Reset", shortcut_label(true, false, false, "R").c_str(), false, loaded)) reset_game();
+        ImGui::Separator();
+        draw_state_menu();
         ImGui::Separator();
         if (ImGui::BeginMenu("Fast-Forward Speed")) {
             const int speeds[] = {2, 3, 4, 8, 0};

@@ -172,6 +172,24 @@ void RDP::reset() {
     }
 }
 
+void RDP::state_loaded() {
+    // Everything cached from the old TMEM, tiles and modes is stale, and the
+    // high-resolution buffers show the old frames: start them over, as a
+    // reset does. They fill in again from what the game draws next.
+    flush_native();
+    draw_state_dirty_ = true;
+    ++tmem_gen_;
+    tmem_dirty = true;
+    tex_run.active = false;
+    tex_last_tlut = ~0u;
+    hires_shadow_ = nullptr;
+    if (hires_) {
+        const u32 scale = hires_->scale();
+        hires_.reset();
+        hires_ = std::make_unique<HiResRenderer>(scale);
+    }
+}
+
 void RDP::clear_zbuffer() {
     flush_native();
     std::fill(internal_zbuffer.begin(), internal_zbuffer.end(), 1e30f);

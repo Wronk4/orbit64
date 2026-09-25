@@ -43,15 +43,16 @@ OBJS := $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(CORE_SRCS) $(UI_SRCS)) 
 # Headless RDP checker (tools/rdp_check.cpp): the core without main.cpp and the UI.
 CHECK_OBJS := $(filter-out $(BUILD_DIR)/main.o, $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(CORE_SRCS)))
 DEPS := $(OBJS:.o=.d) $(BUILD_DIR)/test_rdp.d $(BUILD_DIR)/hires_exact.d \
-        $(BUILD_DIR)/tools/rdp_check.d $(BUILD_DIR)/tools/rdp_check_exact.d
+        $(BUILD_DIR)/tools/rdp_check.d $(BUILD_DIR)/tools/rdp_check_exact.d $(BUILD_DIR)/tools/savestate_check.d
 TARGET := $(BIN_DIR)/n64$(EXE)
 TEST_TARGET := $(BIN_DIR)/test_rdp$(EXE)
 CHECK_TARGET := $(BIN_DIR)/rdp_check$(EXE)
 CHECK_EXACT_TARGET := $(BIN_DIR)/rdp_check_exact$(EXE)
+SAVESTATE_CHECK_TARGET := $(BIN_DIR)/savestate_check$(EXE)
 JIT_SELFTEST_TARGET := $(BIN_DIR)/jit_selftest$(EXE)
 DEPS += $(BUILD_DIR)/jit/jit_selftest_main.d
 
-.PHONY: all clean run test_rdp rdp_check rdp_check_exact jit_selftest
+.PHONY: all clean run test_rdp rdp_check rdp_check_exact savestate_check jit_selftest
 .DEFAULT_GOAL := all
 
 # Interpreter-vs-JIT differential test (src/jit/jit_selftest_main.cpp).
@@ -73,7 +74,8 @@ $(BUILD_DIR)/tools/core_stress.o: tools/core_stress.cpp
 	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
 
 # Console tools without SDL keep their own main() (Windows: -Dmain=SDL_main above).
-$(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o: CXXFLAGS += -Umain
+$(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o \
+$(BUILD_DIR)/tools/savestate_check.o: CXXFLAGS += -Umain
 
 all: $(TARGET)
 
@@ -82,6 +84,9 @@ test_rdp: $(TEST_TARGET)
 rdp_check: $(CHECK_TARGET)
 
 rdp_check_exact: $(CHECK_EXACT_TARGET)
+
+# Save states restore exactly the machine they were made from (tools/savestate_check.cpp).
+savestate_check: $(SAVESTATE_CHECK_TARGET)
 
 -include $(DEPS)
 
@@ -98,6 +103,9 @@ $(CHECK_TARGET): $(BUILD_DIR)/tools/rdp_check.o $(CHECK_OBJS) | $(BIN_DIR)
 $(CHECK_EXACT_TARGET): $(BUILD_DIR)/tools/rdp_check_exact.o $(BUILD_DIR)/hires_exact.o $(filter-out $(BUILD_DIR)/hires.o, $(CHECK_OBJS)) | $(BIN_DIR)
 	$(CXX) $^ -o $@ -lpthread
 
+$(SAVESTATE_CHECK_TARGET): $(BUILD_DIR)/tools/savestate_check.o $(CHECK_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ -lpthread
+
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -109,6 +117,10 @@ $(BUILD_DIR)/hires_exact.o: $(SRC_DIR)/hires.cpp
 $(BUILD_DIR)/tools/rdp_check.o: tools/rdp_check.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -w -c $< -o $@
+
+$(BUILD_DIR)/tools/savestate_check.o: tools/savestate_check.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/tools/rdp_check_exact.o: tools/rdp_check.cpp
 	@mkdir -p $(dir $@)

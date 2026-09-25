@@ -34,6 +34,13 @@ public:
     u32 get_native_sample_rate() const { return dacrate_reg ? native_sample_rate() : 0; }
     u32 get_output_sample_rate() const { return output_sample_rate; }
 
+    // Save states (savestate.hpp). The DMA side only: the host's resampler
+    // position and the queued output samples carry on across a load.
+    template <class S> void serialize(S& s) {
+        s(dram_addr_reg, control_reg, dacrate_reg, bitrate_reg, current_buffer, next_buffer, busy, full,
+          cycle_byte_accum);
+    }
+
 private:
     u32 native_sample_rate() const;
 

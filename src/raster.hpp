@@ -36,6 +36,12 @@ struct Tile {
     u8 clamp_s{0}, mirror_s{0}, mask_s{0}, shift_s{0};
     u8 clamp_t{0}, mirror_t{0}, mask_t{0}, shift_t{0};
     u16 sl{0}, tl{0}, sh{0}, th{0}; // Tile coordinates (10.2 fixed point)
+
+    // Save states (savestate.hpp): field by field, the struct has padding.
+    template <class S> void serialize(S& s) {
+        s(format, size, line, tmem, palette, clamp_s, mirror_s, mask_s, shift_s, clamp_t, mirror_t, mask_t, shift_t,
+          sl, tl, sh, th);
+    }
 };
 
 // The software RDP draws into, and the VI shows, 240 lines.

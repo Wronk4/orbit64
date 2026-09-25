@@ -55,6 +55,14 @@ public:
     std::string get_title() const { return title; }
     std::string get_game_code() const { return game_code; }
 
+    // Save states (savestate.hpp): the save memory, so the game finds what it
+    // last wrote. A loaded state's save memory goes to the .sav file too.
+    template <class S> void serialize(S& s) {
+        s.fixed(sram);
+        s.fixed(eeprom);
+        if constexpr (S::loading) sram_dirty = eeprom_dirty = true;
+    }
+
 private:
     std::string save_filepath;
     bool use_save_file_{true};

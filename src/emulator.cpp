@@ -1,4 +1,5 @@
 #include "emulator.hpp"
+#include "savestate.hpp"
 #include <chrono>
 #include <iostream>
 
@@ -214,6 +215,63 @@ void Emulator::render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h
     if (hr) hr->end_frame();
     if (out_scale) *out_scale = static_cast<int>(rdp.hires_scale());
     rdp.clear_zbuffer();
+}
+
+template <class S> void Emulator::serialize(S& s) {
+    // A state only fits the cartridge it was made with.
+    u32 crc1 = cart.get_crc1(), crc2 = cart.get_crc2();
+    u64 rom_size = cart.get_rom_size();
+    s.begin_section("ROM ");
+    s(crc1, crc2, rom_size);
+    s.end_section();
+    if constexpr (S::loading) {
+        if (crc1 != cart.get_crc1() || crc2 != cart.get_crc2() || rom_size != cart.get_rom_size()) {
+            s.fail("the state belongs to a different game");
+            return;
+        }
+    }
+    // Controllers are left out: they follow the player's input, not the state.
+    auto section = [&s](const char (&tag)[5], auto& part) {
+        s.begin_section(tag);
+        part.serialize(s);
+        s.end_section();
+    };
+    section("CPU ", cpu);
+    section("BUS ", bus);
+    section("MI  ", mi);
+    section("VI  ", vi);
+    section("AI  ", ai);
+    section("PI  ", pi);
+    section("SI  ", si);
+    section("PIF ", pif);
+    section("RSP ", rsp);
+    section("RDP ", rdp);
+    section("CART", cart);
+}
+
+std::vector<u8> Emulator::save_state() {
+    savestate::Writer w;
+    w.data().reserve(bus.get_rdram_size() + (4u << 20));
+    serialize(w);
+    return std::move(w.data());
+}
+
+bool Emulator::load_state(const std::vector<u8>& state, std::string& error) {
+    // The state is read straight into the components, so keep the current
+    // machine to go back to if it turns out not to fit.
+    std::vector<u8> current = save_state();
+    savestate::Reader r(state.data(), state.size());
+    serialize(r);
+    if (r.ok() && !r.at_end()) r.fail("the state has unexpected data at the end");
+    const bool ok = r.ok();
+    if (!ok) {
+        error = r.error();
+        savestate::Reader back(current.data(), current.size());
+        serialize(back);
+    }
+    jit.invalidate_all(); // RDRAM holds other code now
+    rdp.state_loaded();
+    return ok;
 }
 
 void Emulator::get_audio_samples(float* out_stream, size_t count) {

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -66,6 +67,18 @@ struct MemoryFreeze {
 };
 
 enum class RunState { Stopped, Running, Paused };
+
+// Outcome of a save state request, for the UI to report (EmuCore::poll_state_event).
+struct StateEvent {
+    enum class Op { Save, Load, UndoLoad } op = Op::Save;
+    bool ok = false;
+    std::filesystem::path path; // Save / Load
+    std::string error;          // why it failed
+};
+
+// Averages each scale x scale block of a frame rendered at an internal
+// resolution above 1, giving an image at the game's own resolution.
+void downscale_frame(std::vector<std::uint32_t>& px, int& w, int& h, int scale);
 
 struct ControllerSnapshot {
     std::uint16_t buttons = 0;
@@ -139,6 +152,18 @@ public:
 
     void set_input(int port, const ControllerSnapshot& s);
 
+    // ---- Save states
+    // Saves the machine after the current frame / loads one before the next
+    // frame; both work while paused too. The emulation thread only copies the
+    // state: compressing and writing the file happens on a worker thread, so
+    // saving doesn't stall the game. Results arrive through poll_state_event().
+    void save_state(const std::filesystem::path& path) { request_state(StateEvent::Op::Save, path); }
+    void load_state(const std::filesystem::path& path) { request_state(StateEvent::Op::Load, path); }
+    // Goes back to the machine the last load_state() replaced (kept in memory).
+    void undo_load_state() { request_state(StateEvent::Op::UndoLoad, {}); }
+    bool can_undo_load() const { return has_undo_.load(); }
+    bool poll_state_event(StateEvent& ev);
+
     // Video: copies the newest frame if it changed since `seen_serial`.
     // Pixels are ARGB8888 (0xAARRGGBB) with alpha forced opaque. `scale` is
     // the internal resolution it was rendered at: the game's frame buffer is
@@ -160,6 +185,14 @@ private:
     void run_one_frame(FrameClock& fc);
     void apply_memory_writes();
     void publish_debug(std::uint64_t frame, bool frame_ran);
+    void publish_frame(FrameClock& fc, int w, int h, int scale);
+    void request_state(StateEvent::Op op, const std::filesystem::path& path);
+    // Save states, on the emulation thread.
+    void process_state_requests(FrameClock& fc);
+    void save_state_now(const std::filesystem::path& path);
+    bool load_state_now(const std::vector<std::uint8_t>& state, FrameClock& fc, std::string& error);
+    void push_state_event(StateEvent ev);
+    void wait_save_jobs();
 
     std::unique_ptr<Emulator> emu_;
     std::filesystem::path rom_path_;
@@ -193,6 +226,20 @@ private:
     std::shared_ptr<const std::vector<CapturedTexture>> last_textures_;
     std::atomic<std::uint32_t> texture_target_{0};
     std::condition_variable wake_;
+
+    struct StateRequest {
+        StateEvent::Op op;
+        std::filesystem::path path;
+    };
+    std::mutex state_mutex_; // guards the three vectors below
+    std::vector<StateRequest> state_requests_;
+    std::vector<StateEvent> state_events_;
+    // Compress + write, one per save. Each waits for the one before it, so
+    // saves reach the disk in the order they were made.
+    std::vector<std::shared_future<void>> save_jobs_;
+    std::atomic<bool> state_request_pending_{false};
+    std::vector<std::uint8_t> undo_state_; // emulation thread only
+    std::atomic<bool> has_undo_{false};
 
     std::mutex input_mutex_;
     ControllerSnapshot input_[4];

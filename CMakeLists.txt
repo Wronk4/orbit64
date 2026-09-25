@@ -96,6 +96,10 @@ foreach(check rdp_check rdp_check_exact)
     target_link_libraries(${check} PRIVATE Threads::Threads)
 endforeach()
 target_compile_definitions(rdp_check_exact PRIVATE HIRES_EXACT_TEST)
+# Save state round trip (tools/savestate_check.cpp), not built by default.
+add_executable(savestate_check EXCLUDE_FROM_ALL tools/savestate_check.cpp ${CHECK_SOURCES})
+target_include_directories(savestate_check PRIVATE src third_party/stb)
+target_link_libraries(savestate_check PRIVATE Threads::Threads)
 
 # Optional RDP unit test (unchanged from the core project).
 add_executable(test_rdp EXCLUDE_FROM_ALL src/test_rdp.cpp src/rdp.cpp src/hires.cpp src/mi.cpp)

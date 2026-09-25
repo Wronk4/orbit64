@@ -109,6 +109,8 @@ void App::draw_game_view(ImVec2 pos, ImVec2 size) {
             if (ImGui::MenuItem("Reset", shortcut_label(true, false, false, "R").c_str())) reset_game();
             if (ImGui::MenuItem("Stop", shortcut_label(true, false, false, ".").c_str())) request_stop();
             ImGui::Separator();
+            draw_state_menu();
+            ImGui::Separator();
             if (ImGui::MenuItem("Take Screenshot", "F12")) take_screenshot();
             if (ImGui::MenuItem(fullscreen_ ? "Exit Fullscreen" : "Fullscreen", "F11")) toggle_fullscreen();
             ImGui::Separator();

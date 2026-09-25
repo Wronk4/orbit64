@@ -81,6 +81,10 @@ void App::ui_test_tick() {
         io.AddMouseButtonEvent(button, true);
         io.AddMouseButtonEvent(button, false);
     };
+    auto hover = [this](float x, float y) {
+        SDL_WarpMouseInWindow(window_, static_cast<int>(x), static_cast<int>(y));
+        ImGui::GetIO().AddMousePosEvent(x, y);
+    };
     auto escape = []() {
         ImGuiIO& io = ImGui::GetIO();
         io.AddKeyEvent(ImGuiKey_Escape, true);
@@ -121,6 +125,17 @@ void App::ui_test_tick() {
         {[this] { browser_.close(); about_open_ = true; }, 30, "15_about"},
         {[this] { about_open_ = false; view_ = View::Game; }, 30, "16_game_no_rom"},
         {[this, first_rom] { launch(first_rom()); }, 420, "17_game_running"},
+        // ---- Save states (kept in <capture dir>/states)
+        {[this] { save_state(1); }, 40, "17a_state_saved"},
+        {[click] { click(dp(88), dp(15), 0); }, 20, "17b_menu_emulation_states"},
+        {[hover] { hover(dp(108), dp(191)); }, 20, nullptr},                       // Load State from Slot >
+        {[hover] { hover(dp(340), dp(191)); }, 30, "17b2_menu_load_slot_preview"}, // Slot 1: picture + time
+        {[escape] { escape(); }, 10, nullptr},
+        {[this] { save_state(3); }, 90, nullptr},
+        {[this] { load_state(1); }, 40, "17c_state_loaded"},
+        {[this] { undo_load_state(); }, 40, "17d_state_load_undone"},
+        {[this] { core_.pause(true); load_state(3); }, 40, "17e_state_loaded_paused"},
+        {[this] { core_.pause(false); }, 10, nullptr},
         // ---- DEBUG / MEMORY tools
         {[click] { click(dp(1369), dp(56), 0); }, 20, "40_debug_toolbar_menu"},
         {[escape, click] { escape(); click(dp(318), dp(15), 0); }, 20, "41_debug_menubar"},

@@ -20,6 +20,9 @@ public:
 
     void process_commands(Controller controllers[4], Cartridge& cartridge);
 
+    // Save states (savestate.hpp).
+    template <class S> void serialize(S& s) { s(ram, cic_type); }
+
 private:
     std::array<u8, PIF_ROM_SIZE> rom{};
     std::array<u8, PIF_RAM_SIZE> ram{};
