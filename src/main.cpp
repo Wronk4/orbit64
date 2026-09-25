@@ -148,13 +148,18 @@ int main(int argc, char* argv[]) {
 
     if (rom_path.empty()) {
         std::vector<std::string> found_roms;
-        for (const auto& entry : fs::directory_iterator(".")) {
-            if (entry.is_regular_file()) {
-                std::string ext = entry.path().extension().string();
-                if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
-                    found_roms.push_back(entry.path().string());
+        for (const char* dir : {"roms", "."}) {
+            std::error_code ec;
+            if (!fs::is_directory(dir, ec)) continue;
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
+                if (entry.is_regular_file()) {
+                    std::string ext = entry.path().extension().string();
+                    if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
+                        found_roms.push_back(entry.path().string());
+                    }
                 }
             }
+            if (!found_roms.empty()) break;
         }
         if (found_roms.empty()) {
             std::cerr << "Usage: n64 [rom_file] [--headless <frames>] [--scale <1-8>] [--screenshot <path.bmp>] [--mash <btn>] [--press <frame:btn>]\n";

@@ -3,6 +3,19 @@
 A desktop frontend built on SDL2 and Dear ImGui for the N64 emulation core in `src/`.
 It runs on **Windows, macOS and Linux** from a single codebase.
 
+## Folders
+
+| Folder | What is in it |
+|---|---|
+| `src/` | The emulator: CPU + JIT (`src/jit/`), RSP/RDP, audio, save states; the desktop frontend is `src/ui/` |
+| `tools/` | Test and analysis tools (`jit_bench.sh`, `audio_report.py`, `*_check.cpp`, profiler report) |
+| `third_party/`, `assets/` | Dear ImGui, stb; icons and other bundled files |
+| `docs/` | Notes on the emulator's internals |
+| `roms/` | **Your ROMs** (subfolders are fine). Ignored by git except its README |
+| `bin/`, `build/` | Build output (Makefile); `out/` for CMake |
+| `test_output/` | What the test tools write (screenshots, `--wav` captures, reports). Safe to delete |
+| `reference/` | Local reference material such as the N64 SDK. Never committed |
+
 ## Building
 
 The only external dependency is **SDL2 ≥ 2.0.18**. Dear ImGui (`third_party/imgui`), stb_image (`third_party/stb`) and the fonts
@@ -28,7 +41,7 @@ falling back to the interpreter for whatever it doesn't handle. Two tools keep i
 
 ```
 make jit_selftest              # runs ~240 guest programs on both cores and diffs registers, exceptions and memory
-tools/jit_bench.sh 600 --stats # every ROM in the project folder: fps, CPU vs RSP/RDP time, JIT coverage, both cores
+tools/jit_bench.sh 600 --stats # every ROM in roms/: fps, CPU vs RSP/RDP time, JIT coverage, both cores
 ```
 
 `--cpu interp|jit` and `--jit-stats` also work on their own in `--headless` mode.

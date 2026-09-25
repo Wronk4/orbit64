@@ -5,7 +5,10 @@ out/
 *.dll
 *.exe
 
-# ROMs, saves, and other emulator run artifacts (not source, often copyrighted)
+# ROMs, saves, and other emulator run artifacts (not source, often copyrighted).
+# Put ROMs in roms/ - only its README is tracked.
+roms/*
+!roms/README.md
 *.z64
 *.n64
 *.sav
@@ -20,11 +23,11 @@ out/
 # Backups
 backup_before_*/
 
-# JIT benchmark output (tools/jit_bench.sh)
-bench_out/
+# Output of the test tools (tools/jit_bench.sh, --wav captures, reports, ...)
+test_output/
 # Profiling / checked builds (make BUILD_DIR=... BIN_DIR=...)
 build_*/
 bin_*/
 
-# Nintendo 64 SDK (proprietary; reference only)
-Nintendo 64 SDK/
+# Local reference material, e.g. the Nintendo 64 SDK (proprietary, never committed)
+reference/
