@@ -34,6 +34,13 @@ public:
     void set_cpu_core(CpuCore core) { cpu_core_ = core; }
     CpuCore cpu_core() const { return cpu_core_; }
 
+    // Wall-clock split of step_frame() between the CPU (interpreter/JIT,
+    // incl. whatever MMIO/DMA its accesses trigger) and the per-scanline
+    // AI/VI/RSP(+RDP) stepping. Off by default; headless --jit-stats.
+    void set_profiling(bool on) { profiling_ = on; }
+    double prof_cpu_seconds() const { return prof_cpu_seconds_; }
+    double prof_other_seconds() const { return prof_other_seconds_; }
+
     // The displayed image, ARGB8888. With an internal resolution above 1
     // (RDP::set_hires_scale) it is that many times the frame buffer size;
     // `out_scale` receives the factor.
@@ -47,6 +54,7 @@ public:
 
     Cartridge& get_cartridge() { return cart; }
     CPU& get_cpu() { return cpu; }
+    Recompiler& get_jit() { return jit; }
     Bus& get_bus() { return bus; }
     VI& get_vi() { return vi; }
     AI& get_ai() { return ai; }
@@ -72,5 +80,8 @@ private:
     CPU cpu;
     Recompiler jit;
     CpuCore cpu_core_ = CpuCore::Recompiler;
+    bool profiling_ = false;
+    double prof_cpu_seconds_ = 0.0;
+    double prof_other_seconds_ = 0.0;
     std::vector<u32> native_frame_; // VI output before upscaling (internal resolution > 1)
 };

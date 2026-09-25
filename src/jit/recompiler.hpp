@@ -1,25 +1,34 @@
 #pragma once
 // Dynamic recompiler for the CPU's hot path.
 //
-// Scope (see docs/JIT.md for the full write-up): only pure, non-trapping
-// ALU/shift/immediate instructions and loads/stores are ever translated to
-// native code. Branches, jumps, MULT/DIV, COP0/COP1/TLB, trap-on-overflow
-// arithmetic and anything else stay on the existing, already-correct
-// interpreter - a compiled block is simply a maximal straight-line run of
-// whitelisted instructions starting at some PC, and the moment a
-// non-whitelisted instruction is reached the block ends (without including
-// it). This bounds the recompiler's correctness risk to a small, well-tested
-// slice while still eliminating fetch/decode/switch-dispatch overhead for
-// the instruction mix that dominates real game code.
+// A compiled block is a straight-line run of whitelisted instructions
+// starting at some PC, optionally ended by a branch or jump together with
+// its delay slot (the branch hands its outcome back through
+// JitCtx::next_pc - blocks never jump to each other directly). The moment
+// a non-whitelisted instruction is reached the block ends without including
+// it, and that instruction runs on the existing, already-correct
+// interpreter. Compiled to native code: integer ALU/shift/immediate
+// arithmetic (including the trapping ADD/SUB forms), aligned loads/stores
+// (through the same C++ memory paths the interpreter uses), a subset of COP1
+// arithmetic, and conditional branches/jumps other than BC1T/BC1F. Kept
+// inside a block as a call to the interpreter for that one instruction (see
+// is_interp_callable in recompiler.cpp): MULT/DIV, FPU and unaligned
+// loads/stores, LL/SC, CFC1/CTC1 and the remaining COP1 arithmetic. COP0/TLB,
+// ERET, SYSCALL/BREAK/traps and BC1T/BC1F end a block.
 //
 // Blocks are only compiled for code living in KSEG0/KSEG1 (0x80000000-
 // 0xBFFFFFFF, or its sign-extended 64-bit form), i.e. the fixed, TLB-free
 // direct mapping to physical RDRAM that virtually all N64 game code runs
-// from. Anything else always falls back to the interpreter.
+// from. Anything else always falls back to the interpreter. A block is keyed
+// by physical address only and never bakes in its own virtual pc - branch
+// targets and link values are computed from JitCtx::start_pc at run time -
+// so the KSEG0 and KSEG1 aliases of the same code share one block.
 
 #include "../common.hpp"
 #include "code_buffer.hpp"
 #include "jit_abi.hpp"
+#include <array>
+#include <memory>
 #include <vector>
 
 class CPU;
@@ -31,8 +40,9 @@ public:
     // recompiler.cpp can build and return one; not part of the public API
     // otherwise.
     struct Block {
-        JitBlockFn fn = nullptr; // null = "known not JIT-able at this PC"
-        u32 length = 0;          // guest instructions covered
+        JitBlockFn fn = nullptr; // null (with valid) = "known not JIT-able at this PC"
+        u32 length = 0;          // guest instructions covered (incl. a terminating branch + delay slot)
+        bool valid = false;      // false = not compiled yet
     };
 
     Recompiler();
@@ -66,62 +76,69 @@ public:
     // deferring to there avoids that reentrancy hazard entirely.
     void request_invalidate(u32 paddr, u32 len);
 
+    // Optional coverage counters (off by default; `--jit-stats` in headless
+    // mode). Answers "how much of what the game runs goes through compiled
+    // code, and which instructions send it back to the interpreter".
+    struct Stats {
+        u64 jit_instrs = 0;      // guest instructions executed inside compiled blocks
+        u64 jit_entries = 0;     // compiled-block calls (normal + delay slot)
+        u64 interp_instrs = 0;   // cpu.step() fallbacks
+        u64 interp_unmapped = 0; //   ... of which pc was outside KSEG0/KSEG1
+        u64 compiles = 0;        // blocks compiled (incl. "not JIT-able" verdicts)
+        u64 invalidations = 0;   // whole-cache drops
+    };
+    void set_stats_enabled(bool on) { stats_on_ = on; }
+    void print_stats(std::ostream& out) const;
+
 private:
     // Granularity of code_pages_: 64-byte "pages", deliberately much finer
     // than a 4 KB MMU page. Games keep hot globals right next to code (OoT
     // stores ~18 times a frame into .data sharing a 4 KB page with its boot
     // code), and at 4 KB granularity every such store dropped the whole cache.
     static constexpr u32 kPageShift = 6;
-    // Direct-mapped cache instead of a hash map: run_step() looks this up on
-    // *every* instruction, including ones that will never be JIT-able (see
-    // the big comment on run_step() - a lot of real game code is FPU-heavy
-    // and none of that is whitelisted yet, so most lookups miss the JIT
-    // entirely and just want a cheap "no" on the way to cpu.step()).
-    // std::unordered_map's hashing + bucket walk was measurably more
-    // expensive than the whole rest of the interpreter fallback path
-    // combined; a plain array indexed by a few bits of the address is a
-    // single cache-friendly access. Collisions just evict - correctness is
-    // unaffected either way, a compiled block gets rebuilt (or a
-    // known-not-JIT-able verdict re-derived) on the next miss.
-    struct CacheEntry {
-        u32 tag = 0xFFFFFFFFu; // physical address this slot currently holds, or the sentinel for "empty"
-        Block block;
+
+    // Block lookup: a two-level table with one slot per instruction address
+    // of RDRAM, whose second level (4 KB of guest code each) is only
+    // allocated once something in it is looked up. run_step() does this on
+    // every step, including ones that end up interpreted, so it has to be a
+    // couple of plain array accesses; unlike the direct-mapped cache this
+    // replaced, nothing ever evicts anything, so a large game (OoT) no longer
+    // keeps recompiling code whose slot a distant address had taken over.
+    static constexpr u32 kTableShift = 12;
+    static constexpr u32 kSlotsPerTable = (1u << kTableShift) / 4;
+    using BlockTable = std::array<Block, kSlotsPerTable>;
+    struct BlockMap {
+        std::vector<std::unique_ptr<BlockTable>> tables = std::vector<std::unique_ptr<BlockTable>>(RDRAM_SIZE >> kTableShift);
+        // Single-entry cache in front of the table: a tight loop bounces
+        // between a handful of fixed addresses, so the immediately-preceding
+        // lookup is very often an exact repeat.
+        u32 last_paddr = 0xFFFFFFFFu;
+        Block* last_block = nullptr;
     };
-    static constexpr u32 kCacheBits = 16;
-    static constexpr u32 kCacheSize = 1u << kCacheBits;
-    std::vector<CacheEntry> cache_;
-
-    CodeBuffer code_;
-    std::vector<bool> code_pages_; // page index -> "a cached block covers this page"
-    bool pending_invalidate_ = false;
-
-    // Single-entry cache in front of cache_: a tight loop bounces between a
-    // handful of fixed addresses (its body, its branch's fallback path,
-    // ...), so the immediately-preceding lookup is very often an exact
-    // repeat, cheaper still than the array index+tag check.
-    u32 last_paddr_ = 0xFFFFFFFFu;
-    const Block* last_block_ = nullptr;
 
     // A *taken* branch's delay-slot instruction always executes next no
     // matter what, with pc landing on the branch's target right after (see
-    // CPU::jit_pending_delay_slot()) - never on delay_slot_addr+4. A normal
-    // block compiled there would be wrong the moment it covered more than
-    // one instruction (everything after the first would be instructions
-    // that must *not* run next). So delay slots get their own compiler
-    // entry point that always caps the block at exactly one instruction,
-    // and - since a block compiled that way would silently become wrong if
-    // reused for an ordinary (non-delay-slot) visit to the same address,
-    // where more of the following code is a legal continuation - their own
-    // same-sized cache, kept separate from cache_ rather than tagged into
-    // it.
-    std::vector<CacheEntry> ds_cache_;
-    u32 last_ds_paddr_ = 0xFFFFFFFFu;
-    const Block* last_ds_block_ = nullptr;
+    // CPU::jit_pending_delay_slot()) - never on delay_slot_addr+4. This only
+    // happens when the branch itself ran on the interpreter (a branch inside
+    // a compiled block always brings its delay slot along). A normal block
+    // compiled there would be wrong the moment it covered more than one
+    // instruction, so delay slots get their own compiler entry point that
+    // always caps the block at exactly one instruction - and, since a block
+    // compiled that way would silently become wrong if reused for an
+    // ordinary visit to the same address, their own map.
+    BlockMap blocks_;
+    BlockMap ds_blocks_;
 
-    static u32 cache_index(u32 paddr) { return (paddr >> 2) & (kCacheSize - 1); }
-    const Block* lookup_or_compile_delay_slot(CPU& cpu, Bus& bus, u32 paddr);
+    CodeBuffer code_;
+    std::vector<u8> code_pages_; // page index -> nonzero if a cached block covers this page (read by compiled stores)
+    bool pending_invalidate_ = false;
 
-    const Block* lookup_or_compile(CPU& cpu, Bus& bus, u64 pc, u32 paddr);
-    Block compile_block(CPU& cpu, Bus& bus, u32 start_paddr, u32 max_len);
+    const Block* lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot);
+    Block compile_block(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot);
     void mark_code_pages(u32 start_paddr, u32 end_paddr);
+
+    bool stats_on_ = false;
+    Stats stats_;
+    std::vector<u64> fallback_counts_; // indexed by fallback_key(), sized lazily
+    void count_fallback(Bus& bus, u64 pc);
 };

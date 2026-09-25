@@ -17,6 +17,33 @@ The only external dependency is **SDL2 ≥ 2.0.18**. Dear ImGui (`third_party/im
 
 CMake produces `orbit64` (`orbit64.exe`). The Makefile produces `bin/n64`.
 
+On Windows the Makefile also works with [w64devkit](https://github.com/skeeto/w64devkit) and the
+`SDL2-devel-*-mingw` package: `build.bat` puts `tools\w64devkit` (or `%W64DEVKIT%`) on `PATH` and runs `make`, and
+`SDL2_DIR` points at the package's `x86_64-w64-mingw32` folder (default `tools/SDL2-2.30.12/x86_64-w64-mingw32`).
+
+## Dynamic recompiler
+
+The default CPU core translates MIPS code to x86-64 (Windows / Linux / macOS) or AArch64 native code (`src/jit/`),
+falling back to the interpreter for whatever it doesn't handle. Two tools keep it honest:
+
+```
+make jit_selftest              # runs ~240 guest programs on both cores and diffs registers, exceptions and memory
+tools/jit_bench.sh 600 --stats # every ROM in the project folder: fps, CPU vs RSP/RDP time, JIT coverage, both cores
+```
+
+`--cpu interp|jit` and `--jit-stats` also work on their own in `--headless` mode.
+
+## Performance work
+
+- **Profiling (Windows x64):** `--profile samples.txt` in `--headless` mode samples the emulation thread about every
+  millisecond; `python tools/prof_report.py bin/n64.exe samples.txt` prints self and inclusive time per function, and
+  `--lines <function>` breaks one function down per source line (build with `-g` for that, e.g.
+  `make BUILD_DIR=build_prof BIN_DIR=bin_prof CXX="g++ -g"`).
+- **Native RDP pass:** triangles and texture rectangles are queued and drawn by row bands on all cores
+  (`RDP::flush_native`, `src/raster_pool.*`), with decoded-texture caches; the output is bit-identical to drawing them one
+  by one. Check any change to it with `make rdp_check` against a build without the change (`--frame-log` finds the
+  first frame that differs).
+
 ## Running
 
 ```

@@ -2,6 +2,8 @@
 build/
 bin/
 out/
+*.dll
+*.exe
 
 # ROMs, saves, and other emulator run artifacts (not source, often copyrighted)
 *.z64
@@ -17,3 +19,9 @@ out/
 
 # Backups
 backup_before_*/
+
+# JIT benchmark output (tools/jit_bench.sh)
+bench_out/
+# Profiling / checked builds (make BUILD_DIR=... BIN_DIR=...)
+build_*/
+bin_*/

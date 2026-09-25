@@ -1,10 +1,12 @@
 #include "rdp.hpp"
 #include "mi.hpp"
+#include "raster_pool.hpp"
 #include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <thread>
 #include <unordered_set>
 
 static u32 stat_tri_called = 0;
@@ -13,9 +15,9 @@ static u32 stat_rast_called = 0;
 static u32 stat_cull_back = 0;
 static u32 stat_cull_front = 0;
 static u32 stat_scissor_reject = 0;
-static u32 stat_pixels_drawn = 0;
-static u32 stat_pixels_z_fail = 0;
-static u32 stat_pixels_a_fail = 0;
+// Pixel counters (debug log). Native-pass bands count into their own
+// RDP::PixelStats and add them here once their flush is done.
+static RDP::PixelStats stat_pixels;
 
 // SHIFT_S/T applied to a texture coordinate (used by the debugger capture;
 // the rasterizer uses raster::TexUnit).
@@ -34,7 +36,10 @@ struct RDP::NativeSink {
     const DrawState& st;
     u8* rdram;
     size_t rdram_size;
-    void write(u32 x, u32 y, u32 color, f32 z) { rdp.write_pixel(st, x, y, color, z, rdram, rdram_size); }
+    u32* shadow;
+    size_t shadow_len;
+    PixelStats& stats;
+    void write(u32 x, u32 y, u32 color, f32 z) { rdp.write_pixel(st, x, y, color, z, rdram, rdram_size, shadow, shadow_len, stats); }
 };
 
 Matrix4x4 Matrix4x4::identity() {
@@ -71,6 +76,7 @@ RDP::RDP() {
 RDP::~RDP() = default;
 
 void RDP::reset() {
+    flush_native();
     dpc_start = 0;
     dpc_end = 0;
     dpc_current = 0;
@@ -167,11 +173,13 @@ void RDP::reset() {
 }
 
 void RDP::clear_zbuffer() {
+    flush_native();
     std::fill(internal_zbuffer.begin(), internal_zbuffer.end(), 1e30f);
     if (hires_) hires_->clear_depth();
 }
 
 void RDP::set_hires_scale(u32 scale) {
+    flush_native();
     scale = std::clamp<u32>(scale, 1, HiResRenderer::kMaxScale);
     if (scale == hires_scale()) return;
     hires_shadow_ = nullptr;
@@ -736,6 +744,7 @@ void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram
 }
 
 void RDP::clip_and_rasterize_line(Vertex v0, Vertex v1, u8* rdram, size_t rdram_size) {
+    flush_native();
     const f32 NEAR_W = 0.1f;
     if (v0.w < NEAR_W && v1.w < NEAR_W) return;
 
@@ -868,10 +877,15 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
     draw_state_dirty_ = true;
     if (hires_) hires_->unbind();
     // Whatever this list draws at high resolution can start right away.
+    // ... and the queued native draws have to be in RDRAM before the CPU runs on.
     struct FlushOnExit {
+        RDP& rdp;
         HiResRenderer* hr;
-        ~FlushOnExit() { if (hr) hr->flush(); }
-    } flush_on_exit{hires_.get()};
+        ~FlushOnExit() {
+            rdp.flush_native();
+            if (hr) hr->flush();
+        }
+    } flush_on_exit{*this, hires_.get()};
 
     MicrocodeType current_ucode = ucode_type;
 
@@ -1517,8 +1531,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                               << " | rasterize called: " << stat_rast_called
                               << " | cull_back: " << stat_cull_back << " cull_front: " << stat_cull_front
                               << " | scissor_rej: " << stat_scissor_reject
-                              << " | pixels: drawn=" << stat_pixels_drawn << " z_fail=" << stat_pixels_z_fail
-                              << " a_fail=" << stat_pixels_a_fail << "\n";
+                              << " | pixels: drawn=" << stat_pixels.drawn << " z_fail=" << stat_pixels.z_fail
+                              << " a_fail=" << stat_pixels.a_fail << "\n";
                     mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
                     return;
                 }
@@ -1616,6 +1630,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 ++tmem_gen_;
                 u32 tile_idx = (w1 >> 24) & 0x7;
                 u32 count = ((w1 >> 14) & 0x3FF) + 1;
+                native_before_read(timg_addr, static_cast<u64>(timg_addr) + count * 2);
                 u32 start_word = tiles[tile_idx].tmem;
                 u32 tmem_dest = start_word * 8;
                 u32 bytes = count * 2;
@@ -1651,6 +1666,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 u32 words = lrs + 1;
                 u32 start_word = tiles[tile_idx].tmem;
                 u32 tmem_dest = start_word * 8;
+                native_before_read(src_addr, static_cast<u64>(src_addr) + static_cast<u64>(words) * 4);
 
                 if (timg_size == 3) {
                     u32 texels = words;
@@ -1709,6 +1725,13 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
                 u32 num_rows = (end_t >= start_t) ? (end_t - start_t + 1) : 0;
                 u32 num_texels = (end_s >= start_s) ? (end_s - start_s + 1) : 0;
+                {
+                    // Rows start_t .. end_t of a timg_width-wide image, at most 4 bytes a texel.
+                    const u64 stride = static_cast<u64>(timg_width) * 4 + 4;
+                    native_before_read(timg_addr,
+                                       static_cast<u64>(timg_addr) + (static_cast<u64>(end_t) + 1) * stride +
+                                           (static_cast<u64>(start_s) + num_texels) * 4);
+                }
 
                 Tile& tile = tiles[tile_idx];
                 u32 tmem_dest = tile.tmem * 8;
@@ -1911,6 +1934,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             }
 
             case 0xFF: { // G_SETCOLORIMAGE
+                flush_native(); // the queue's bands and depth rows assume one colour image
                 color_image_format = (w0 >> 21) & 0x7;
                 color_image_size = (w0 >> 19) & 0x3;
                 color_image_width = (w0 & 0xFFF) + 1;
@@ -1938,13 +1962,14 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
               << " | rasterize called: " << stat_rast_called
               << " | cull_back: " << stat_cull_back << " cull_front: " << stat_cull_front
               << " | scissor_rej: " << stat_scissor_reject
-              << " | pixels: drawn=" << stat_pixels_drawn << " z_fail=" << stat_pixels_z_fail
-              << " a_fail=" << stat_pixels_a_fail << "\n";
+              << " | pixels: drawn=" << stat_pixels.drawn << " z_fail=" << stat_pixels.z_fail
+              << " a_fail=" << stat_pixels.a_fail << "\n";
 
     mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
 }
 
 void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size) {
+    flush_native();
     if (color_image_addr != 0 && color_image_addr == depth_image_addr) {
         clear_zbuffer();
     }
@@ -1997,6 +2022,13 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
 }
 
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size) {
+    write_pixel(st, x, y, color, z, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels);
+}
+
+// Thread-safe for pixels of distinct rows of one colour image (the native
+// pass's bands): it only touches that pixel's RDRAM, depth and shadow entry.
+void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
+                      u32* shadow, size_t shadow_len, PixelStats& stats) {
     u32 fb_w = st.fb_w;
     if (x >= fb_w || y >= kFbLines) return;
     u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? st.scissor_lrx : fb_w;
@@ -2012,7 +2044,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
 
     // Alpha check for coverage/blending modes (CVG_X_ALPHA: 0x1000, ALPHA_CVG_SEL: 0x2000, FORCE_BL: 0x4000, ZMODE_XLU: 0x800, IM_RD: 0x40, AA_EN: 0x8)
     if (a == 0 && st.alpha_zero_kill) {
-        stat_pixels_a_fail++;
+        stats.a_fail++;
         return;
     }
 
@@ -2020,7 +2052,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
     u32 pixel_idx = y * fb_w + x;
     if (st.z_compare && pixel_idx < internal_zbuffer.size()) {
         if (z > internal_zbuffer[pixel_idx]) {
-            stat_pixels_z_fail++;
+            stats.z_fail++;
             return; // Behind existing pixel
         }
     }
@@ -2028,7 +2060,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
         internal_zbuffer[pixel_idx] = z;
     }
 
-    stat_pixels_drawn++;
+    stats.drawn++;
 
     if (st.fb_size == 2) { // 16-bit RGBA 5-5-5-1
         u8 r = (color >> 16) & 0xFF;
@@ -2053,7 +2085,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
 
             rdram[idx + 0] = (p >> 8) & 0xFF;
             rdram[idx + 1] = p & 0xFF;
-            if (pixel_idx < hires_shadow_len_) hires_shadow_[pixel_idx] = p;
+            if (pixel_idx < shadow_len) shadow[pixel_idx] = p;
         }
     } else if (st.fb_size == 3) { // 32-bit RGBA
         u32 idx = st.fb_addr + pixel_idx * 4;
@@ -2074,19 +2106,161 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
             rdram[idx + 1] = g;
             rdram[idx + 2] = b;
             rdram[idx + 3] = a;
-            if (pixel_idx < hires_shadow_len_)
-                hires_shadow_[pixel_idx] = (static_cast<u32>(r) << 24) | (static_cast<u32>(g) << 16) | (static_cast<u32>(b) << 8) | a;
+            if (pixel_idx < shadow_len)
+                shadow[pixel_idx] = (static_cast<u32>(r) << 24) | (static_cast<u32>(g) << 16) | (static_cast<u32>(b) << 8) | a;
         }
     }
 }
 
+raster::TexCache* RDP::native_tex_cache(const raster::TexUnit& tu, u32 tlut_type) {
+    u32 w = 0, h = 0;
+    raster::tex_cache_dims(tu, w, h);
+    // Decoding costs one fetch per texel up front; far larger than any
+    // real texture means a degenerate tile, cheaper to sample directly.
+    if (static_cast<u64>(w) * h > 256 * 256) return nullptr;
+    u64 key_a = 0, key_b = 0;
+    raster::tex_cache_key(tu, tlut_type, key_a, key_b);
+    for (size_t i = native_tex_used_; i-- > 0;) {
+        NativeTex& e = *native_tex_[i];
+        if (e.gen == tmem_gen_ && e.key_a == key_a && e.key_b == key_b) return &e.cache;
+    }
+    if (native_tex_used_ == native_tex_.size()) native_tex_.push_back(std::make_unique<NativeTex>());
+    NativeTex& e = *native_tex_[native_tex_used_++];
+    e.gen = tmem_gen_;
+    e.key_a = key_a;
+    e.key_b = key_b;
+    e.texels.resize(static_cast<size_t>(w) * h);
+    e.cache.w = w;
+    e.cache.h = h;
+    e.cache.texels = e.texels.data();
+    e.cache.state.store(0, std::memory_order_relaxed); // filled by the first sample (raster::tex_table)
+    return &e.cache;
+}
+
+DrawState* RDP::native_snapshot(u32 tile0, bool use0, bool use1) {
+    const DrawState& live = draw_state();
+    if (!native_state_ || native_state_serial_ != draw_state_serial_ || native_state_gen_ != tmem_gen_) {
+        if (!native_tmem_ || native_tmem_gen_ != tmem_gen_) {
+            if (native_tmems_used_ == native_tmems_.size()) native_tmems_.push_back(std::make_unique<TmemSnapshot>());
+            TmemSnapshot& t = *native_tmems_[native_tmems_used_++];
+            t.data = tmem;
+            t.dxt = tmem_word_dxt_zero;
+            native_tmem_ = &t;
+            native_tmem_gen_ = tmem_gen_;
+        }
+        if (native_states_used_ == native_states_.size()) native_states_.push_back(std::make_unique<DrawState>());
+        DrawState& s = *native_states_[native_states_used_++];
+        s = live;
+        s.tmem = native_tmem_->data.data();
+        s.tmem_dxt = native_tmem_->dxt.data();
+        for (raster::TexUnit& tu : s.tex) tu.cache = nullptr;
+        native_state_ = &s;
+        native_state_serial_ = draw_state_serial_;
+        native_state_gen_ = tmem_gen_;
+    }
+    DrawState& s = *native_state_;
+    for (u32 i = 0; i < 2; ++i) {
+        if (!(i == 0 ? use0 : use1)) continue;
+        raster::TexUnit& tu = s.tex[(tile0 + i) & 7];
+        if (!tu.cache) tu.cache = native_tex_cache(tu, s.tlut_type);
+    }
+    return &s;
+}
+
+void RDP::queue_native(NativeCmd& cmd, u8* rdram, size_t rdram_size) {
+    const DrawState& st = *cmd.st;
+    // Bytes of the colour image this command's rows can write.
+    const u32 bpp = st.fb_size == 3 ? 4 : 2;
+    const u64 lo = st.fb_addr + static_cast<u64>(cmd.y_first) * st.fb_w * bpp;
+    const u64 hi = st.fb_addr + (static_cast<u64>(cmd.y_last) + 1) * st.fb_w * bpp;
+    if (native_queue_.empty()) {
+        native_fb_lo_ = static_cast<u32>(std::min<u64>(lo, 0xFFFFFFFFu));
+        native_fb_hi_ = static_cast<u32>(std::min<u64>(hi, 0xFFFFFFFFu));
+        native_work_ = 0;
+    } else {
+        native_fb_lo_ = std::min(native_fb_lo_, static_cast<u32>(std::min<u64>(lo, 0xFFFFFFFFu)));
+        native_fb_hi_ = std::max(native_fb_hi_, static_cast<u32>(std::min<u64>(hi, 0xFFFFFFFFu)));
+    }
+    native_work_ += static_cast<u64>(cmd.y_last - cmd.y_first + 1) * st.fb_w;
+    native_rdram_ = rdram;
+    native_rdram_size_ = rdram_size;
+    native_queue_.push_back(cmd);
+    // The high-resolution pass shadows every native pixel write as it
+    // happens (see hires_target()), so it gets no deferral at all.
+    if (hires_) flush_native();
+}
+
+void RDP::flush_native() {
+    if (native_queue_.empty()) return;
+    constexpr s32 kBandRows = 8;
+    constexpr u32 kBands = (kFbLines + kBandRows - 1) / kBandRows;
+    // Waking the workers costs more than a handful of small draws.
+    bool threaded = native_work_ >= 20000;
+    if (threaded && !raster_pool_) {
+        // Started on first use: one band worker per spare hardware thread
+        // (the emulation thread draws bands too), capped - a frame only has
+        // 240 rows to split.
+        const unsigned hw = std::thread::hardware_concurrency();
+        raster_pool_ = std::make_unique<RasterPool>(std::min(hw > 1 ? hw - 1 : 0u, 15u));
+    }
+    threaded = threaded && raster_pool_->workers() > 0;
+    const u32 bands = threaded ? kBands : 1;
+    std::array<PixelStats, kBands> band_stats{};
+    auto draw_band = [&](u32 band) {
+        const s32 row_begin = threaded ? static_cast<s32>(band) * kBandRows : 0;
+        const s32 row_end = threaded ? row_begin + kBandRows : INT_MAX;
+        PixelStats& stats = band_stats[band];
+        for (const NativeCmd& c : native_queue_) {
+            if (c.y_last < row_begin || c.y_first >= row_end) continue;
+            NativeSink sink{*this, *c.st, native_rdram_, native_rdram_size_, c.shadow, c.shadow_len, stats};
+            if (c.kind == NativeCmd::Kind::Triangle) {
+                raster::triangle(*c.st, c.v[0], c.v[1], c.v[2], c.area, 1, row_begin, row_end, sink);
+            } else {
+                raster::tex_rect(*c.st, c.ulx, c.uly, c.lrx, c.lry, c.tile, c.s, c.t, c.dsdx, c.dtdy, c.flip, 1,
+                                 row_begin, row_end, sink);
+            }
+        }
+    };
+    if (threaded) raster_pool_->run(bands, draw_band);
+    else draw_band(0);
+    for (const PixelStats& b : band_stats) {
+        stat_pixels.drawn += b.drawn;
+        stat_pixels.z_fail += b.z_fail;
+        stat_pixels.a_fail += b.a_fail;
+    }
+
+    native_queue_.clear();
+    native_states_used_ = 0;
+    native_tmems_used_ = 0;
+    native_state_ = nullptr;
+    native_tmem_ = nullptr;
+    // Decoded textures of the current TMEM contents stay (moved to the front);
+    // older ones can't be sampled again.
+    size_t kept = 0;
+    for (size_t i = 0; i < native_tex_used_; ++i) {
+        if (native_tex_[i]->gen == tmem_gen_) std::swap(native_tex_[kept++], native_tex_[i]);
+    }
+    native_tex_used_ = kept;
+}
+
 void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t, f32 dsdx, f32 dtdy, bool flip, u8* rdram, size_t rdram_size) {
     if (color_image_addr >= rdram_size) return;
-    const DrawState& st = draw_state();
+    const DrawState& live = draw_state();
     HiResTarget* hr = hires_target(rdram, rdram_size);
-    NativeSink sink{*this, st, rdram, rdram_size};
-    raster::tex_rect(st, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip, 1, 0, INT_MAX, sink);
-    if (hr) hires_->tex_rect(hr, st, draw_state_serial_, tmem_gen_, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip);
+    // Same tiles raster::tex_rect() samples.
+    const bool combined = live.combine_set && !live.copy_mode;
+    NativeCmd cmd{};
+    cmd.kind = NativeCmd::Kind::TexRect;
+    cmd.st = native_snapshot(tile_idx, !combined || live.need_tex0, combined && live.need_tex1);
+    // raster::tex_rect() draws rows uly .. min(lry (+1 in FILL/COPY), 240) - 1.
+    cmd.y_first = static_cast<s32>(std::min<u32>(uly, kFbLines));
+    cmd.y_last = static_cast<s32>(std::min<u32>(lry, kFbLines - 1));
+    cmd.shadow = hires_shadow_;
+    cmd.shadow_len = hires_shadow_len_;
+    cmd.ulx = ulx; cmd.uly = uly; cmd.lrx = lrx; cmd.lry = lry; cmd.tile = tile_idx;
+    cmd.s = s; cmd.t = t; cmd.dsdx = dsdx; cmd.dtdy = dtdy; cmd.flip = flip;
+    if (cmd.y_first <= cmd.y_last) queue_native(cmd, rdram, rdram_size);
+    if (hr) hires_->tex_rect(hr, live, draw_state_serial_, tmem_gen_, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip);
 }
 
 void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size) {
@@ -2111,14 +2285,30 @@ void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v
     if (cull_front && area <= 0.0f) { stat_cull_front++; return; }
     if (std::abs(area) < 0.001f) return;
 
-    const DrawState& st = draw_state();
+    const DrawState& live = draw_state();
     HiResTarget* hr = hires_target(rdram, rdram_size);
-    NativeSink sink{*this, st, rdram, rdram_size};
-    if (!raster::triangle(st, v0, v1, v2, area, 1, 0, INT_MAX, sink)) {
+    f32 min_x, max_x, min_y, max_y;
+    if (!raster::triangle_bounds(live, v0, v1, v2, 1, min_x, max_x, min_y, max_y)) {
         stat_scissor_reject++;
         return;
     }
-    if (hr) hires_->triangle(hr, st, draw_state_serial_, tmem_gen_, v0, v1, v2, area);
+    NativeCmd cmd{};
+    cmd.kind = NativeCmd::Kind::Triangle;
+    // Same tiles raster::triangle() samples.
+    const bool combined = live.combine_set;
+    const bool textured = live.texture_enabled;
+    cmd.st = native_snapshot(live.active_tile, textured && (!combined || live.need_tex0),
+                             textured && combined && live.need_tex1);
+    cmd.y_first = static_cast<s32>(min_y); // exactly the rows raster::triangle() visits
+    cmd.y_last = static_cast<s32>(max_y);
+    cmd.shadow = hires_shadow_;
+    cmd.shadow_len = hires_shadow_len_;
+    cmd.v[0] = v0;
+    cmd.v[1] = v1;
+    cmd.v[2] = v2;
+    cmd.area = area;
+    queue_native(cmd, rdram, rdram_size);
+    if (hr) hires_->triangle(hr, live, draw_state_serial_, tmem_gen_, v0, v1, v2, area);
 }
 
 // ===========================================================================
@@ -2252,6 +2442,7 @@ u32 s2d_bg_row_stride_bytes(u16 image_w_raw, u8 siz) {
 } // namespace
 
 void RDP::s2dex_tmem_load_block(u32 tmem_dest_words, u32 src_addr, u32 lrs, u8* rdram, size_t rdram_size) {
+    native_before_read(src_addr, static_cast<u64>(src_addr) + (static_cast<u64>(lrs) + 1) * 8);
     tmem_dirty = true;
     ++tmem_gen_;
     // Mirrors the G_LOADBLOCK opcode handler: a (mostly) format-agnostic raw
@@ -2293,6 +2484,8 @@ void RDP::s2dex_tmem_load_block(u32 tmem_dest_words, u32 src_addr, u32 lrs, u8* 
 }
 
 void RDP::s2dex_tmem_load_tile(u32 tmem_dest_words, u32 src_addr, u32 texel_w, u32 texel_h, u8* rdram, size_t rdram_size) {
+    native_before_read(src_addr, static_cast<u64>(src_addr) + (static_cast<u64>(texel_h) + 1) *
+                                     (static_cast<u64>(std::max<u32>(timg_width, texel_w)) + 1) * 4);
     tmem_dirty = true;
     ++tmem_gen_;
     // Approximates G_LOADTILE for the OBJ_LOADTXTR "tile" load type: copies a
@@ -2358,6 +2551,7 @@ void RDP::s2dex_load_txtr(u32 tx_addr, u8* rdram, size_t rdram_size) {
         u16 pnum  = s2d_read_u16(rdram, tx_addr + 10);
         u32 pal_index_base = (phead >= 256) ? (phead - 256) : 0;
         u32 count = static_cast<u32>(pnum) + 1;
+        native_before_read(image_ptr, static_cast<u64>(image_ptr) + count * 2);
         for (u32 i = 0; i < count; ++i) {
             u32 off = 0x800 + (pal_index_base + i) * 2;
             u32 src = image_ptr + i * 2;
@@ -2533,6 +2727,7 @@ void RDP::s2dex_draw_obj_sprite(u32 sp_addr, u8* rdram, size_t rdram_size) {
 }
 
 void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) {
+    flush_native(); // draws synchronously, and reads its image straight from RDRAM
     if (bg_addr + 32 > rdram_size) return;
 
     u16 imageX = s2d_read_u16(rdram, bg_addr + 0);
@@ -2605,22 +2800,35 @@ void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) 
     HiResTarget* hr = hires_target(rdram, rdram_size);
     if (hr) hires_bg_px_.assign(static_cast<size_t>(out_w) * out_h, 0);
 
+    // The source column (and filter weight) of each output column is the same
+    // on every row: work it out once instead of per pixel (two divisions each).
+    bg_columns_.resize(out_w);
+    BgColumn* columns = bg_columns_.data();
+    for (u32 x = 0; x < out_w; ++x) {
+        u32 col = flipS ? (out_w - 1 - x) : x;
+        f32 fxc = img_x_start + static_cast<f32>(col) * sW;
+        f32 fx_floor = std::floor(fxc);
+        s32 ix = static_cast<s32>(fx_floor) % static_cast<s32>(image_w_texels);
+        if (ix < 0) ix += image_w_texels;
+        columns[x] = {ix, (ix + 1) % static_cast<s32>(image_w_texels), fxc - fx_floor};
+    }
+    // The combiner only depends on the texel here, and backgrounds are mostly
+    // runs of one colour: reuse the previous result for a repeated input.
+    u32 last_in = 0, last_out = 0;
+    bool have_last = false;
+
     for (u32 y = 0; y < out_h; ++y) {
         f32 fyc = img_y_start + static_cast<f32>(y) * sH;
         s32 iy = static_cast<s32>(std::floor(fyc)) % static_cast<s32>(image_h_texels);
         if (iy < 0) iy += image_h_texels;
 
         for (u32 x = 0; x < out_w; ++x) {
-            u32 col = flipS ? (out_w - 1 - x) : x;
-            f32 fxc = img_x_start + static_cast<f32>(col) * sW;
-            f32 fx_floor = std::floor(fxc);
-            s32 ix = static_cast<s32>(fx_floor) % static_cast<s32>(image_w_texels);
-            if (ix < 0) ix += image_w_texels;
+            const s32 ix = columns[x].ix;
 
             u32 color;
             if (bilerp) {
-                s32 ix2 = (ix + 1) % static_cast<s32>(image_w_texels);
-                f32 frac = fxc - fx_floor;
+                s32 ix2 = columns[x].ix2;
+                f32 frac = columns[x].frac;
                 u32 c0 = fetch_bg_texel_raw(rdram, rdram_size, tmem, imagePtr, imageFmt, imageSiz,
                                              static_cast<u8>(imagePal), tlut_type, row_stride_bytes, ix, iy);
                 u32 c1 = fetch_bg_texel_raw(rdram, rdram_size, tmem, imagePtr, imageFmt, imageSiz,
@@ -2639,7 +2847,12 @@ void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) 
             }
 
             if (st.combine_set) {
-                color = raster::combine(st, color, color, 255, 255, 255, 255);
+                if (!have_last || color != last_in) {
+                    last_in = color;
+                    last_out = raster::combine(st, color, color, 255, 255, 255, 255);
+                    have_last = true;
+                }
+                color = last_out;
             }
             write_pixel(st, screen_x0 + x, screen_y0 + y, color, 0.0f, rdram, rdram_size);
             if (hr) hires_bg_px_[static_cast<size_t>(y) * out_w + x] = color;

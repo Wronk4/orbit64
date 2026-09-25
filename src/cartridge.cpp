@@ -90,16 +90,19 @@ bool Cartridge::load_rom(const std::string& filepath) {
 
     detect_cic_and_save();
 
-    // Set save file path
+    // Set save file path (none: save_backup() then has nothing to write to)
     size_t dot = filepath.find_last_of('.');
-    if (dot != std::string::npos) {
+    if (!use_save_file_) {
+        save_filepath.clear();
+    } else if (dot != std::string::npos) {
         save_filepath = filepath.substr(0, dot) + ".sav";
     } else {
         save_filepath = filepath + ".sav";
     }
 
     // Load existing save file if present
-    std::ifstream save_file(utf8_path(save_filepath), std::ios::binary);
+    std::ifstream save_file;
+    if (!save_filepath.empty()) save_file.open(utf8_path(save_filepath), std::ios::binary);
     if (save_file.is_open()) {
         if (save_type == SaveType::SRAM_32K) {
             save_file.read(reinterpret_cast<char*>(sram.data()), sram.size());

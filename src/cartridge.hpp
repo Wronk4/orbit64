@@ -28,6 +28,9 @@ public:
 
     bool load_rom(const std::string& filepath);
     void save_backup();
+    // Off: load_rom() neither reads nor later writes the .sav next to the ROM,
+    // so a run always starts from blank save memory (reproducible test runs).
+    void set_use_save_file(bool on) { use_save_file_ = on; }
 
     u8 read_rom(u32 addr) const;
     u16 read_rom16(u32 addr) const;
@@ -54,6 +57,7 @@ public:
 
 private:
     std::string save_filepath;
+    bool use_save_file_{true};
     std::vector<u8> rom;
     std::vector<u8> sram;
     std::vector<u8> eeprom;

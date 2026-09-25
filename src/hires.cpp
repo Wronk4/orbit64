@@ -308,6 +308,9 @@ HiResTarget* HiResRenderer::bind(u32 addr, u32 width, u8 size, const u8* rdram, 
 DrawState* HiResRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, bool needs_tmem) {
     if (rec_state_ && rec_serial_ == serial && (!needs_tmem || rec_tmem_gen_ == tmem_gen)) return rec_state_;
     DrawState* s = arena().make(st);
+    // The native pass's decoded textures (RDP::attach_native_tex_cache) are
+    // only valid until its next TMEM load; workers get their own.
+    for (raster::TexUnit& tu : s->tex) tu.cache = nullptr;
     if (needs_tmem) {
         if (!tmem_copy_ || tmem_copy_gen_ != tmem_gen) {
             auto* copy = static_cast<TmemCopy*>(arena().alloc(sizeof(TmemCopy)));
@@ -339,13 +342,8 @@ void HiResRenderer::attach_tex_cache(DrawState* rs, u32 tile, u64 tmem_gen) {
     u32 w = 0, h = 0;
     raster::tex_cache_dims(tu, w, h);
     if (static_cast<u64>(w) * h > 256 * 256) return; // too big to be worth decoding
-    const Tile& t = tu.tile;
-    TexKey key{tmem_gen,
-               static_cast<u64>(t.format) | static_cast<u64>(t.size) << 3 | static_cast<u64>(t.palette) << 5 |
-                   static_cast<u64>(t.mask_s) << 9 | static_cast<u64>(t.mask_t) << 13 | static_cast<u64>(t.clamp_s) << 17 |
-                   static_cast<u64>(t.clamp_t) << 18 | static_cast<u64>(t.mirror_s) << 19 | static_cast<u64>(t.mirror_t) << 20 |
-                   static_cast<u64>(rs->tlut_type) << 21 | static_cast<u64>(tu.row_stride) << 23 | static_cast<u64>(tu.tmem_base) << 40,
-               static_cast<u64>(static_cast<u32>(tu.extent_s)) | static_cast<u64>(static_cast<u32>(tu.extent_t)) << 32};
+    TexKey key{tmem_gen, 0, 0};
+    raster::tex_cache_key(tu, rs->tlut_type, key.a, key.b);
     auto it = tex_caches_.find(key);
     if (it == tex_caches_.end()) {
         auto* c = new (arena().alloc(sizeof(TexCache))) TexCache();

@@ -3,6 +3,7 @@
 #include "jit_invalidate.hpp"
 #include "../cpu.hpp"
 #include "../bus.hpp"
+#include <cstdio>
 #include <cstring>
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -33,15 +34,60 @@ struct Decoded {
     s32 simm;  // sign-extended 16-bit immediate (everything else)
 };
 
-// A pending "trapping arithmetic overflowed" branch site: `site` is where the
+// A pending "trapping arithmetic overflowed" branch: `patch` is where the
 // native overflow-branch instruction was emitted (still pointing nowhere -
 // patched once the out-of-line stub for it is emitted, same idea as the
-// load/store fault_patches list), `n` is the guest instruction count to
-// report if it fires.
+// load/store fault_patches list), `site` identifies the guest instruction
+// (see kSiteDelaySlot); its index is the instruction count to report.
 struct OverflowSite {
-    size_t site;
-    u32 n;
+    size_t patch;
+    u32 site;
 };
+
+// Guest instructions that completed before the one `site` names.
+constexpr u32 site_index(u32 site) { return site & ~kSiteDelaySlot; }
+
+// Branches/jumps a block may end with (together with their delay slot).
+// BC1T/BC1F are not among them: they read the FPU condition bit, which only
+// the interpreter maintains.
+[[maybe_unused]] bool is_block_branch(const Decoded& d) {
+    switch (d.op) {
+    case 0x00: return d.funct == 0x08 || d.funct == 0x09; // JR, JALR
+    case 0x01: return d.rt <= 0x03 || (d.rt >= 0x10 && d.rt <= 0x13); // BLTZ..BGEZL, BLTZAL..BGEZALL
+    case 0x02: case 0x03: // J, JAL
+    case 0x04: case 0x05: case 0x06: case 0x07: // BEQ, BNE, BLEZ, BGTZ
+    case 0x14: case 0x15: case 0x16: case 0x17: // ...likely
+        return true;
+    default: return false;
+    }
+}
+
+// Instructions a block runs by calling the interpreter for just that one
+// instruction (jit_interp) instead of ending there: a helper call costs about
+// what interpreting it would, but the block - and everything after it -
+// stays compiled. Only instructions that never branch, never depend on how
+// far COUNT has advanced mid-block and never change interrupt state qualify
+// (so no COP0), and only the forms each backend's compile_one() doesn't
+// already inline - it is always tried first.
+[[maybe_unused]] bool is_interp_callable(const Decoded& d) {
+    switch (d.op) {
+    case 0x00: return d.funct >= 0x18 && d.funct <= 0x1F; // MULT, MULTU, DIV, DIVU, DMULT, DMULTU, DDIV, DDIVU
+    case 0x11: // COP1: CFC1/CTC1 and S/D/W/L arithmetic (ROUND/TRUNC/CEIL/FLOOR, ...)
+        return d.rs == 0x02 || d.rs == 0x06 || d.rs == 0x10 || d.rs == 0x11 || d.rs == 0x14 || d.rs == 0x15;
+    case 0x1A: case 0x1B: // LDL, LDR
+    case 0x22: case 0x26: // LWL, LWR
+    case 0x2A: case 0x2C: case 0x2D: case 0x2E: // SWL, SDL, SDR, SWR
+    case 0x30: case 0x34: case 0x38: case 0x3C: // LL, LLD, SC, SCD
+    case 0x31: case 0x35: case 0x39: case 0x3D: // LWC1, LDC1, SWC1, SDC1
+        return true;
+    default: return false;
+    }
+}
+
+u32 fetch_instr(const u8* rdram, u32 paddr) {
+    return (static_cast<u32>(rdram[paddr]) << 24) | (static_cast<u32>(rdram[paddr + 1]) << 16) |
+           (static_cast<u32>(rdram[paddr + 2]) << 8) | static_cast<u32>(rdram[paddr + 3]);
+}
 
 Decoded decode(u32 instr) {
     Decoded d{};
@@ -59,7 +105,7 @@ Decoded decode(u32 instr) {
 
 } // namespace
 
-Recompiler::Recompiler() : cache_(kCacheSize), code_pages_(RDRAM_SIZE >> kPageShift, false), ds_cache_(kCacheSize) {
+Recompiler::Recompiler() : code_pages_(RDRAM_SIZE >> kPageShift, 0) {
     jit::set_invalidate_hook(this, [](void* owner, u32 paddr, u32 len) {
         static_cast<Recompiler*>(owner)->request_invalidate(paddr, len);
     });
@@ -70,14 +116,13 @@ Recompiler::~Recompiler() {
 }
 
 void Recompiler::invalidate_all() {
-    for (CacheEntry& e : cache_) e.tag = 0xFFFFFFFFu;
-    for (CacheEntry& e : ds_cache_) e.tag = 0xFFFFFFFFu;
+    for (BlockMap* map : {&blocks_, &ds_blocks_}) {
+        for (auto& table : map->tables) table.reset();
+        map->last_paddr = 0xFFFFFFFFu;
+        map->last_block = nullptr;
+    }
     code_.reset();
-    std::fill(code_pages_.begin(), code_pages_.end(), false);
-    last_paddr_ = 0xFFFFFFFFu;
-    last_block_ = nullptr;
-    last_ds_paddr_ = 0xFFFFFFFFu;
-    last_ds_block_ = nullptr;
+    std::fill(code_pages_.begin(), code_pages_.end(), 0);
 }
 
 void Recompiler::request_invalidate(u32 paddr, u32 len) {
@@ -96,7 +141,7 @@ void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr) {
     u32 first_page = start_paddr >> kPageShift;
     u32 last_page = (end_paddr == start_paddr) ? first_page : (end_paddr - 1) >> kPageShift;
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
-        code_pages_[p] = true;
+        code_pages_[p] = 1;
     }
 }
 
@@ -107,6 +152,7 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     if (pending_invalidate_) {
         pending_invalidate_ = false;
         invalidate_all();
+        if (stats_on_) stats_.invalidations++;
     }
 
     u64 pc = cpu.get_pc();
@@ -120,63 +166,59 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     const u64 pc_hi = pc >> 32;
     const u32 pc32 = static_cast<u32>(pc);
     if ((pc_hi != 0 && pc_hi != 0xFFFFFFFFull) || pc32 < 0x80000000u || pc32 > 0xBFFFFFFFu) {
+        if (stats_on_) {
+            stats_.interp_instrs++;
+            stats_.interp_unmapped++;
+        }
         return cpu.step();
     }
-    u32 paddr = pc32 & 0x1FFFFFFFu;
+    const u32 paddr = pc32 & 0x1FFFFFFFu;
 
-    // A taken branch's delay slot: pc after this one instruction is fixed
-    // (jit_branch_target(), not pc+4), so it gets its own capped-at-1-
-    // instruction compile instead of the normal multi-instruction one - see
-    // lookup_or_compile_delay_slot()/ds_cache_.
-    if (cpu.jit_pending_delay_slot()) {
-        const Block* dblk = lookup_or_compile_delay_slot(cpu, bus, paddr);
-        if (!dblk || !dblk->fn) return cpu.step();
-
-        u64 target = cpu.jit_branch_target();
-        JitCtx dctx{&cpu, &bus, cpu.jit_gpr_ptr(), cpu.jit_hi_ptr(), cpu.jit_lo_ptr()};
-        u32 dexecuted = dblk->fn(&dctx);
-        if (dexecuted == dblk->length) {
-            cpu.set_pc(target);
-            // CPU::step() always clears this at its own entry, before
-            // possibly setting it again for a *new* branch; since this path
-            // never goes through step(), it has to do that part explicitly
-            // too, or the next instruction gets mistaken for another
-            // pending delay slot forever (target never changes once stuck).
-            cpu.jit_clear_pending_delay_slot();
-        }
-        // else: this one instruction was a load/store that raised a TLB
-        // exception, which already cleared this flag as part of redirecting
-        // cpu's pc to the vector (see CPU::trigger_tlb_exception) - exactly
-        // like the normal block path below.
-        if (dexecuted > 0) {
-            cpu.step_timer(2 * dexecuted);
-            cpu.check_interrupts();
-        }
-        return dexecuted * 2;
-    }
-
-    const Block* blk = lookup_or_compile(cpu, bus, pc, paddr);
+    // A taken branch's delay slot whose branch ran on the interpreter: pc
+    // after this one instruction is fixed (jit_branch_target(), not pc+4),
+    // so it gets its own capped-at-1-instruction compile instead of the
+    // normal multi-instruction one - see ds_blocks_.
+    const bool delay_slot = cpu.jit_pending_delay_slot();
+    const Block* blk = lookup_or_compile(cpu, bus, paddr, delay_slot);
     if (!blk || !blk->fn) {
+        if (stats_on_) count_fallback(bus, pc);
         return cpu.step();
     }
 
-    JitCtx ctx{&cpu, &bus, cpu.jit_gpr_ptr(), cpu.jit_hi_ptr(), cpu.jit_lo_ptr()};
-    u32 executed = blk->fn(&ctx);
-
-    if (executed == blk->length) {
-        cpu.set_pc(pc + 4ULL * executed);
+    JitCtx ctx{&cpu, &bus, cpu.jit_gpr_ptr(), cpu.jit_hi_ptr(), cpu.jit_lo_ptr(),
+               /*start_pc*/ pc,
+               /*next_pc*/ delay_slot ? cpu.jit_branch_target() : pc + 4ULL * blk->length,
+               /*branch_taken*/ delay_slot ? 1u : 0u,
+               /*faulted*/ 0,
+               bus.get_rdram(),
+               code_pages_.data()};
+    const u32 executed = blk->fn(&ctx);
+    if (stats_on_) {
+        stats_.jit_entries++;
+        stats_.jit_instrs += executed;
     }
-    // else: a load/store inside the block raised a TLB exception, which
-    // already redirected cpu's pc to the exception vector.
+
+    if (!ctx.faulted) {
+        cpu.set_pc(ctx.next_pc);
+        // CPU::step() always clears this at its own entry, before possibly
+        // setting it again for a *new* branch; since this path never goes
+        // through step(), it has to do that part explicitly too, or the next
+        // instruction gets mistaken for another pending delay slot forever.
+        if (delay_slot) cpu.jit_clear_pending_delay_slot();
+    }
+    // else: an instruction inside the block raised an exception, which
+    // already redirected cpu's pc to the vector (and cleared any pending
+    // delay slot - see CPU::trigger_exception).
 
     // Batched COUNT/compare-timer update + a single interrupt check for the
     // whole block. This is coarser than the interpreter (which re-checks
-    // after every instruction) but observationally equivalent here: compiled
-    // blocks never contain a branch, so there's no mid-block point control
-    // flow could have been redirected to. CP0 RANDOM (TLB-replacement index)
-    // is deliberately *not* decremented per compiled instruction - only the
-    // interpreter does that precisely - since whitelisted blocks never touch
-    // the TLB themselves; documented simplification for this first version.
+    // after every instruction): an interrupt that becomes pending mid-block
+    // is taken at the block's end instead, i.e. a few instructions late -
+    // never between a branch and its delay slot, since a block always
+    // contains both. CP0 RANDOM (TLB-replacement index) is deliberately
+    // *not* decremented per compiled instruction - only the interpreter does
+    // that precisely - since whitelisted blocks never touch the TLB
+    // themselves.
     if (executed > 0) {
         cpu.step_timer(2 * executed);
         cpu.check_interrupts();
@@ -185,34 +227,172 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     return executed * 2;
 }
 
-const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u64, u32 paddr) {
-    if (paddr == last_paddr_) return last_block_;
+const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot) {
+    BlockMap& map = delay_slot ? ds_blocks_ : blocks_;
+    if (paddr == map.last_paddr) return map.last_block;
+    if (paddr >= RDRAM_SIZE) return nullptr; // e.g. code running straight from cartridge ROM
 
-    CacheEntry& slot = cache_[cache_index(paddr)];
-    if (slot.tag != paddr) {
-        if (code_.remaining() < kArenaHeadroom) invalidate_all();
-        slot.tag = paddr;
-        slot.block = compile_block(cpu, bus, paddr, kMaxBlockLen);
-        if (slot.block.fn) mark_code_pages(paddr, paddr + slot.block.length * 4);
+    std::unique_ptr<BlockTable>* table = &map.tables[paddr >> kTableShift];
+    Block* slot = *table ? &(**table)[(paddr >> 2) & (kSlotsPerTable - 1)] : nullptr;
+    if (!slot || !slot->valid) {
+        if (code_.remaining() < kArenaHeadroom) invalidate_all(); // also drops *table
+        if (!*table) *table = std::make_unique<BlockTable>();
+        slot = &(**table)[(paddr >> 2) & (kSlotsPerTable - 1)];
+        *slot = compile_block(cpu, bus, paddr, delay_slot);
+        slot->valid = true;
+        if (stats_on_) stats_.compiles++;
+        if (slot->fn) mark_code_pages(paddr, paddr + slot->length * 4);
     }
-    last_paddr_ = paddr;
-    last_block_ = &slot.block;
-    return last_block_;
+    map.last_paddr = paddr;
+    map.last_block = slot;
+    return slot;
 }
 
-const Recompiler::Block* Recompiler::lookup_or_compile_delay_slot(CPU& cpu, Bus& bus, u32 paddr) {
-    if (paddr == last_ds_paddr_) return last_ds_block_;
+// ---------------------------------------------------------------------------
+// Coverage statistics
+// ---------------------------------------------------------------------------
+namespace {
 
-    CacheEntry& slot = ds_cache_[cache_index(paddr)];
-    if (slot.tag != paddr) {
-        if (code_.remaining() < kArenaHeadroom) invalidate_all();
-        slot.tag = paddr;
-        slot.block = compile_block(cpu, bus, paddr, 1);
-        if (slot.block.fn) mark_code_pages(paddr, paddr + 4);
+// Dense index for an instruction's "kind" (major opcode plus whichever
+// sub-field selects the operation), so fallbacks can be histogrammed in a
+// flat array. Layout: [0,64) major op, [64,128) SPECIAL funct, [128,160)
+// REGIMM rt, [160,192) COP0 rs, [192,256) COP0 CO funct, [256,288) COP1 rs,
+// [288,544) COP1 fmt S/D/W/L x funct.
+constexpr u32 kFallbackKeys = 544;
+
+u32 fallback_key(u32 raw) {
+    const u32 op = raw >> 26, rs = (raw >> 21) & 31, rt = (raw >> 16) & 31, funct = raw & 63;
+    switch (op) {
+    case 0x00: return 64 + funct;
+    case 0x01: return 128 + rt;
+    case 0x10: return (rs == 0x10) ? 192 + funct : 160 + rs;
+    case 0x11:
+        if (rs == 0x10 || rs == 0x11) return 288 + (rs - 0x10) * 64 + funct;
+        if (rs == 0x14 || rs == 0x15) return 288 + (rs - 0x12) * 64 + funct;
+        return 256 + rs;
+    default: return op;
     }
-    last_ds_paddr_ = paddr;
-    last_ds_block_ = &slot.block;
-    return last_ds_block_;
+}
+
+std::string fallback_key_name(u32 key) {
+    static const char* const kOps[64] = {
+        "SPECIAL", "REGIMM", "J", "JAL", "BEQ", "BNE", "BLEZ", "BGTZ",
+        "ADDI", "ADDIU", "SLTI", "SLTIU", "ANDI", "ORI", "XORI", "LUI",
+        "COP0", "COP1", "COP2", "COP3", "BEQL", "BNEL", "BLEZL", "BGTZL",
+        "DADDI", "DADDIU", "LDL", "LDR", "op1C", "op1D", "op1E", "op1F",
+        "LB", "LH", "LWL", "LW", "LBU", "LHU", "LWR", "LWU",
+        "SB", "SH", "SWL", "SW", "SDL", "SDR", "SWR", "CACHE",
+        "LL", "LWC1", "LWC2", "op33", "LLD", "LDC1", "LDC2", "LD",
+        "SC", "SWC1", "SWC2", "op3B", "SCD", "SDC1", "SDC2", "SD"};
+    static const char* const kSpecial[64] = {
+        "SLL", "sp01", "SRL", "SRA", "SLLV", "sp05", "SRLV", "SRAV",
+        "JR", "JALR", "MOVZ", "MOVN", "SYSCALL", "BREAK", "sp0E", "SYNC",
+        "MFHI", "MTHI", "MFLO", "MTLO", "DSLLV", "sp15", "DSRLV", "DSRAV",
+        "MULT", "MULTU", "DIV", "DIVU", "DMULT", "DMULTU", "DDIV", "DDIVU",
+        "ADD", "ADDU", "SUB", "SUBU", "AND", "OR", "XOR", "NOR",
+        "sp28", "sp29", "SLT", "SLTU", "DADD", "DADDU", "DSUB", "DSUBU",
+        "TGE", "TGEU", "TLT", "TLTU", "TEQ", "sp35", "TNE", "sp37",
+        "DSLL", "sp39", "DSRL", "DSRA", "DSLL32", "sp3D", "DSRL32", "DSRA32"};
+    static const char* const kRegimm[32] = {
+        "BLTZ", "BGEZ", "BLTZL", "BGEZL", "ri04", "ri05", "ri06", "ri07",
+        "TGEI", "TGEIU", "TLTI", "TLTIU", "TEQI", "ri0D", "TNEI", "ri0F",
+        "BLTZAL", "BGEZAL", "BLTZALL", "BGEZALL", "ri14", "ri15", "ri16", "ri17",
+        "ri18", "ri19", "ri1A", "ri1B", "ri1C", "ri1D", "ri1E", "ri1F"};
+    static const char* const kCop1Fn[64] = {
+        "ADD", "SUB", "MUL", "DIV", "SQRT", "ABS", "MOV", "NEG",
+        "ROUND.L", "TRUNC.L", "CEIL.L", "FLOOR.L", "ROUND.W", "TRUNC.W", "CEIL.W", "FLOOR.W",
+        "f10", "f11", "f12", "f13", "f14", "f15", "f16", "f17",
+        "f18", "f19", "f1A", "f1B", "f1C", "f1D", "f1E", "f1F",
+        "CVT.S", "CVT.D", "f22", "f23", "CVT.W", "CVT.L", "f26", "f27",
+        "f28", "f29", "f2A", "f2B", "f2C", "f2D", "f2E", "f2F",
+        "C.F", "C.UN", "C.EQ", "C.UEQ", "C.OLT", "C.ULT", "C.OLE", "C.ULE",
+        "C.SF", "C.NGLE", "C.SEQ", "C.NGL", "C.LT", "C.NGE", "C.LE", "C.NGT"};
+    char buf[32];
+    if (key < 64) return kOps[key];
+    if (key < 128) return kSpecial[key - 64];
+    if (key < 160) return kRegimm[key - 128];
+    if (key < 192) {
+        switch (key - 160) {
+        case 0x00: return "MFC0";
+        case 0x01: return "DMFC0";
+        case 0x04: return "MTC0";
+        case 0x05: return "DMTC0";
+        default: std::snprintf(buf, sizeof buf, "COP0 rs=%02X", key - 160); return buf;
+        }
+    }
+    if (key < 256) {
+        switch (key - 192) {
+        case 0x01: return "TLBR";
+        case 0x02: return "TLBWI";
+        case 0x06: return "TLBWR";
+        case 0x08: return "TLBP";
+        case 0x18: return "ERET";
+        default: std::snprintf(buf, sizeof buf, "COP0.CO f=%02X", key - 192); return buf;
+        }
+    }
+    if (key < 288) {
+        switch (key - 256) {
+        case 0x00: return "MFC1";
+        case 0x01: return "DMFC1";
+        case 0x02: return "CFC1";
+        case 0x04: return "MTC1";
+        case 0x05: return "DMTC1";
+        case 0x06: return "CTC1";
+        case 0x08: return "BC1";
+        default: std::snprintf(buf, sizeof buf, "COP1 rs=%02X", key - 256); return buf;
+        }
+    }
+    static const char kFmt[4] = {'S', 'D', 'W', 'L'};
+    const u32 k = key - 288;
+    std::snprintf(buf, sizeof buf, "%s.%c", kCop1Fn[k & 63], kFmt[k >> 6]);
+    return buf;
+}
+
+} // namespace
+
+void Recompiler::count_fallback(Bus& bus, u64 pc) {
+    stats_.interp_instrs++;
+    const u32 paddr = static_cast<u32>(pc) & 0x1FFFFFFFu;
+    if (static_cast<size_t>(paddr) + 4 > bus.get_rdram_size()) return;
+    const u8* p = bus.get_rdram() + paddr;
+    const u32 raw = (static_cast<u32>(p[0]) << 24) | (static_cast<u32>(p[1]) << 16) |
+                    (static_cast<u32>(p[2]) << 8) | static_cast<u32>(p[3]);
+    if (fallback_counts_.empty()) fallback_counts_.assign(kFallbackKeys, 0);
+    fallback_counts_[fallback_key(raw)]++;
+}
+
+void Recompiler::print_stats(std::ostream& out) const {
+    const Stats& s = stats_;
+    const u64 total = s.jit_instrs + s.interp_instrs;
+    auto pct = [total](u64 v) { return total ? 100.0 * static_cast<double>(v) / static_cast<double>(total) : 0.0; };
+    char line[160];
+    out << "[JIT] ---- coverage ----\n";
+    std::snprintf(line, sizeof line, "[JIT] guest instructions : %llu\n", static_cast<unsigned long long>(total));
+    out << line;
+    std::snprintf(line, sizeof line, "[JIT]   compiled         : %llu (%.1f%%)\n",
+                  static_cast<unsigned long long>(s.jit_instrs), pct(s.jit_instrs));
+    out << line;
+    std::snprintf(line, sizeof line, "[JIT]   interpreted      : %llu (%.1f%%), outside KSEG0/1: %llu (%.1f%%)\n",
+                  static_cast<unsigned long long>(s.interp_instrs), pct(s.interp_instrs),
+                  static_cast<unsigned long long>(s.interp_unmapped), pct(s.interp_unmapped));
+    out << line;
+    std::snprintf(line, sizeof line, "[JIT] block entries: %llu, avg %.2f instr/entry, compiles: %llu, cache drops: %llu\n",
+                  static_cast<unsigned long long>(s.jit_entries),
+                  s.jit_entries ? static_cast<double>(s.jit_instrs) / static_cast<double>(s.jit_entries) : 0.0,
+                  static_cast<unsigned long long>(s.compiles), static_cast<unsigned long long>(s.invalidations));
+    out << line;
+
+    std::vector<std::pair<u64, u32>> top;
+    for (u32 k = 0; k < fallback_counts_.size(); ++k) {
+        if (fallback_counts_[k]) top.emplace_back(fallback_counts_[k], k);
+    }
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    out << "[JIT] top interpreted instructions (% of all executed):\n";
+    for (size_t i = 0; i < top.size() && i < 30; ++i) {
+        std::snprintf(line, sizeof line, "[JIT]   %-12s %12llu  %5.2f%%\n", fallback_key_name(top[i].second).c_str(),
+                      static_cast<unsigned long long>(top[i].first), pct(top[i].first));
+        out << line;
+    }
 }
 
 // ===========================================================================
@@ -224,36 +404,57 @@ using namespace x64;
 
 // Context registers, fixed for the lifetime of a compiled block. None of
 // these ever holds anything else, so per-instruction codegen can assume them.
-constexpr int R_GPR = RBX; // u64 gpr[32]
-constexpr int R_BUS = R12; // Bus*
-constexpr int R_HI = R13;  // u64* (single u64)
-constexpr int R_LO = R14;  // u64* (single u64)
-constexpr int R_CPU = R15; // CPU* (unused by codegen directly; kept for helpers via ctx)
-constexpr int R_CTX = RBP; // JitCtx* (original argument, for helper calls)
+constexpr int R_GPR = RBX;   // u64 gpr[32]
+constexpr int R_PAGES = R12; // JitCtx::code_pages
+constexpr int R_HI = R13;    // u64* (single u64)
+constexpr int R_LO = R14;    // u64* (single u64)
+constexpr int R_MEM = R15;   // JitCtx::rdram
+constexpr int R_CTX = RBP;   // JitCtx* (original argument, for helper calls)
 // x64::RSP collides with the (unrelated) forward-declared N64 `class RSP` -
 // alias it locally so this file can stay unqualified everywhere else.
 constexpr int R_SP = x64::RSP;
 
-// Extra stack space reserved beyond the 8 bytes needed to reach 16-byte
-// alignment for CALLs (6 pushes then -8 lands on a 16-byte boundary; any
-// further reservation must stay a multiple of 16 to preserve that). This
-// gives COP1 codegen a fixed, always-valid scratch slot at [rsp+8] to stash
-// one FP register's raw bits across a second helper call - XMM registers
-// (and every general-purpose scratch register) are caller-saved, so nothing
-// survives a call except what's explicitly parked on the stack or in one of
-// the context registers.
-constexpr u32 kFrameExtra = 24; // 8 (alignment) + 16 (one scratch slot, room to spare)
-constexpr s32 kFpScratchSlot = 8;
+// Native calling convention for blocks (called from C++) and for the
+// jit_helpers thunks they call. Everything register-level that differs
+// between the two x86-64 ABIs is confined to these constants:
+//   SysV (Linux/macOS): args RDI, RSI, RDX, RCX; no shadow space.
+//   Win64 (Windows):    args RCX, RDX, R8, R9; the caller must reserve 32
+//                       bytes of "shadow space" at [rsp] for every call,
+//                       which the callee may freely overwrite. RDI/RSI and
+//                       XMM6-15 are callee-saved there - codegen never
+//                       touches RDI/RSI on Win64 and only ever uses XMM0/1.
+// ARG1..ARG3 are also used as ordinary scratch while setting up a call, so
+// codegen must never keep a live value in RCX/RDX across one either way.
+#if defined(_WIN32)
+constexpr int ARG0 = RCX, ARG1 = RDX, ARG2 = R8, ARG3 = R9;
+constexpr u32 kShadowSpace = 32;
+#else
+constexpr int ARG0 = RDI, ARG1 = RSI, ARG2 = RDX, ARG3 = RCX;
+constexpr u32 kShadowSpace = 0;
+#endif
+
+// Extra stack space reserved beyond the 6 pushes: after them (plus the
+// return address) rsp is 8 mod 16, so this must be 8 mod 16 for every CALL
+// to see an aligned stack. It holds the Win64 shadow space (if any) at
+// [rsp], then a fixed, always-valid scratch slot above it that COP1 codegen
+// uses to stash one FP register's raw bits across a second helper call -
+// XMM registers (and every general-purpose scratch register) are
+// caller-saved, so nothing survives a call except what's explicitly parked
+// on the stack or in one of the context registers. The slot must sit above
+// the shadow space, which a callee is allowed to overwrite.
+constexpr s32 kFpScratchSlot = static_cast<s32>(kShadowSpace) + 8;
+constexpr u32 kFrameExtra = kShadowSpace + 24; // 8 (alignment) + 16 (scratch slot, room to spare)
+static_assert(kFrameExtra % 16 == 8, "CALLs from a block need a 16-byte aligned stack");
 
 void emit_prologue(Assembler& x) {
     x.push(RBP); x.push(RBX); x.push(R12); x.push(R13); x.push(R14); x.push(R15);
     x.alu_ri(true, /*SUB*/ 5, R_SP, kFrameExtra);
-    x.mov_reg_reg64(R_CTX, RDI);
-    x.load_mem64(R_CPU, RDI, 0);
-    x.load_mem64(R_BUS, RDI, 8);
-    x.load_mem64(R_GPR, RDI, 16);
-    x.load_mem64(R_HI, RDI, 24);
-    x.load_mem64(R_LO, RDI, 32);
+    x.mov_reg_reg64(R_CTX, ARG0);
+    x.load_mem64(R_MEM, ARG0, 64);
+    x.load_mem64(R_PAGES, ARG0, 72);
+    x.load_mem64(R_GPR, ARG0, 16);
+    x.load_mem64(R_HI, ARG0, 24);
+    x.load_mem64(R_LO, ARG0, 32);
 }
 
 void emit_epilogue(Assembler& x) {
@@ -262,63 +463,187 @@ void emit_epilogue(Assembler& x) {
     x.ret();
 }
 
-// Calls a jit_helpers thunk of the form `u32 fn(JitCtx*, u64 addr, u32 arg)`.
-// `addr` must already be in RSI and `arg` in RDX. On return, if RAX != 0 the
+// Calls a jit_helpers thunk of the form `u32 fn(JitCtx*, u64 addr, u32 arg, u32 site)`.
+// `addr` must already be in ARG1 and `arg` in ARG2. On return, if RAX != 0 the
 // block aborts (a TLB fault redirected cpu->pc already); this bakes in the
-// static instruction index `n` as the returned "instructions executed" count.
-void emit_helper_call(Assembler& x, void* fn, u32 n, std::vector<size_t>& fault_patches) {
-    x.mov_reg_reg64(RDI, R_CTX);
+// instruction's index as the returned "instructions executed" count.
+void emit_helper_call(Assembler& x, void* fn, u32 site, std::vector<size_t>& fault_patches) {
+    x.mov_reg_reg64(ARG0, R_CTX);
+    x.mov_reg_imm32(ARG3, site);
     x.mov_reg_imm64(RAX, reinterpret_cast<u64>(fn));
     x.call_reg(RAX);
     x.test_rr(false, RAX, RAX);
     size_t skip = x.jcc_rel32(Cc::E); // RAX==0 -> success, skip the fault path
-    x.mov_reg_imm32(RAX, n);
+    x.mov_reg_imm32(RAX, site_index(site));
     fault_patches.push_back(x.jmp_rel32());
     x.patch_rel32(skip, x.pos());
 }
 
 // Records a pending overflow branch (the native ADD/SUB/etc. just emitted
-// already set OF; `site` is the Jcc(O) placeholder to resolve later).
-void emit_overflow_check(Assembler& x, u32 n, std::vector<OverflowSite>& overflow_sites) {
-    overflow_sites.push_back({x.jcc_rel32(Cc::O), n});
+// already set OF; the Jcc(O) placeholder is resolved later).
+void emit_overflow_check(Assembler& x, u32 site, std::vector<OverflowSite>& overflow_sites) {
+    overflow_sites.push_back({x.jcc_rel32(Cc::O), site});
 }
 
 // ---- COP1 helpers: fetch/store an FPU register's raw bits via jit_fpr_*.
 // These never fault (no TLB, no exceptions), so unlike loads/stores there's
 // nothing to check on return - the result is just wherever the ABI puts it.
 void emit_fpr_get(Assembler& x, void* fn, u8 reg) {
-    x.mov_reg_reg64(RDI, R_CTX);
-    x.mov_reg_imm32(RSI, reg);
+    x.mov_reg_reg64(ARG0, R_CTX);
+    x.mov_reg_imm32(ARG1, reg);
     x.mov_reg_imm64(RAX, reinterpret_cast<u64>(fn));
     x.call_reg(RAX); // result in EAX/RAX
 }
 // `value_reg` holds the bits to store (RAX/EAX by convention here, matching
 // the register emit_fpr_get() just left them in).
 void emit_fpr_set(Assembler& x, void* fn, u8 reg, int value_reg) {
-    x.mov_reg_reg64(RDX, value_reg);
-    x.mov_reg_imm32(RSI, reg);
-    x.mov_reg_reg64(RDI, R_CTX);
+    x.mov_reg_reg64(ARG2, value_reg);
+    x.mov_reg_imm32(ARG1, reg);
+    x.mov_reg_reg64(ARG0, R_CTX);
     x.mov_reg_imm64(RAX, reinterpret_cast<u64>(fn));
     x.call_reg(RAX);
 }
 
-void emit_load(Assembler& x, const Decoded& d, void* fn, u32 n, std::vector<size_t>& fault_patches) {
-    x.load_mem64(RSI, R_GPR, d.rs * 8);
-    x.alu_ri(true, /*ADD*/ 0, RSI, static_cast<u32>(d.simm));
-    x.mov_reg_imm32(RDX, d.rt);
-    emit_helper_call(x, fn, n, fault_patches);
+void emit_load(Assembler& x, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
+    x.load_mem64(ARG1, R_GPR, d.rs * 8);
+    x.alu_ri(true, /*ADD*/ 0, ARG1, static_cast<u32>(d.simm));
+    x.mov_reg_imm32(ARG2, d.rt);
+    emit_helper_call(x, fn, site, fault_patches);
 }
 
-void emit_store(Assembler& x, const Decoded& d, void* fn, u32 n, std::vector<size_t>& fault_patches) {
-    x.load_mem64(RSI, R_GPR, d.rs * 8);
-    x.alu_ri(true, /*ADD*/ 0, RSI, static_cast<u32>(d.simm));
+void emit_store(Assembler& x, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
+    x.load_mem64(ARG1, R_GPR, d.rs * 8);
+    x.alu_ri(true, /*ADD*/ 0, ARG1, static_cast<u32>(d.simm));
+    x.load_mem64(ARG2, R_GPR, d.rt * 8);
+    emit_helper_call(x, fn, site, fault_patches);
+}
+
+// ---- Fastmem: KSEG0/KSEG1 loads/stores that hit RDRAM, inline ----
+// Bus::translate_vaddr maps the low 32 bits of any such address straight to
+// RDRAM, and Bus::read*/write* access RDRAM as plain big-endian bytes (a
+// write's only side effect being jit::notify_code_write). So when the
+// address is in either window, inside RDRAM and naturally aligned, the
+// compiled code does exactly that itself; anything else - TLB-mapped, MMIO,
+// cartridge, unaligned - takes the helper call as before.
+static_assert(RDRAM_SIZE == 0x800000, "fastmem masks assume 8 MB of RDRAM");
+constexpr u32 kFastmemMask = 0xDF800000u; // bit 31, 30, 28..23: KSEG0/KSEG1 (bit 29 free) within 8 MB
+
+// RAX = guest address rs + simm; ECX = its RDRAM offset. Returns the Jcc to
+// the slow path, taken when the fast path doesn't apply.
+size_t emit_fastmem_address(Assembler& x, const Decoded& d, u32 size) {
+    x.load_mem64(RAX, R_GPR, d.rs * 8);
+    x.add_ri(true, RAX, static_cast<u32>(d.simm));
+    x.mov_reg_reg32(RCX, RAX);
+    x.and_ri(false, RCX, kFastmemMask | (size - 1));
+    x.cmp_ri(false, RCX, 0x80000000u);
+    const size_t slow = x.jcc_rel32(Cc::NE);
+    x.mov_reg_reg32(RCX, RAX);
+    x.and_ri(false, RCX, RDRAM_SIZE - 1);
+    return slow;
+}
+
+void emit_fast_load(Assembler& x, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
+    u32 size = 4;
+    switch (d.op) {
+    case 0x20: case 0x24: size = 1; break; // LB, LBU
+    case 0x21: case 0x25: size = 2; break; // LH, LHU
+    case 0x37: size = 8; break;            // LD
+    default: break;                        // LW, LWU
+    }
+    const size_t slow = emit_fastmem_address(x, d, size);
+    switch (d.op) {
+    case 0x20: // LB
+        x.load_idx8_zx(RAX, R_MEM, RCX);
+        x.shl_ri(false, RAX, 24);
+        x.sar_ri(false, RAX, 24);
+        x.movsxd(RAX, RAX);
+        break;
+    case 0x24: // LBU
+        x.load_idx8_zx(RAX, R_MEM, RCX);
+        break;
+    case 0x21: // LH
+        x.load_idx16_zx(RAX, R_MEM, RCX);
+        x.bswap(false, RAX);
+        x.sar_ri(false, RAX, 16);
+        x.movsxd(RAX, RAX);
+        break;
+    case 0x25: // LHU
+        x.load_idx16_zx(RAX, R_MEM, RCX);
+        x.bswap(false, RAX);
+        x.shr_ri(false, RAX, 16);
+        break;
+    case 0x23: // LW
+        x.load_idx32(RAX, R_MEM, RCX);
+        x.bswap(false, RAX);
+        x.movsxd(RAX, RAX);
+        break;
+    case 0x27: // LWU
+        x.load_idx32(RAX, R_MEM, RCX);
+        x.bswap(false, RAX);
+        break;
+    default: // LD
+        x.load_idx64(RAX, R_MEM, RCX);
+        x.bswap(true, RAX);
+        break;
+    }
+    if (d.rt != 0) x.store_mem64(R_GPR, d.rt * 8, RAX);
+    const size_t done = x.jmp_rel32();
+    x.patch_rel32(slow, x.pos());
+    emit_load(x, d, fn, site, fault_patches);
+    x.patch_rel32(done, x.pos());
+}
+
+void emit_fast_store(Assembler& x, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
+    u32 size = 4;
+    switch (d.op) {
+    case 0x28: size = 1; break; // SB
+    case 0x29: size = 2; break; // SH
+    case 0x3F: size = 8; break; // SD
+    default: break;             // SW
+    }
+    const size_t slow = emit_fastmem_address(x, d, size);
     x.load_mem64(RDX, R_GPR, d.rt * 8);
-    emit_helper_call(x, fn, n, fault_patches);
+    switch (size) {
+    case 1:
+        x.store_idx8(R_MEM, RCX, RDX);
+        break;
+    case 2:
+        x.bswap(false, RDX);
+        x.shr_ri(false, RDX, 16);
+        x.store_idx16(R_MEM, RCX, RDX);
+        break;
+    case 4:
+        x.bswap(false, RDX);
+        x.store_idx32(R_MEM, RCX, RDX);
+        break;
+    default:
+        x.bswap(true, RDX);
+        x.store_idx64(R_MEM, RCX, RDX);
+        break;
+    }
+    // Self-modifying code check, as Bus::write* does via notify_code_write:
+    // only a store into a page some compiled block came from needs the call
+    // (an aligned store never spans two 64-byte pages).
+    x.mov_reg_reg32(RAX, RCX);
+    x.shr_ri(false, RAX, 6);
+    x.load_idx8_zx(RAX, R_PAGES, RAX);
+    x.test_rr(false, RAX, RAX);
+    const size_t no_code = x.jcc_rel32(Cc::E);
+    x.mov_reg_reg32(ARG0, RCX);
+    x.mov_reg_imm32(ARG1, size);
+    x.mov_reg_imm64(RAX, reinterpret_cast<u64>(&jit_notify_code_write));
+    x.call_reg(RAX);
+    x.patch_rel32(no_code, x.pos());
+    const size_t done = x.jmp_rel32();
+    x.patch_rel32(slow, x.pos());
+    emit_store(x, d, fn, site, fault_patches);
+    x.patch_rel32(done, x.pos());
 }
 
 // Returns false if `d` isn't in the native whitelist (caller stops the block
 // before this instruction; it is not included in the compiled block).
-bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fault_patches,
+// Branches/jumps are never compiled here - see emit_branch().
+bool compile_one(Assembler& x, const Decoded& d, u32 site, std::vector<size_t>& fault_patches,
                   std::vector<OverflowSite>& overflow_sites) {
     auto st_if = [&](u8 reg, int src) { if (reg != 0) x.store_mem64(R_GPR, reg * 8, src); };
 
@@ -446,7 +771,7 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
             x.load_mem32(RAX, R_GPR, d.rs * 8);
             x.load_mem32(RCX, R_GPR, d.rt * 8);
             x.add_rr(false, RAX, RCX);
-            emit_overflow_check(x, n, overflow_sites);
+            emit_overflow_check(x, site, overflow_sites);
             x.movsxd(RAX, RAX);
             st_if(d.rd, RAX);
             return true;
@@ -464,7 +789,7 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
             x.load_mem32(RAX, R_GPR, d.rs * 8);
             x.load_mem32(RCX, R_GPR, d.rt * 8);
             x.sub_rr(false, RAX, RCX);
-            emit_overflow_check(x, n, overflow_sites);
+            emit_overflow_check(x, site, overflow_sites);
             x.movsxd(RAX, RAX);
             st_if(d.rd, RAX);
             return true;
@@ -535,7 +860,7 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
             x.load_mem64(RAX, R_GPR, d.rs * 8);
             x.load_mem64(RCX, R_GPR, d.rt * 8);
             x.add_rr(true, RAX, RCX);
-            emit_overflow_check(x, n, overflow_sites);
+            emit_overflow_check(x, site, overflow_sites);
             st_if(d.rd, RAX);
             return true;
         }
@@ -551,7 +876,7 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
             x.load_mem64(RAX, R_GPR, d.rs * 8);
             x.load_mem64(RCX, R_GPR, d.rt * 8);
             x.sub_rr(true, RAX, RCX);
-            emit_overflow_check(x, n, overflow_sites);
+            emit_overflow_check(x, site, overflow_sites);
             st_if(d.rd, RAX);
             return true;
         }
@@ -588,7 +913,7 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
     case 0x08: { // ADDI (traps on 32-bit signed overflow)
         x.load_mem32(RAX, R_GPR, d.rs * 8);
         x.add_ri(false, RAX, static_cast<u32>(d.simm));
-        emit_overflow_check(x, n, overflow_sites);
+        emit_overflow_check(x, site, overflow_sites);
         x.movsxd(RAX, RAX);
         st_if(d.rt, RAX);
         return true;
@@ -638,7 +963,7 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
     case 0x18: { // DADDI (traps on 64-bit signed overflow)
         x.load_mem64(RAX, R_GPR, d.rs * 8);
         x.add_ri(true, RAX, static_cast<u32>(d.simm));
-        emit_overflow_check(x, n, overflow_sites);
+        emit_overflow_check(x, site, overflow_sites);
         st_if(d.rt, RAX);
         return true;
     }
@@ -744,10 +1069,10 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
                 return true;
             default:
                 if ((d.funct & 0x30) == 0x30) { // C.cond.S
-                    x.mov_reg_reg64(RDI, R_CTX);
-                    x.mov_reg_imm32(RSI, d.rd);
-                    x.mov_reg_imm32(RDX, d.rt);
-                    x.mov_reg_imm32(RCX, d.funct & 0x07);
+                    x.mov_reg_reg64(ARG0, R_CTX);
+                    x.mov_reg_imm32(ARG1, d.rd);
+                    x.mov_reg_imm32(ARG2, d.rt);
+                    x.mov_reg_imm32(ARG3, d.funct & 0x07);
                     x.mov_reg_imm64(RAX, reinterpret_cast<u64>(&jit_fpu_ccond_s));
                     x.call_reg(RAX);
                     return true;
@@ -835,10 +1160,10 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
                 return true;
             default:
                 if ((d.funct & 0x30) == 0x30) { // C.cond.D
-                    x.mov_reg_reg64(RDI, R_CTX);
-                    x.mov_reg_imm32(RSI, d.rd);
-                    x.mov_reg_imm32(RDX, d.rt);
-                    x.mov_reg_imm32(RCX, d.funct & 0x07);
+                    x.mov_reg_reg64(ARG0, R_CTX);
+                    x.mov_reg_imm32(ARG1, d.rd);
+                    x.mov_reg_imm32(ARG2, d.rt);
+                    x.mov_reg_imm32(ARG3, d.funct & 0x07);
                     x.mov_reg_imm64(RAX, reinterpret_cast<u64>(&jit_fpu_ccond_d));
                     x.call_reg(RAX);
                     return true;
@@ -881,45 +1206,190 @@ bool compile_one(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& fau
         default: return false; // CFC1/CTC1/BC1 - interpreter handles it
         }
 
-    case 0x20: emit_load(x, d, reinterpret_cast<void*>(&jit_load_lb), n, fault_patches); return true;
-    case 0x21: emit_load(x, d, reinterpret_cast<void*>(&jit_load_lh), n, fault_patches); return true;
-    case 0x23: emit_load(x, d, reinterpret_cast<void*>(&jit_load_lw), n, fault_patches); return true;
-    case 0x24: emit_load(x, d, reinterpret_cast<void*>(&jit_load_lbu), n, fault_patches); return true;
-    case 0x25: emit_load(x, d, reinterpret_cast<void*>(&jit_load_lhu), n, fault_patches); return true;
-    case 0x27: emit_load(x, d, reinterpret_cast<void*>(&jit_load_lwu), n, fault_patches); return true;
-    case 0x37: emit_load(x, d, reinterpret_cast<void*>(&jit_load_ld), n, fault_patches); return true;
+    case 0x20: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_lb), site, fault_patches); return true;
+    case 0x21: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_lh), site, fault_patches); return true;
+    case 0x23: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_lw), site, fault_patches); return true;
+    case 0x24: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_lbu), site, fault_patches); return true;
+    case 0x25: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_lhu), site, fault_patches); return true;
+    case 0x27: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_lwu), site, fault_patches); return true;
+    case 0x37: emit_fast_load(x, d, reinterpret_cast<void*>(&jit_load_ld), site, fault_patches); return true;
 
-    case 0x28: emit_store(x, d, reinterpret_cast<void*>(&jit_store_sb), n, fault_patches); return true;
-    case 0x29: emit_store(x, d, reinterpret_cast<void*>(&jit_store_sh), n, fault_patches); return true;
-    case 0x2B: emit_store(x, d, reinterpret_cast<void*>(&jit_store_sw), n, fault_patches); return true;
-    case 0x3F: emit_store(x, d, reinterpret_cast<void*>(&jit_store_sd), n, fault_patches); return true;
+    case 0x28: emit_fast_store(x, d, reinterpret_cast<void*>(&jit_store_sb), site, fault_patches); return true;
+    case 0x29: emit_fast_store(x, d, reinterpret_cast<void*>(&jit_store_sh), site, fault_patches); return true;
+    case 0x2B: emit_fast_store(x, d, reinterpret_cast<void*>(&jit_store_sw), site, fault_patches); return true;
+    case 0x3F: emit_fast_store(x, d, reinterpret_cast<void*>(&jit_store_sd), site, fault_patches); return true;
+
+    case 0x2F: return true; // CACHE: a no-op, as in the interpreter
 
     default:
         return false; // branches/jumps/COP0/COP1/TLB/unaligned loads/etc.
     }
 }
 
+// Runs `d` through jit_interp (see is_interp_callable), with the same
+// fault-exit convention as a load/store helper call.
+void emit_interp_call(Assembler& x, const Decoded& d, u32 site, std::vector<size_t>& fault_patches) {
+    x.mov_reg_reg64(ARG0, R_CTX);
+    x.mov_reg_imm32(ARG1, d.raw);
+    x.mov_reg_imm32(ARG2, site);
+    x.mov_reg_imm64(RAX, reinterpret_cast<u64>(&jit_interp));
+    x.call_reg(RAX);
+    x.test_rr(false, RAX, RAX);
+    size_t skip = x.jcc_rel32(Cc::E);
+    x.mov_reg_imm32(RAX, site_index(site));
+    fault_patches.push_back(x.jmp_rel32());
+    x.patch_rel32(skip, x.pos());
+}
+
+// compile_one(), or failing that an in-place interpreter call; false if `d`
+// has to end the block.
+bool compile_or_call(Assembler& x, const Decoded& d, u32 site, std::vector<size_t>& fault_patches,
+                     std::vector<OverflowSite>& overflow_sites) {
+    if (compile_one(x, d, site, fault_patches, overflow_sites)) return true;
+    if (!is_interp_callable(d)) return false;
+    emit_interp_call(x, d, site, fault_patches);
+    return true;
+}
+
+// JitCtx fields a block's terminating branch writes (see jit_abi.hpp).
+constexpr s32 kCtxStartPc = 40;
+constexpr s32 kCtxNextPc = 48;
+constexpr s32 kCtxBranchTaken = 56;
+
+// RAX = start_pc + offset: the pc of guest instruction offset/4 (or, past the
+// end, the pc it falls through to) in whichever virtual alias the block was
+// entered through.
+void emit_pc_plus(Assembler& x, s32 offset) {
+    x.load_mem64(RAX, R_CTX, kCtxStartPc);
+    if (offset != 0) x.add_ri(true, RAX, static_cast<u32>(offset));
+}
+
+// Emits the branch/jump `d` at block index `n` (is_block_branch(d) must hold),
+// up to - not including - its delay slot, which the caller compiles right
+// after. Mirrors CPU::execute() exactly, including its order of operations:
+// the link register is written before the branch's own operands are read.
+// On return every path that reaches the delay slot has stored ctx->next_pc
+// (and ctx->branch_taken = 1 if taken); a likely branch's not-taken path
+// skips the delay slot and exits the block itself (its jump to the epilogue
+// is added to exit_patches, with EAX = n + 1 instructions executed).
+void emit_branch(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& exit_patches) {
+    const s32 fallthrough = static_cast<s32>(4 * n + 8);
+    auto store_next_pc = [&]() { x.store_mem64(R_CTX, kCtxNextPc, RAX); };
+    auto mark_taken = [&]() {
+        x.mov_reg_imm32(RCX, 1);
+        x.store_mem32(R_CTX, kCtxBranchTaken, RCX);
+    };
+    auto link = [&](u8 reg) {
+        if (reg == 0) return;
+        emit_pc_plus(x, fallthrough);
+        x.store_mem64(R_GPR, reg * 8, RAX);
+    };
+
+    // Unconditional jumps.
+    if (d.op == 0x02 || d.op == 0x03) { // J, JAL
+        if (d.op == 0x03) link(31);
+        x.load_mem64(RAX, R_CTX, kCtxStartPc);
+        x.mov_reg_imm64(RCX, 0xFFFFFFFFF0000000ull);
+        x.and_rr(true, RAX, RCX);
+        x.or_ri(true, RAX, (d.raw & 0x03FFFFFFu) << 2);
+        store_next_pc();
+        mark_taken();
+        return;
+    }
+    if (d.op == 0x00) { // JR, JALR
+        if (d.funct == 0x09) link(d.rd);
+        x.load_mem64(RAX, R_GPR, d.rs * 8);
+        store_next_pc();
+        mark_taken();
+        return;
+    }
+
+    // Conditional branches: set the flags, pick the "taken" condition.
+    Cc taken_cc;
+    bool likely = false;
+    if (d.op == 0x01) { // REGIMM: BLTZ/BGEZ, +L, +AL, +ALL
+        if (d.rt & 0x10) link(31);
+        likely = (d.rt & 0x02) != 0;
+        taken_cc = (d.rt & 0x01) ? Cc::GE : Cc::L;
+        x.load_mem64(RAX, R_GPR, d.rs * 8);
+        x.cmp_ri(true, RAX, 0);
+    } else {
+        likely = d.op >= 0x14;
+        switch (d.op & 0x07) {
+        case 0x04: taken_cc = Cc::E; break;  // BEQ
+        case 0x05: taken_cc = Cc::NE; break; // BNE
+        case 0x06: taken_cc = Cc::LE; break; // BLEZ
+        default: taken_cc = Cc::G; break;    // BGTZ
+        }
+        x.load_mem64(RAX, R_GPR, d.rs * 8);
+        if ((d.op & 0x07) <= 0x05) {
+            x.load_mem64(RCX, R_GPR, d.rt * 8);
+            x.cmp_rr(true, RAX, RCX);
+        } else {
+            x.cmp_ri(true, RAX, 0);
+        }
+    }
+
+    const size_t not_taken = x.jcc_rel32(static_cast<Cc>(static_cast<u8>(taken_cc) ^ 1));
+    emit_pc_plus(x, static_cast<s32>(4 * n + 4) + d.simm * 4);
+    store_next_pc();
+    mark_taken();
+    const size_t to_delay_slot = x.jmp_rel32();
+
+    x.patch_rel32(not_taken, x.pos());
+    emit_pc_plus(x, fallthrough);
+    store_next_pc();
+    if (likely) {
+        // Not taken: the delay slot is nullified - only the branch itself ran.
+        x.mov_reg_imm32(RAX, n + 1);
+        exit_patches.push_back(x.jmp_rel32());
+    }
+    // (Not taken, ordinary branch: branch_taken stays 0 - the driver preset
+    // it - and the delay slot runs as a plain instruction, as it does in the
+    // interpreter.)
+    x.patch_rel32(to_delay_slot, x.pos());
+}
+
 } // namespace
 
-static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer& code, u32 max_len) {
+static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot) {
     Recompiler::Block blk{};
-    size_t rdram_size = bus.get_rdram_size();
+    const size_t rdram_size = bus.get_rdram_size();
     const u8* rdram = bus.get_rdram();
+    const u32 max_len = delay_slot ? 1 : kMaxBlockLen;
 
     Assembler x;
     emit_prologue(x);
+    // Jumps to the epilogue with EAX already holding the executed count:
+    // load/store faults, and a likely branch's not-taken exit.
     std::vector<size_t> fault_patches;
     std::vector<OverflowSite> overflow_sites;
 
     u32 len = 0;
     while (len < max_len) {
-        u32 paddr = start_paddr + len * 4;
+        const u32 paddr = start_paddr + len * 4;
         if (static_cast<size_t>(paddr) + 4 > rdram_size) break;
-        u32 raw = (static_cast<u32>(rdram[paddr]) << 24) | (static_cast<u32>(rdram[paddr + 1]) << 16) |
-                  (static_cast<u32>(rdram[paddr + 2]) << 8) | static_cast<u32>(rdram[paddr + 3]);
-        Decoded d = decode(raw);
-        if (!compile_one(x, d, len, fault_patches, overflow_sites)) break;
-        len++;
+        const Decoded d = decode(fetch_instr(rdram, paddr));
+        const u32 site = delay_slot ? (len | kSiteDelaySlot) : len;
+        if (compile_or_call(x, d, site, fault_patches, overflow_sites)) {
+            len++;
+            continue;
+        }
+        // A branch ends the block, but only together with its delay slot -
+        // so only if that is compilable too (dry run into a scratch
+        // assembler); otherwise the branch is left to the interpreter.
+        if (delay_slot || !is_block_branch(d) || static_cast<size_t>(paddr) + 8 > rdram_size) break;
+        const Decoded ds = decode(fetch_instr(rdram, paddr + 4));
+        {
+            Assembler scratch;
+            std::vector<size_t> scratch_faults;
+            std::vector<OverflowSite> scratch_overflows;
+            if (!compile_or_call(scratch, ds, 0, scratch_faults, scratch_overflows)) break;
+        }
+        emit_branch(x, d, len, fault_patches);
+        compile_or_call(x, ds, (len + 1) | kSiteDelaySlot, fault_patches, overflow_sites);
+        len += 2;
+        break;
     }
     if (len == 0) return blk;
 
@@ -929,14 +1399,15 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
     for (size_t site : fault_patches) x.patch_rel32(site, epilogue_pos);
     // Out-of-line stubs for trapping arithmetic that overflowed: raise EXC_OV
     // via the interpreter's own trigger_exception() (through jit_overflow),
-    // report `n` guest instructions executed, then fall into the same
+    // report the instructions before it as executed, then fall into the same
     // epilogue as everything else.
     for (const OverflowSite& s : overflow_sites) {
-        x.patch_rel32(s.site, x.pos());
-        x.mov_reg_reg64(RDI, R_CTX);
+        x.patch_rel32(s.patch, x.pos());
+        x.mov_reg_reg64(ARG0, R_CTX);
+        x.mov_reg_imm32(ARG1, s.site);
         x.mov_reg_imm64(RAX, reinterpret_cast<u64>(&jit_overflow));
         x.call_reg(RAX);
-        x.mov_reg_imm32(RAX, s.n);
+        x.mov_reg_imm32(RAX, site_index(s.site));
         x.patch_rel32(x.jmp_rel32(), epilogue_pos);
     }
 
@@ -945,7 +1416,7 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
     // outgrows kArenaHeadroom. Resetting the arena here instead would leave
     // the block caches pointing into code about to be overwritten.
     if (code.remaining() < x.size()) return blk; // left to the interpreter
-    code.make_writable();
+    code.make_writable(x.size());
     u8* dst = code.write_ptr();
     std::memcpy(dst, x.data(), x.size());
     code.commit(x.size());
@@ -1013,33 +1484,35 @@ void emit_epilogue(Assembler& a) {
     a.ret();
 }
 
-// Calls a jit_helpers thunk `u32 fn(JitCtx*, u64 addr, u32 arg)` with X1=addr,
-// X2=arg already set. On return, W0!=0 means a TLB fault redirected cpu->pc;
-// the block then reports `n` guest instructions executed and returns.
-void emit_helper_call(Assembler& a, void* fn, u32 n, std::vector<size_t>& fault_patches) {
+// Calls a jit_helpers thunk `u32 fn(JitCtx*, u64 addr, u32 arg, u32 site)` with
+// X1=addr, X2=arg already set. On return, W0!=0 means a TLB fault redirected
+// cpu->pc; the block then reports the instruction's index as the number of
+// guest instructions executed and returns.
+void emit_helper_call(Assembler& a, void* fn, u32 site, std::vector<size_t>& fault_patches) {
     a.mov_reg(0, X_CTX);
+    a.mov_imm64(3, site);
     a.mov_imm64(S3, reinterpret_cast<u64>(fn));
     a.blr(S3);
     size_t skip = a.cbz(0, false); // W0==0 -> success, skip the fault path
-    a.movz(0, static_cast<u16>(n), 0, false);
+    a.movz(0, static_cast<u16>(site_index(site)), 0, false);
     fault_patches.push_back(a.b());
     a.patch_branch(skip, a.pos());
 }
 
-void emit_load(Assembler& a, const Decoded& d, void* fn, u32 n, std::vector<size_t>& fault_patches) {
+void emit_load(Assembler& a, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
     a.ldr64(1, X_GPR, d.rs * 8);
     a.mov_imm64_sext32(S3, d.simm);
     a.add_reg(1, 1, S3, true);
     a.movz(2, d.rt, 0, false);
-    emit_helper_call(a, fn, n, fault_patches);
+    emit_helper_call(a, fn, site, fault_patches);
 }
 
-void emit_store(Assembler& a, const Decoded& d, void* fn, u32 n, std::vector<size_t>& fault_patches) {
+void emit_store(Assembler& a, const Decoded& d, void* fn, u32 site, std::vector<size_t>& fault_patches) {
     a.ldr64(1, X_GPR, d.rs * 8);
     a.mov_imm64_sext32(S3, d.simm);
     a.add_reg(1, 1, S3, true);
     a.ldr64(2, X_GPR, d.rt * 8); // value to store
-    emit_helper_call(a, fn, n, fault_patches);
+    emit_helper_call(a, fn, site, fault_patches);
 }
 
 // ---- COP1 helpers: fetch/store an FPU register's raw bits via jit_fpr_*.
@@ -1062,12 +1535,12 @@ void emit_fpr_set(Assembler& a, void* fn, u8 reg, int value_reg) {
 }
 
 // Records a pending overflow branch (the native ADDS/SUBS just emitted
-// already set the V flag; `site` is the B.VS placeholder to resolve later).
-void emit_overflow_check(Assembler& a, u32 n, std::vector<OverflowSite>& overflow_sites) {
-    overflow_sites.push_back({a.bcond(Cond::VS), n});
+// already set the V flag; the B.VS placeholder is resolved later).
+void emit_overflow_check(Assembler& a, u32 site, std::vector<OverflowSite>& overflow_sites) {
+    overflow_sites.push_back({a.bcond(Cond::VS), site});
 }
 
-bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fault_patches,
+bool compile_one(Assembler& a, const Decoded& d, u32 site, std::vector<size_t>& fault_patches,
                   std::vector<OverflowSite>& overflow_sites) {
     auto st_if = [&](u8 reg, int src) { if (reg != 0) a.str64(src, X_GPR, reg * 8); };
     // shamt materialized into S2 for the variable-shift instructions.
@@ -1140,7 +1613,7 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
         case 0x20: { // ADD (traps on 32-bit signed overflow - always checked, even if rd==$0)
             a.ldr32z(S0, X_GPR, d.rs * 8); a.ldr32z(S1, X_GPR, d.rt * 8);
             a.adds_reg(S0, S0, S1, false);
-            emit_overflow_check(a, n, overflow_sites);
+            emit_overflow_check(a, site, overflow_sites);
             a.sxtw(S0, S0); st_if(d.rd, S0);
             return true;
         }
@@ -1153,7 +1626,7 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
         case 0x22: { // SUB (traps on 32-bit signed overflow)
             a.ldr32z(S0, X_GPR, d.rs * 8); a.ldr32z(S1, X_GPR, d.rt * 8);
             a.subs_reg(S0, S0, S1, false);
-            emit_overflow_check(a, n, overflow_sites);
+            emit_overflow_check(a, site, overflow_sites);
             a.sxtw(S0, S0); st_if(d.rd, S0);
             return true;
         }
@@ -1193,7 +1666,7 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
         case 0x2C: { // DADD (traps on 64-bit signed overflow)
             a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
             a.adds_reg(S0, S0, S1, true);
-            emit_overflow_check(a, n, overflow_sites);
+            emit_overflow_check(a, site, overflow_sites);
             st_if(d.rd, S0);
             return true;
         }
@@ -1203,7 +1676,7 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
         case 0x2E: { // DSUB (traps on 64-bit signed overflow)
             a.ldr64(S0, X_GPR, d.rs * 8); a.ldr64(S1, X_GPR, d.rt * 8);
             a.subs_reg(S0, S0, S1, true);
-            emit_overflow_check(a, n, overflow_sites);
+            emit_overflow_check(a, site, overflow_sites);
             st_if(d.rd, S0);
             return true;
         }
@@ -1222,7 +1695,7 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
     case 0x08: { // ADDI (traps on 32-bit signed overflow)
         a.ldr32z(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
         a.adds_reg(S0, S0, S1, false);
-        emit_overflow_check(a, n, overflow_sites);
+        emit_overflow_check(a, site, overflow_sites);
         a.sxtw(S0, S0); st_if(d.rt, S0);
         return true;
     }
@@ -1263,7 +1736,7 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
     case 0x18: { // DADDI (traps on 64-bit signed overflow)
         a.ldr64(S0, X_GPR, d.rs * 8); a.mov_imm64_sext32(S1, d.simm);
         a.adds_reg(S0, S0, S1, true);
-        emit_overflow_check(a, n, overflow_sites);
+        emit_overflow_check(a, site, overflow_sites);
         st_if(d.rt, S0);
         return true;
     }
@@ -1512,30 +1985,49 @@ bool compile_one(Assembler& a, const Decoded& d, u32 n, std::vector<size_t>& fau
         default: return false; // CFC1/CTC1/BC1 - interpreter handles it
         }
 
-    case 0x20: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lb), n, fault_patches); return true;
-    case 0x21: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lh), n, fault_patches); return true;
-    case 0x23: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lw), n, fault_patches); return true;
-    case 0x24: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lbu), n, fault_patches); return true;
-    case 0x25: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lhu), n, fault_patches); return true;
-    case 0x27: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lwu), n, fault_patches); return true;
-    case 0x37: emit_load(a, d, reinterpret_cast<void*>(&jit_load_ld), n, fault_patches); return true;
+    case 0x20: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lb), site, fault_patches); return true;
+    case 0x21: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lh), site, fault_patches); return true;
+    case 0x23: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lw), site, fault_patches); return true;
+    case 0x24: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lbu), site, fault_patches); return true;
+    case 0x25: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lhu), site, fault_patches); return true;
+    case 0x27: emit_load(a, d, reinterpret_cast<void*>(&jit_load_lwu), site, fault_patches); return true;
+    case 0x37: emit_load(a, d, reinterpret_cast<void*>(&jit_load_ld), site, fault_patches); return true;
 
-    case 0x28: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sb), n, fault_patches); return true;
-    case 0x29: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sh), n, fault_patches); return true;
-    case 0x2B: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sw), n, fault_patches); return true;
-    case 0x3F: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sd), n, fault_patches); return true;
+    case 0x28: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sb), site, fault_patches); return true;
+    case 0x29: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sh), site, fault_patches); return true;
+    case 0x2B: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sw), site, fault_patches); return true;
+    case 0x3F: emit_store(a, d, reinterpret_cast<void*>(&jit_store_sd), site, fault_patches); return true;
+
+    case 0x2F: return true; // CACHE: a no-op, as in the interpreter
 
     default:
         return false;
     }
 }
 
+// Runs `d` through jit_interp (see is_interp_callable), with the same
+// fault-exit convention as a load/store helper call.
+void emit_interp_call(Assembler& a, const Decoded& d, u32 site, std::vector<size_t>& fault_patches) {
+    a.mov_reg(0, X_CTX);
+    a.mov_imm64(1, d.raw);
+    a.mov_imm64(2, site);
+    a.mov_imm64(S3, reinterpret_cast<u64>(&jit_interp));
+    a.blr(S3);
+    size_t skip = a.cbz(0, false);
+    a.movz(0, static_cast<u16>(site_index(site)), 0, false);
+    fault_patches.push_back(a.b());
+    a.patch_branch(skip, a.pos());
+}
+
 } // namespace
 
-static Recompiler::Block compile_block_a64(Bus& bus, u32 start_paddr, CodeBuffer& code, u32 max_len) {
+// Branches are not compiled on this backend yet (no emit_branch()): a block
+// ends right before one and the interpreter runs it.
+static Recompiler::Block compile_block_a64(Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot) {
     Recompiler::Block blk{};
     size_t rdram_size = bus.get_rdram_size();
     const u8* rdram = bus.get_rdram();
+    const u32 max_len = delay_slot ? 1 : kMaxBlockLen;
 
     Assembler a;
     emit_prologue(a);
@@ -1546,10 +2038,12 @@ static Recompiler::Block compile_block_a64(Bus& bus, u32 start_paddr, CodeBuffer
     while (len < max_len) {
         u32 paddr = start_paddr + len * 4;
         if (static_cast<size_t>(paddr) + 4 > rdram_size) break;
-        u32 raw = (static_cast<u32>(rdram[paddr]) << 24) | (static_cast<u32>(rdram[paddr + 1]) << 16) |
-                  (static_cast<u32>(rdram[paddr + 2]) << 8) | static_cast<u32>(rdram[paddr + 3]);
-        Decoded d = decode(raw);
-        if (!compile_one(a, d, len, fault_patches, overflow_sites)) break;
+        Decoded d = decode(fetch_instr(rdram, paddr));
+        const u32 site = delay_slot ? (len | kSiteDelaySlot) : len;
+        if (!compile_one(a, d, site, fault_patches, overflow_sites)) {
+            if (!is_interp_callable(d)) break;
+            emit_interp_call(a, d, site, fault_patches);
+        }
         len++;
     }
     if (len == 0) return blk;
@@ -1561,17 +2055,18 @@ static Recompiler::Block compile_block_a64(Bus& bus, u32 start_paddr, CodeBuffer
     // Out-of-line stubs for trapping arithmetic that overflowed - see the
     // x64 backend's identical comment above compile_block_x64's equivalent.
     for (const OverflowSite& s : overflow_sites) {
-        a.patch_branch(s.site, a.pos());
+        a.patch_branch(s.patch, a.pos());
         a.mov_reg(0, X_CTX);
+        a.mov_imm64(1, s.site);
         a.mov_imm64(S3, reinterpret_cast<u64>(&jit_overflow));
         a.blr(S3);
-        a.movz(0, static_cast<u16>(s.n), 0, false);
+        a.movz(0, static_cast<u16>(site_index(s.site)), 0, false);
         a.patch_branch(a.b(), epilogue_pos);
     }
 
     // See compile_block_x64: lookup_or_compile() keeps kArenaHeadroom free.
     if (code.remaining() < a.size()) return blk; // left to the interpreter
-    code.make_writable();
+    code.make_writable(a.size());
     u8* dst = code.write_ptr();
     std::memcpy(dst, a.data(), a.size());
     code.commit(a.size());
@@ -1583,13 +2078,13 @@ static Recompiler::Block compile_block_a64(Bus& bus, u32 start_paddr, CodeBuffer
 }
 #endif // ORBIT64_JIT_A64
 
-Recompiler::Block Recompiler::compile_block(CPU&, Bus& bus, u32 start_paddr, u32 max_len) {
+Recompiler::Block Recompiler::compile_block(CPU&, Bus& bus, u32 start_paddr, bool delay_slot) {
 #if defined(ORBIT64_JIT_X64)
-    return compile_block_x64(bus, start_paddr, code_, max_len);
+    return compile_block_x64(bus, start_paddr, code_, delay_slot);
 #elif defined(ORBIT64_JIT_A64)
-    return compile_block_a64(bus, start_paddr, code_, max_len);
+    return compile_block_a64(bus, start_paddr, code_, delay_slot);
 #else
-    (void)bus; (void)start_paddr; (void)max_len;
+    (void)bus; (void)start_paddr; (void)delay_slot;
     return Block{}; // unsupported host architecture: interpreter-only
 #endif
 }

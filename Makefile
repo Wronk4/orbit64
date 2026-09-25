@@ -1,10 +1,30 @@
-# Convenience Makefile for macOS / Linux (uses sdl2-config).
-# The portable build (incl. Windows/MSVC) is CMakeLists.txt.
+# Convenience Makefile: macOS / Linux (uses sdl2-config) and Windows with a
+# MinGW toolchain such as w64devkit (see build.bat). The fully portable build
+# (incl. Windows/MSVC) is CMakeLists.txt.
+#
+# Windows: SDL2_DIR must point at the x86_64-w64-mingw32 folder of the
+# SDL2-devel-*-mingw package (override on the command line or in the env).
 
-CXX := clang++
-CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Wno-unused-parameter -MMD -MP $(shell sdl2-config --cflags) \
+ifeq ($(OS),Windows_NT)
+    CXX := g++
+    SDL2_DIR ?= tools/SDL2-2.30.12/x86_64-w64-mingw32
+    SDL2_CFLAGS := -I$(SDL2_DIR)/include -I$(SDL2_DIR)/include/SDL2 -Dmain=SDL_main
+    SDL2_LIBS := -L$(SDL2_DIR)/lib -lmingw32 -lSDL2main -lSDL2 -mconsole
+    PLATFORM_DEFS := -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_WARNINGS
+    PLATFORM_LIBS := -lcomdlg32 -lole32 -lshell32 -luuid
+    EXE := .exe
+else
+    CXX := clang++
+    SDL2_CFLAGS := $(shell sdl2-config --cflags)
+    SDL2_LIBS := $(shell sdl2-config --libs)
+    PLATFORM_DEFS :=
+    PLATFORM_LIBS :=
+    EXE :=
+endif
+
+CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Wno-unused-parameter -MMD -MP $(SDL2_CFLAGS) $(PLATFORM_DEFS) \
             -Isrc -Ithird_party/imgui -Ithird_party/imgui/backends -Ithird_party/stb -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -DIMGUI_ENABLE_TEST_ENGINE
-LDFLAGS := $(shell sdl2-config --libs) -lpthread
+LDFLAGS := $(SDL2_LIBS) $(PLATFORM_LIBS) -lpthread
 
 SRC_DIR := src
 BUILD_DIR := build
@@ -24,12 +44,36 @@ OBJS := $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(CORE_SRCS) $(UI_SRCS)) 
 CHECK_OBJS := $(filter-out $(BUILD_DIR)/main.o, $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(CORE_SRCS)))
 DEPS := $(OBJS:.o=.d) $(BUILD_DIR)/test_rdp.d $(BUILD_DIR)/hires_exact.d \
         $(BUILD_DIR)/tools/rdp_check.d $(BUILD_DIR)/tools/rdp_check_exact.d
-TARGET := $(BIN_DIR)/n64
-TEST_TARGET := $(BIN_DIR)/test_rdp
-CHECK_TARGET := $(BIN_DIR)/rdp_check
-CHECK_EXACT_TARGET := $(BIN_DIR)/rdp_check_exact
+TARGET := $(BIN_DIR)/n64$(EXE)
+TEST_TARGET := $(BIN_DIR)/test_rdp$(EXE)
+CHECK_TARGET := $(BIN_DIR)/rdp_check$(EXE)
+CHECK_EXACT_TARGET := $(BIN_DIR)/rdp_check_exact$(EXE)
+JIT_SELFTEST_TARGET := $(BIN_DIR)/jit_selftest$(EXE)
+DEPS += $(BUILD_DIR)/jit/jit_selftest_main.d
 
-.PHONY: all clean run test_rdp rdp_check rdp_check_exact
+.PHONY: all clean run test_rdp rdp_check rdp_check_exact jit_selftest
+.DEFAULT_GOAL := all
+
+# Interpreter-vs-JIT differential test (src/jit/jit_selftest_main.cpp).
+jit_selftest: $(JIT_SELFTEST_TARGET)
+	./$(JIT_SELFTEST_TARGET)
+
+$(JIT_SELFTEST_TARGET): $(BUILD_DIR)/jit/jit_selftest_main.o $(CHECK_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ -lpthread
+
+# Headless stress test of the threaded core the frontend drives (tools/core_stress.cpp).
+# Best built with checks, e.g.: make BUILD_DIR=build_chk BIN_DIR=bin_chk CXX="g++ -g -D_GLIBCXX_ASSERTIONS" core_stress
+CORE_STRESS_TARGET := $(BIN_DIR)/core_stress$(EXE)
+.PHONY: core_stress
+core_stress: $(CORE_STRESS_TARGET)
+$(CORE_STRESS_TARGET): $(BUILD_DIR)/tools/core_stress.o $(CHECK_OBJS) $(BUILD_DIR)/ui/emu_core.o $(BUILD_DIR)/ui/platform.o | $(BIN_DIR)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+$(BUILD_DIR)/tools/core_stress.o: tools/core_stress.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
+
+# Console tools without SDL keep their own main() (Windows: -Dmain=SDL_main above).
+$(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o: CXXFLAGS += -Umain
 
 all: $(TARGET)
 

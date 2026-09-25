@@ -10,10 +10,11 @@
 //   for that (with it, com.apple.security.cs.allow-jit - which the mprotect
 //   path below could not do without either). The mprotect path is kept only
 //   as a fallback in case the MAP_JIT mapping is refused.
-// - Everywhere else: mprotect/VirtualProtect over the whole arena, i.e. two
-//   syscalls per compiled block. On an M1 that pair costs ~20 us, which is
-//   why Apple Silicon doesn't use it; it's acceptable elsewhere only because
-//   a warm block cache rarely compiles anything.
+// - Everywhere else: mprotect/VirtualProtect, i.e. two syscalls per
+//   compiled block - but only over the page(s) the new block is written to,
+//   never the whole arena. Flipping all 16 MB each time made a compile cost
+//   tens of microseconds on Windows (it scales with the page count), which
+//   made the JIT slower than the interpreter in games that compile a lot.
 //
 // Either way only the bytes appended since the previous make_executable()
 // have their instruction-cache lines invalidated; flushing the whole used
@@ -49,15 +50,18 @@ public:
     // stream).
     void commit(size_t n) { size_ += n; }
 
-    // Marks the whole arena executable and flushes instruction caches for
-    // everything appended since the last call. Must be called before calling
-    // any function pointer into the arena, and again after any further
-    // writes. With MAP_JIT this only affects the calling thread, so it has to
-    // happen on the thread that runs the code.
+    // Makes the pages the last make_writable() opened executable again and
+    // flushes instruction caches for everything appended since the last
+    // call. Must be called before calling any function pointer into the
+    // arena, and again after any further writes. With MAP_JIT this affects
+    // the whole arena but only for the calling thread, so it has to happen
+    // on the thread that runs the code.
     void make_executable();
-    // Marks the whole arena writable again so more code can be appended
-    // (again only for the calling thread with MAP_JIT).
-    void make_writable();
+
+    // Makes the next `n` bytes at write_ptr() writable so they can be
+    // appended (only the pages they touch; with MAP_JIT the whole arena, for
+    // the calling thread).
+    void make_writable(size_t n);
 
     // Identity on this (single-mapping) implementation; exists so callers
     // can be written the same way a dual-mapping backend would need them to
@@ -73,7 +77,8 @@ private:
     size_t size_ = 0;
     size_t capacity_ = 0;
     size_t flushed_ = 0; // [0, flushed_) is already visible to instruction fetch
-    bool executable_ = false;
+    size_t page_size_ = 4096;
+    size_t writable_lo_ = 0, writable_hi_ = 0; // page range make_writable() last opened
     [[maybe_unused]] bool map_jit_ = false; // Apple Silicon MAP_JIT arena (per-thread W^X toggle)
 
     void allocate(size_t capacity);

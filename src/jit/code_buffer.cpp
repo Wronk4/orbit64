@@ -1,4 +1,5 @@
 #include "code_buffer.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -35,7 +36,11 @@ void CodeBuffer::allocate(size_t capacity) {
 #if defined(_WIN32)
     base_ = static_cast<u8*>(VirtualAlloc(nullptr, capacity, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!base_) throw std::runtime_error("CodeBuffer: VirtualAlloc failed");
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    page_size_ = si.dwPageSize;
 #else
+    page_size_ = static_cast<size_t>(sysconf(_SC_PAGESIZE));
     void* p = MAP_FAILED;
 #if defined(ORBIT64_MAP_JIT)
     p = mmap(nullptr, capacity, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
@@ -48,7 +53,7 @@ void CodeBuffer::allocate(size_t capacity) {
     capacity_ = capacity;
     size_ = 0;
     flushed_ = 0;
-    executable_ = false;
+    writable_lo_ = writable_hi_ = 0;
 }
 
 void CodeBuffer::release() {
@@ -63,32 +68,34 @@ void CodeBuffer::release() {
     size_ = 0;
 }
 
+// Nothing to re-protect: pages keep whatever protection they had, and each
+// is made writable again by make_writable() before anything is written to it.
 void CodeBuffer::reset() {
     size_ = 0;
     flushed_ = 0;
-    make_writable();
 }
 
-void CodeBuffer::make_writable() {
+void CodeBuffer::make_writable(size_t n) {
 #if defined(ORBIT64_MAP_JIT)
     if (map_jit_) {
-        // Always toggle: the protection is per thread, so executable_ (shared)
-        // can't tell whether *this* thread still has to flip - the arena is
-        // e.g. reset on the UI thread by Emulator::load_rom() and then filled
-        // on the emulator thread. The toggle itself costs next to nothing.
+        // Always toggle: the protection is per thread, and the arena is e.g.
+        // reset on the UI thread by Emulator::load_rom() and then filled on
+        // the emulator thread. The toggle itself costs next to nothing.
         pthread_jit_write_protect_np(0);
-        executable_ = false;
         return;
     }
 #endif
-    if (!executable_) return;
+    const size_t lo = size_ & ~(page_size_ - 1);
+    const size_t hi = std::min(capacity_, (size_ + n + page_size_ - 1) & ~(page_size_ - 1));
+    if (hi <= lo) return;
 #if defined(_WIN32)
     DWORD old_protect;
-    VirtualProtect(base_, capacity_, PAGE_READWRITE, &old_protect);
+    VirtualProtect(base_ + lo, hi - lo, PAGE_READWRITE, &old_protect);
 #else
-    mprotect(base_, capacity_, PROT_READ | PROT_WRITE);
+    mprotect(base_ + lo, hi - lo, PROT_READ | PROT_WRITE);
 #endif
-    executable_ = false;
+    writable_lo_ = lo;
+    writable_hi_ = hi;
 }
 
 void CodeBuffer::make_executable() {
@@ -96,19 +103,19 @@ void CodeBuffer::make_executable() {
     if (map_jit_) {
         pthread_jit_write_protect_np(1);
         flush_icache();
-        executable_ = true;
         return;
     }
 #endif
-    if (executable_) return;
+    if (writable_hi_ > writable_lo_) {
 #if defined(_WIN32)
-    DWORD old_protect;
-    VirtualProtect(base_, capacity_, PAGE_EXECUTE_READ, &old_protect);
+        DWORD old_protect;
+        VirtualProtect(base_ + writable_lo_, writable_hi_ - writable_lo_, PAGE_EXECUTE_READ, &old_protect);
 #else
-    mprotect(base_, capacity_, PROT_READ | PROT_EXEC);
+        mprotect(base_ + writable_lo_, writable_hi_ - writable_lo_, PROT_READ | PROT_EXEC);
 #endif
+        writable_lo_ = writable_hi_ = 0;
+    }
     flush_icache();
-    executable_ = true;
 }
 
 // The arena is append-only between resets, so everything below flushed_ is

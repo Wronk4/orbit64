@@ -1,96 +1,127 @@
 #include "jit_helpers.hpp"
 #include "../cpu.hpp"
 #include "../bus.hpp"
+#include "jit_invalidate.hpp"
 
 // rt == 0 is handled by CPU::set_gpr() itself (it no-ops writes to $zero),
 // matching the interpreter exactly.
 
-extern "C" u32 jit_load_lb(JitCtx* ctx, u64 addr, u32 rt) {
+namespace {
+
+// Points the CPU's exception bookkeeping (EPC/BD source) at the guest
+// instruction `site` names - compiled code never updates it per instruction
+// the way CPU::step() does - and flags the block as aborted.
+void enter_exception_site(JitCtx* ctx, u32 site) {
+    const u32 index = site & ~kSiteDelaySlot;
+    const bool delay_slot = (site & kSiteDelaySlot) != 0 && ctx->branch_taken != 0;
+    ctx->cpu->jit_set_exception_site(ctx->start_pc + 4ULL * index, delay_slot);
+    ctx->faulted = 1;
+}
+
+u32 raise_tlb(JitCtx* ctx, u32 site, u64 addr, TLBResult res, bool is_write) {
+    enter_exception_site(ctx, site);
+    return ctx->cpu->jit_raise_tlb_exception(addr, res, is_write);
+}
+
+} // namespace
+
+extern "C" u32 jit_load_lb(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u8 byte = ctx->bus->read_v8(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, static_cast<u64>(sign_extend_8_64(static_cast<s8>(byte))));
     return 0;
 }
 
-extern "C" u32 jit_load_lbu(JitCtx* ctx, u64 addr, u32 rt) {
+extern "C" u32 jit_load_lbu(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u8 byte = ctx->bus->read_v8(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, byte);
     return 0;
 }
 
-extern "C" u32 jit_load_lh(JitCtx* ctx, u64 addr, u32 rt) {
+extern "C" u32 jit_load_lh(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u16 hword = ctx->bus->read_v16(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, static_cast<u64>(sign_extend_16_64(static_cast<s16>(hword))));
     return 0;
 }
 
-extern "C" u32 jit_load_lhu(JitCtx* ctx, u64 addr, u32 rt) {
+extern "C" u32 jit_load_lhu(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u16 hword = ctx->bus->read_v16(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, hword);
     return 0;
 }
 
-extern "C" u32 jit_load_lw(JitCtx* ctx, u64 addr, u32 rt) {
+extern "C" u32 jit_load_lw(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u32 word = ctx->bus->read_v32(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, static_cast<u64>(sign_extend_32_64(static_cast<s32>(word))));
     return 0;
 }
 
-extern "C" u32 jit_load_lwu(JitCtx* ctx, u64 addr, u32 rt) {
+extern "C" u32 jit_load_lwu(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u32 word = ctx->bus->read_v32(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, word);
     return 0;
 }
 
-extern "C" u32 jit_load_ld(JitCtx* ctx, u64 addr, u32 rt) {
+extern "C" u32 jit_load_ld(JitCtx* ctx, u64 addr, u32 rt, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     u64 dword = ctx->bus->read_v64(addr, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, false);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, false);
     ctx->cpu->set_gpr(rt, dword);
     return 0;
 }
 
-extern "C" u32 jit_store_sb(JitCtx* ctx, u64 addr, u32 val) {
+extern "C" u32 jit_store_sb(JitCtx* ctx, u64 addr, u32 val, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     ctx->bus->write_v8(addr, static_cast<u8>(val), res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, true);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, true);
     return 0;
 }
 
-extern "C" u32 jit_store_sh(JitCtx* ctx, u64 addr, u32 val) {
+extern "C" u32 jit_store_sh(JitCtx* ctx, u64 addr, u32 val, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     ctx->bus->write_v16(addr, static_cast<u16>(val), res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, true);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, true);
     return 0;
 }
 
-extern "C" u32 jit_store_sw(JitCtx* ctx, u64 addr, u32 val) {
+extern "C" u32 jit_store_sw(JitCtx* ctx, u64 addr, u32 val, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     ctx->bus->write_v32(addr, val, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, true);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, true);
     return 0;
 }
 
-extern "C" u32 jit_store_sd(JitCtx* ctx, u64 addr, u64 val) {
+extern "C" u32 jit_store_sd(JitCtx* ctx, u64 addr, u64 val, u32 site) {
     TLBResult res = TLBResult::SUCCESS;
     ctx->bus->write_v64(addr, val, res, ctx->cpu->jit_asid());
-    if (res != TLBResult::SUCCESS) return ctx->cpu->jit_raise_tlb_exception(addr, res, true);
+    if (res != TLBResult::SUCCESS) return raise_tlb(ctx, site, addr, res, true);
     return 0;
 }
 
-extern "C" void jit_overflow(JitCtx* ctx) {
+extern "C" void jit_overflow(JitCtx* ctx, u32 site) {
+    enter_exception_site(ctx, site);
     ctx->cpu->jit_raise_overflow_exception();
+}
+
+extern "C" void jit_notify_code_write(u32 paddr, u32 len) { jit::notify_code_write(paddr, len); }
+
+extern "C" u32 jit_interp(JitCtx* ctx, u32 instr, u32 site) {
+    const u32 index = site & ~kSiteDelaySlot;
+    const bool delay_slot = (site & kSiteDelaySlot) != 0 && ctx->branch_taken != 0;
+    if (!ctx->cpu->jit_execute(instr, ctx->start_pc + 4ULL * index, delay_slot)) return 0;
+    ctx->faulted = 1;
+    return 1;
 }
 
 extern "C" u32 jit_fpr_get32(JitCtx* ctx, u32 reg) { return ctx->cpu->jit_get_fpr32(reg); }

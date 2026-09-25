@@ -66,11 +66,11 @@ public:
     // Raw pointers to the register file, handed to compiled native code so it
     // can load/store guest registers directly instead of going through
     // get_gpr()/set_gpr() per access. Compiled blocks themselves never touch
-    // pc/cp0/delay-slot state directly (they only ever contain straight-line,
-    // non-branching, non-trapping instructions) - but the recompiler's driver
-    // does need to consult delay-slot state *before* deciding whether the
-    // instruction at the current pc may even start a block; see
-    // jit_pending_delay_slot().
+    // pc/cp0/delay-slot state directly (a block's terminating branch hands
+    // its target back to the driver through JitCtx::next_pc) - but the
+    // recompiler's driver does need to consult delay-slot state *before*
+    // deciding whether the instruction at the current pc may even start a
+    // block; see jit_pending_delay_slot().
     u64* jit_gpr_ptr() { return gpr.data(); }
     u64* jit_hi_ptr() { return &hi; }
     u64* jit_lo_ptr() { return &lo; }
@@ -99,6 +99,30 @@ public:
     // CPU::step() does for every instruction, so the *next* instruction
     // isn't mistaken for another delay slot.
     void jit_clear_pending_delay_slot() { in_delay_slot = false; }
+
+    // Compiled code doesn't maintain cur_pc/delay_slot_active per
+    // instruction like step() does, and trigger_exception() derives EPC/BD
+    // from them - so jit_helpers calls this right before raising anything,
+    // with the faulting instruction's pc and whether it is a taken branch's
+    // delay slot.
+    void jit_set_exception_site(u64 instr_pc, bool is_delay_slot) {
+        cur_pc = instr_pc;
+        delay_slot_active = is_delay_slot;
+    }
+
+    // Runs one instruction on the interpreter on behalf of compiled code
+    // (see jit_interp). Only for instructions that never branch or touch pc
+    // themselves - then pc_overridden can only come from an exception, which
+    // is what the return value reports.
+    bool jit_execute(u32 instr, u64 instr_pc, bool is_delay_slot) {
+        cur_pc = instr_pc;
+        delay_slot_active = is_delay_slot;
+        pc_overridden = false;
+        execute(instr, instr_pc);
+        gpr[0] = 0;
+        delay_slot_active = false;
+        return pc_overridden;
+    }
 
     // Raises a TLB exception on behalf of a JIT-compiled load/store (mirrors
     // the interpreter's LW/SW/etc. handling). Always returns true so call

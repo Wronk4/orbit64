@@ -18,19 +18,22 @@ namespace ui {
 float anim(ImGuiID id, float target, float speed) {
     ImGuiStorage* st = ImGui::GetStateStorage();
     // Keep a separate "initialised" flag so the first frame snaps to target.
+    // Values, not Get*Ref() pointers: ImGuiStorage is a sorted vector, so
+    // adding one key can reallocate it and leave a pointer to another key's
+    // slot dangling - writing through it corrupted the heap.
     ImGuiID init_id = id ^ 0x5bd1e995u;
-    float* v = st->GetFloatRef(id, target);
-    bool* inited = st->GetBoolRef(init_id, false);
-    if (!*inited) {
-        *inited = true;
-        *v = target;
+    if (!st->GetBool(init_id, false)) {
+        st->SetBool(init_id, true);
+        st->SetFloat(id, target);
         return target;
     }
+    float v = st->GetFloat(id, target);
     float dt = ImGui::GetIO().DeltaTime;
     float k = 1.0f - std::exp(-speed * dt);
-    *v += (target - *v) * k;
-    if (std::fabs(*v - target) < 0.001f) *v = target;
-    return *v;
+    v += (target - v) * k;
+    if (std::fabs(v - target) < 0.001f) v = target;
+    st->SetFloat(id, v);
+    return v;
 }
 
 float anim(const char* str_id, float target, float speed) { return anim(ImGui::GetID(str_id), target, speed); }

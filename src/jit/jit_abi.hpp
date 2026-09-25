@@ -3,11 +3,14 @@
 //
 // A compiled block is a plain C function pointer:
 //     u32 block_fn(JitCtx* ctx);
-// returning how many guest instructions it actually executed. That is
-// normally the full length the block was compiled for; it is shorter only
-// when a load/store inside the block raised a TLB exception, in which case
-// cpu->pc has already been set by CPU::jit_raise_tlb_exception() and the
-// driver must not touch pc itself.
+// returning how many guest instructions it actually executed (for COUNT and
+// the scanline budget). Where execution continues is reported separately:
+//   - normal exit: ctx->next_pc. The driver presets it to the fall-through
+//     pc (start_pc + 4 * length); a block that ends in a branch/jump
+//     overwrites it with wherever that branch went.
+//   - an instruction raised an exception (TLB fault, integer overflow):
+//     the jit_helpers thunk that raised it set ctx->faulted, and cpu->pc is
+//     already the exception vector - the driver must not touch pc itself.
 //
 // Compiled code never touches CPU/Bus internals directly beyond what these
 // pointers expose - all "interesting" work (TLB translation, MMIO, raising
@@ -26,7 +29,21 @@ struct JitCtx {
     u64* gpr; // 32 entries
     u64* hi;
     u64* lo;
+    u64 start_pc;     // guest pc the block was entered at (either KSEG0/KSEG1 alias, sign- or zero-extended)
+    u64 next_pc;      // see above
+    u32 branch_taken; // written by a block's terminating branch before its delay slot runs
+    u32 faulted;      // set by jit_helpers when an instruction raised an exception
+    u8* rdram;        // RDRAM_SIZE bytes, for inline KSEG0/KSEG1 loads/stores
+    const u8* code_pages; // Recompiler::code_pages_: nonzero = a compiled block was read from this 64-byte page
 };
+
+// Identifies the guest instruction a jit_helpers call is made for, so an
+// exception it raises gets the right EPC/BD: the instruction's index in the
+// block (pc = start_pc + 4 * index) plus kSiteDelaySlot if it is the delay
+// slot of the block's terminating branch (BD is then set iff that branch was
+// taken - a not-taken branch's delay slot runs as an ordinary instruction,
+// exactly as in the interpreter).
+constexpr u32 kSiteDelaySlot = 0x80000000u;
 
 using JitBlockFn = u32 (*)(JitCtx* ctx);
 
@@ -36,3 +53,8 @@ static_assert(offsetof(JitCtx, bus) == 8, "JitCtx layout is baked into codegen")
 static_assert(offsetof(JitCtx, gpr) == 16, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, hi) == 24, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, lo) == 32, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, start_pc) == 40, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, next_pc) == 48, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, branch_taken) == 56, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, rdram) == 64, "JitCtx layout is baked into codegen");
+static_assert(offsetof(JitCtx, code_pages) == 72, "JitCtx layout is baked into codegen");

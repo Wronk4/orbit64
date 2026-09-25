@@ -109,6 +109,11 @@ public:
     // TMEM access
     u8* get_tmem() { return tmem.data(); }
 
+    // Pixel pipeline counters (debug log).
+    struct PixelStats {
+        u32 drawn{0}, z_fail{0}, a_fail{0};
+    };
+
 private:
     // DPC registers
     u32 dpc_start{0};
@@ -306,7 +311,11 @@ private:
     void rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size);
 
     struct NativeSink;
+    // Draws one pixel through the current colour image's blending/depth/
+    // coverage rules; the short form uses hires_shadow_ and the global counters.
     void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size);
+    void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
+                     u32* shadow, size_t shadow_len, PixelStats& stats);
 
     // Pixel pipeline state (raster.hpp) for the next draw. Display list
     // commands that can change it mark it dirty; see process_display_list().
@@ -315,6 +324,72 @@ private:
     bool draw_state_dirty_{true};
     u64 draw_state_serial_{0};
     u64 tmem_gen_{0}; // bumped by every TMEM load
+
+    // ---- Deferred, multi-threaded native pass --------------------------
+    // Triangles and texture rectangles aren't drawn when their command is
+    // processed but queued, each with a snapshot of the DrawState and TMEM it
+    // saw, and drawn by flush_native(): the rows are split into bands and
+    // every band - on its own thread - runs the whole queue in order for its
+    // rows only. A pixel's result only depends on earlier draws to that same
+    // pixel (blending, depth), so this produces exactly what drawing each
+    // command immediately would. flush_native() must run before anything
+    // else touches the frame buffer or depth buffer, or reads RDRAM the
+    // queue may still write (see native_before_read()), and at the end of
+    // every display list.
+    struct NativeCmd {
+        enum class Kind : u8 { Triangle, TexRect } kind;
+        const DrawState* st;
+        s32 y_first, y_last;     // rows the command can touch (inclusive)
+        u32* shadow;             // hires_shadow_ at queue time
+        size_t shadow_len;
+        Vertex v[3];             // Triangle
+        f32 area;
+        u32 ulx, uly, lrx, lry, tile; // TexRect
+        f32 s, t, dsdx, dtdy;
+        bool flip;
+    };
+    std::vector<NativeCmd> native_queue_;
+    u32 native_fb_lo_{0}, native_fb_hi_{0}; // RDRAM bytes the queue can write: [lo, hi)
+    u64 native_work_{0};                    // rough pixel count of the queue, to skip threading tiny flushes
+    u8* native_rdram_{nullptr};
+    size_t native_rdram_size_{0};
+    // Snapshots the queue points at (recycled by flush_native()).
+    struct TmemSnapshot {
+        std::array<u8, 4096> data;
+        std::array<bool, 512> dxt;
+    };
+    std::vector<std::unique_ptr<DrawState>> native_states_;
+    size_t native_states_used_{0};
+    std::vector<std::unique_ptr<TmemSnapshot>> native_tmems_;
+    size_t native_tmems_used_{0};
+    DrawState* native_state_{nullptr}; // snapshot of the current draw_state_serial_/tmem_gen_, if taken
+    u64 native_state_serial_{~0ull}, native_state_gen_{~0ull};
+    const TmemSnapshot* native_tmem_{nullptr};
+    u64 native_tmem_gen_{~0ull};
+    std::unique_ptr<class RasterPool> raster_pool_;
+    // The current state as a snapshot, with decoded-texel tables attached to
+    // tile0 (if use0) and tile0 + 1 (if use1).
+    DrawState* native_snapshot(u32 tile0, bool use0, bool use1);
+    void queue_native(NativeCmd& cmd, u8* rdram, size_t rdram_size);
+    void flush_native();
+    // Flushes if [lo, hi) of RDRAM - about to be read - may still be written by the queue.
+    void native_before_read(u64 lo, u64 hi) {
+        if (!native_queue_.empty() && lo < native_fb_hi_ && hi > native_fb_lo_) flush_native();
+    }
+
+    // Decoded-texel tables (raster::TexCache): a textured draw samples a
+    // flat ARGB array - filled by the first sample, through the very same
+    // fetch_wrapped() - instead of decoding TMEM for every texel it reads,
+    // four times per pixel when filtering. Keyed by TMEM generation and tile
+    // settings; entries of older generations are recycled by flush_native().
+    struct NativeTex {
+        u64 gen{0}, key_a{0}, key_b{0};
+        raster::TexCache cache;
+        std::vector<u32> texels;
+    };
+    std::vector<std::unique_ptr<NativeTex>> native_tex_;
+    size_t native_tex_used_{0};
+    raster::TexCache* native_tex_cache(const raster::TexUnit& tu, u32 tlut_type);
 
     // Internal-resolution pass (nullptr at native resolution).
     std::unique_ptr<HiResRenderer> hires_;
@@ -325,4 +400,10 @@ private:
     size_t hires_shadow_len_{0};
     std::vector<HiResRenderer::Pixel> hires_line_px_;
     std::vector<u32> hires_bg_px_;
+    // s2dex_draw_bg(): source column and horizontal filter weight per output column.
+    struct BgColumn {
+        s32 ix, ix2;
+        f32 frac;
+    };
+    std::vector<BgColumn> bg_columns_;
 };

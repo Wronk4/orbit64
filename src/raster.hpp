@@ -14,6 +14,11 @@
 #include <atomic>
 #include <cmath>
 
+#if defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#define ORBIT64_RASTER_SSE2 1
+#endif
+
 struct Vertex {
     f32 x{0}, y{0}, z{0}, w{1.0f};      // Clip space position
     f32 sx{0}, sy{0}, sz{0};            // Screen space position
@@ -67,6 +72,7 @@ struct TexUnit {
 
     void prepare(const Tile& t) {
         tile = t;
+        cache = nullptr; // decoded for the previous tile settings, if any
         // SHIFT 1..10 divides by 2^shift, 11..15 multiplies by 2^(16-shift).
         // Scaling by a power of two is exact, so a multiplier gives the same
         // result as the division.
@@ -199,11 +205,18 @@ struct DrawState {
     }
 };
 
+// 5-bit colour channel -> 8 bits, rounded: (c * 255 + 15) / 31.
+inline constexpr std::array<u8, 32> kFiveToEight = [] {
+    std::array<u8, 32> t{};
+    for (int c = 0; c < 32; ++c) t[c] = static_cast<u8>((c * 255 + 15) / 31);
+    return t;
+}();
+
 // RGBA5551 -> ARGB8888. The single alpha bit is the texel's coverage flag.
 inline u32 rgba16_to_rgba32(u16 p) {
-    u8 r = static_cast<u8>((((p >> 11) & 0x1F) * 255 + 15) / 31);
-    u8 g = static_cast<u8>((((p >> 6) & 0x1F) * 255 + 15) / 31);
-    u8 b = static_cast<u8>((((p >> 1) & 0x1F) * 255 + 15) / 31);
+    u8 r = kFiveToEight[(p >> 11) & 0x1F];
+    u8 g = kFiveToEight[(p >> 6) & 0x1F];
+    u8 b = kFiveToEight[(p >> 1) & 0x1F];
     u8 a = (p & 1) ? 255 : 0;
     return (static_cast<u32>(a) << 24) | (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | b;
 }
@@ -344,8 +357,55 @@ inline void tex_cache_dims(const TexUnit& tu, u32& w, u32& h) {
     h = tu.tile.mask_t ? (1u << tu.tile.mask_t) : static_cast<u32>(tu.extent_t) + 1;
 }
 
+// Identifies what a tile's TexCache holds, together with the TMEM contents
+// (whoever keys caches adds a TMEM generation): every TexUnit/DrawState field
+// fetch_wrapped() and wrap_s/wrap_t read.
+inline void tex_cache_key(const TexUnit& tu, u32 tlut_type, u64& a, u64& b) {
+    const Tile& t = tu.tile;
+    a = static_cast<u64>(t.format) | static_cast<u64>(t.size) << 3 | static_cast<u64>(t.palette) << 5 |
+        static_cast<u64>(t.mask_s) << 9 | static_cast<u64>(t.mask_t) << 13 | static_cast<u64>(t.clamp_s) << 17 |
+        static_cast<u64>(t.clamp_t) << 18 | static_cast<u64>(t.mirror_s) << 19 | static_cast<u64>(t.mirror_t) << 20 |
+        static_cast<u64>(tlut_type) << 21 | static_cast<u64>(tu.row_stride) << 23 | static_cast<u64>(tu.tmem_base) << 40;
+    b = static_cast<u64>(static_cast<u32>(tu.extent_s)) | static_cast<u64>(static_cast<u32>(tu.extent_t)) << 32;
+}
+
 inline u8 lerp_u8(u8 a, u8 b, f32 t) {
     return static_cast<u8>(std::clamp(a + t * (static_cast<f32>(b) - static_cast<f32>(a)), 0.0f, 255.0f));
+}
+
+// Bilinear blend of four packed ARGB texels: lerp_u8 across S on both rows,
+// then across T, per byte. The SSE2 version does the four channels in one
+// register with exactly the scalar operations (sub, mul, add, clamp, truncate
+// to an integer between the two stages), so the result is bit-identical.
+inline u32 bilerp_argb(u32 c00, u32 c10, u32 c01, u32 c11, f32 frac_s, f32 frac_t) {
+#if defined(ORBIT64_RASTER_SSE2)
+    const __m128i zero = _mm_setzero_si128();
+    auto unpack = [&](u32 c) {
+        __m128i v = _mm_cvtsi32_si128(static_cast<int>(c));
+        v = _mm_unpacklo_epi16(_mm_unpacklo_epi8(v, zero), zero);
+        return _mm_cvtepi32_ps(v);
+    };
+    const __m128 lo = _mm_setzero_ps(), hi = _mm_set1_ps(255.0f);
+    auto lerp = [&](__m128 a, __m128 b, __m128 t) {
+        __m128 v = _mm_add_ps(a, _mm_mul_ps(t, _mm_sub_ps(b, a)));
+        return _mm_cvttps_epi32(_mm_min_ps(_mm_max_ps(v, lo), hi));
+    };
+    const __m128 ts = _mm_set1_ps(frac_s);
+    const __m128 top = _mm_cvtepi32_ps(lerp(unpack(c00), unpack(c10), ts));
+    const __m128 bot = _mm_cvtepi32_ps(lerp(unpack(c01), unpack(c11), ts));
+    __m128i out = lerp(top, bot, _mm_set1_ps(frac_t));
+    out = _mm_packus_epi16(_mm_packs_epi32(out, out), zero);
+    return static_cast<u32>(_mm_cvtsi128_si32(out));
+#else
+    u32 out = 0;
+    for (int shift = 0; shift < 32; shift += 8) {
+        auto comp = [shift](u32 c) { return static_cast<u8>((c >> shift) & 0xFF); };
+        u8 top = lerp_u8(comp(c00), comp(c10), frac_s);
+        u8 bot = lerp_u8(comp(c01), comp(c11), frac_s);
+        out |= static_cast<u32>(lerp_u8(top, bot, frac_t)) << shift;
+    }
+    return out;
+#endif
 }
 
 // The tile's decoded texels, decoding them now if no thread has started to;
@@ -363,6 +423,15 @@ inline const u32* tex_table(const DrawState& st, const TexUnit& tu) {
     return c->texels;
 }
 
+// static_cast<s32>(std::floor(v)), without the libm-style sequence baseline
+// x86-64 (no SSE4.1 ROUNDSS) needs for floor: truncate, then step down for
+// negative non-integers. Identical for every input, including out-of-range
+// ones and NaN, which both forms turn into INT32_MIN.
+inline s32 floor_to_s32(f32 v) {
+    const s32 i = static_cast<s32>(v);
+    return (i != INT32_MIN && v < static_cast<f32>(i)) ? i - 1 : i;
+}
+
 inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t) {
     const TexUnit& tu = st.tex[tile_idx & 0x7];
     f32 shifted_s = s * tu.shift_mul_s;
@@ -372,8 +441,8 @@ inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t) {
     const u32* table = tex_table(st, tu);
 
     if (st.point_sample) {
-        s32 is = static_cast<s32>(std::floor(shifted_s));
-        s32 it = static_cast<s32>(std::floor(shifted_t));
+        s32 is = floor_to_s32(shifted_s);
+        s32 it = floor_to_s32(shifted_t);
         if (table) return table[static_cast<u32>(wrap_t(tu, it)) * tu.cache->w + static_cast<u32>(wrap_s(tu, is))];
         return fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is, it);
     }
@@ -381,8 +450,8 @@ inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t) {
     // Bilinear (G_TF_BILERP / G_TF_AVERAGE): the RDP splits the coordinate into
     // its integer and fractional parts directly -- no half-texel bias -- and
     // blends the 2x2 neighbourhood from there.
-    s32 is0 = static_cast<s32>(std::floor(shifted_s));
-    s32 it0 = static_cast<s32>(std::floor(shifted_t));
+    s32 is0 = floor_to_s32(shifted_s);
+    s32 it0 = floor_to_s32(shifted_t);
     f32 frac_s = shifted_s - static_cast<f32>(is0);
     f32 frac_t = shifted_t - static_cast<f32>(it0);
 
@@ -403,18 +472,7 @@ inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t) {
         c11 = fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is0 + 1, it0 + 1);
     }
 
-    auto comp = [](u32 c, int shift) { return static_cast<u8>((c >> shift) & 0xFF); };
-
-    u8 out[4];
-    int shifts[4] = {24, 16, 8, 0}; // a, r, g, b
-    for (int i = 0; i < 4; ++i) {
-        u8 top = lerp_u8(comp(c00, shifts[i]), comp(c10, shifts[i]), frac_s);
-        u8 bot = lerp_u8(comp(c01, shifts[i]), comp(c11, shifts[i]), frac_s);
-        out[i] = lerp_u8(top, bot, frac_t);
-    }
-
-    return (static_cast<u32>(out[0]) << 24) | (static_cast<u32>(out[1]) << 16) |
-           (static_cast<u32>(out[2]) << 8) | static_cast<u32>(out[3]);
+    return bilerp_argb(c00, c10, c01, c11, frac_s, frac_t);
 }
 
 // Colour combiner: (A - B) * C + D per channel, once or twice (2-cycle).
@@ -578,18 +636,29 @@ inline f32 triangle_area(const V& v0, const V& v1, const V& v2) {
 // centre lies inside the triangle are shaded and handed to
 // sink.write(x, y, colour, z). V is any vertex type with the screen-space
 // fields of Vertex. Returns false when the scissor leaves nothing to draw.
-template <class V, class Sink>
-inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2, f32 area,
-                     u32 scale, s32 row_begin, s32 row_end, Sink& sink) {
+// The scissored bounding box triangle() scans at `scale`; false if it is
+// empty (nothing is drawn). Rows int(min_y) .. int(max_y) are the only ones
+// it can touch, which the native pass relies on to skip whole row bands.
+template <class V>
+inline bool triangle_bounds(const DrawState& st, const V& v0, const V& v1, const V& v2, u32 scale,
+                            f32& min_x, f32& max_x, f32& min_y, f32& max_y) {
     const u32 fb_w = st.fb_w;
     const u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? std::min(st.scissor_lrx, fb_w) : fb_w;
     const u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? std::min(st.scissor_lry, kFbLines) : kFbLines;
     const f32 fs = static_cast<f32>(scale);
-    f32 min_x = std::clamp(std::min({v0.sx, v1.sx, v2.sx}) * fs, static_cast<f32>(st.scissor_ulx * scale), static_cast<f32>(eff_lrx > 0 ? eff_lrx * scale - 1 : 0));
-    f32 max_x = std::clamp(std::max({v0.sx, v1.sx, v2.sx}) * fs, static_cast<f32>(st.scissor_ulx * scale), static_cast<f32>(eff_lrx > 0 ? eff_lrx * scale - 1 : 0));
-    f32 min_y = std::clamp(std::min({v0.sy, v1.sy, v2.sy}) * fs, static_cast<f32>(st.scissor_uly * scale), static_cast<f32>(eff_lry > 0 ? eff_lry * scale - 1 : 0));
-    f32 max_y = std::clamp(std::max({v0.sy, v1.sy, v2.sy}) * fs, static_cast<f32>(st.scissor_uly * scale), static_cast<f32>(eff_lry > 0 ? eff_lry * scale - 1 : 0));
-    if (min_x > max_x || min_y > max_y) return false;
+    min_x = std::clamp(std::min({v0.sx, v1.sx, v2.sx}) * fs, static_cast<f32>(st.scissor_ulx * scale), static_cast<f32>(eff_lrx > 0 ? eff_lrx * scale - 1 : 0));
+    max_x = std::clamp(std::max({v0.sx, v1.sx, v2.sx}) * fs, static_cast<f32>(st.scissor_ulx * scale), static_cast<f32>(eff_lrx > 0 ? eff_lrx * scale - 1 : 0));
+    min_y = std::clamp(std::min({v0.sy, v1.sy, v2.sy}) * fs, static_cast<f32>(st.scissor_uly * scale), static_cast<f32>(eff_lry > 0 ? eff_lry * scale - 1 : 0));
+    max_y = std::clamp(std::max({v0.sy, v1.sy, v2.sy}) * fs, static_cast<f32>(st.scissor_uly * scale), static_cast<f32>(eff_lry > 0 ? eff_lry * scale - 1 : 0));
+    return !(min_x > max_x || min_y > max_y);
+}
+
+template <class V, class Sink>
+inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2, f32 area,
+                     u32 scale, s32 row_begin, s32 row_end, Sink& sink) {
+    const f32 fs = static_cast<f32>(scale);
+    f32 min_x, max_x, min_y, max_y;
+    if (!triangle_bounds(st, v0, v1, v2, scale, min_x, max_x, min_y, max_y)) return false;
 
     const int y_first = std::max(static_cast<int>(min_y), static_cast<int>(row_begin));
     const int y_last = std::min(static_cast<int>(max_y), static_cast<int>(row_end) - 1);

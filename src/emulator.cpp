@@ -1,4 +1,5 @@
 #include "emulator.hpp"
+#include <chrono>
 #include <iostream>
 
 Emulator::Emulator()
@@ -93,7 +94,9 @@ void Emulator::step_frame() {
     constexpr u32 scanlines = 525;
     constexpr u32 cycles_per_scanline = CYCLES_PER_FRAME / scanlines;
 
+    using Clock = std::chrono::steady_clock;
     for (u32 line = 0; line < scanlines; ++line) {
+        const Clock::time_point t0 = profiling_ ? Clock::now() : Clock::time_point{};
         u32 executed = 0;
         // An idle loop alternates between two pcs, so skip_idle_loop() only
         // runs when pc repeats the one two steps back - and a two-pc loop it
@@ -112,11 +115,17 @@ void Emulator::step_frame() {
             prev_pc = pc;
             executed += (cpu_core_ == CpuCore::Recompiler) ? jit.run_step(cpu, bus) : cpu.step();
         }
+        const Clock::time_point t1 = profiling_ ? Clock::now() : Clock::time_point{};
 
         ai.step(cycles_per_scanline, mi, bus.get_rdram(), bus.get_rdram_size());
         vi.step_scanline(mi);
         rsp.step(cycles_per_scanline, mi, rdp, bus.get_rdram(), bus.get_rdram_size());
         cpu.check_interrupts();
+
+        if (profiling_) {
+            prof_cpu_seconds_ += std::chrono::duration<double>(t1 - t0).count();
+            prof_other_seconds_ += std::chrono::duration<double>(Clock::now() - t1).count();
+        }
     }
 
     static int f_count = 0;

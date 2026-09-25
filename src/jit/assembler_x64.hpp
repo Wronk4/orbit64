@@ -1,5 +1,6 @@
 #pragma once
-// Minimal hand-rolled x86-64 (SysV) instruction encoder. Only the handful of
+// Minimal hand-rolled x86-64 instruction encoder (ABI-neutral; the calling
+// convention lives in recompiler.cpp). Only the handful of
 // forms the recompiler actually needs - just enough to inline pure ALU /
 // shift / immediate arithmetic on the guest register file and to call out to
 // the jit_helpers thunks for memory access.
@@ -114,6 +115,30 @@ public:
         db(0x89);
         modrm_reg(src, dst);
     }
+    // ---- [base + index] addressing (fastmem): no displacement, scale 1 ----
+    // index must not be RSP. A base with low bits 101 (RBP/R13) has no
+    // mod=00 form, so it gets a zero disp8.
+    void rex_sib(bool wide, int reg, int index, int base, bool force = false) {
+        u8 byte = 0x40 | (wide ? 8 : 0) | (((reg >> 3) & 1) << 2) | (((index >> 3) & 1) << 1) | ((base >> 3) & 1);
+        if (byte != 0x40 || force) db(byte);
+    }
+    void modrm_sib(int reg, int base, int index) {
+        const bool disp8 = (base & 7) == 5;
+        db((disp8 ? 0x40 : 0x00) | ((reg & 7) << 3) | 4);
+        db(((index & 7) << 3) | (base & 7));
+        if (disp8) db(0);
+    }
+    void load_idx64(int dst, int base, int index) { rex_sib(true, dst, index, base); db(0x8B); modrm_sib(dst, base, index); }
+    void load_idx32(int dst, int base, int index) { rex_sib(false, dst, index, base); db(0x8B); modrm_sib(dst, base, index); }
+    void load_idx16_zx(int dst, int base, int index) { rex_sib(false, dst, index, base); db(0x0F); db(0xB7); modrm_sib(dst, base, index); }
+    void load_idx8_zx(int dst, int base, int index) { rex_sib(false, dst, index, base); db(0x0F); db(0xB6); modrm_sib(dst, base, index); }
+    void store_idx64(int base, int index, int src) { rex_sib(true, src, index, base); db(0x89); modrm_sib(src, base, index); }
+    void store_idx32(int base, int index, int src) { rex_sib(false, src, index, base); db(0x89); modrm_sib(src, base, index); }
+    void store_idx16(int base, int index, int src) { db(0x66); rex_sib(false, src, index, base); db(0x89); modrm_sib(src, base, index); }
+    // Forced REX so src 4..7 means SPL/BPL/SIL/DIL rather than AH/CH/DH/BH.
+    void store_idx8(int base, int index, int src) { rex_sib(false, src, index, base, true); db(0x88); modrm_sib(src, base, index); }
+    void bswap(bool wide, int r) { rex(wide, 0, r); db(0x0F); db(0xC8 | (r & 7)); }
+
     // movsxd dst64, src32 (sign-extend low 32 bits of src into dst)
     void movsxd(int dst, int src) {
         rex(true, dst, src);

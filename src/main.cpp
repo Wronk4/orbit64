@@ -1,5 +1,6 @@
 #include "emulator.hpp"
 #include "ui/app.hpp"
+#include "profiler.hpp"
 #include <SDL.h>
 #include <iostream>
 #include <filesystem>
@@ -72,6 +73,10 @@ int main(int argc, char* argv[]) {
     std::string mash_btn;
     std::vector<std::pair<int, std::string>> scheduled_presses;
     std::vector<std::pair<int, std::string>> scheduled_screenshots;
+    std::string cpu_core_arg;
+    bool jit_stats = false;
+    std::string profile_path;
+    bool use_save_file = true;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -94,6 +99,14 @@ int main(int argc, char* argv[]) {
             ui_test_dir = argv[++i];
         } else if (arg == "--dump-ram" && i + 1 < argc) {
             dump_ram_path = argv[++i];
+        } else if (arg == "--cpu" && i + 1 < argc) {
+            cpu_core_arg = argv[++i]; // "interp" or "jit"
+        } else if (arg == "--jit-stats") {
+            jit_stats = true;
+        } else if (arg == "--no-save") {
+            use_save_file = false; // don't read or write the .sav next to the ROM
+        } else if (arg == "--profile" && i + 1 < argc) {
+            profile_path = argv[++i]; // sampling profile of the run, see src/profiler.hpp
         } else if (arg == "--mash" && i + 1 < argc) {
             mash_btn = argv[++i];
         } else if (arg == "--press" && i + 1 < argc) {
@@ -138,18 +151,27 @@ int main(int argc, char* argv[]) {
     }
 
     Emulator emu;
+    emu.get_cartridge().set_use_save_file(use_save_file);
     if (!emu.load_rom(rom_path)) {
         std::cerr << "[Main] Failed to load ROM: " << rom_path << "\n";
         return 1;
     }
     // Internal resolution of the RDP (screenshots come out that many times larger).
     emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
+    if (cpu_core_arg == "interp") emu.set_cpu_core(CpuCore::Interpreter);
+    else if (cpu_core_arg == "jit") emu.set_cpu_core(CpuCore::Recompiler);
+    emu.get_jit().set_stats_enabled(jit_stats);
+    emu.set_profiling(jit_stats);
+    const auto run_start = std::chrono::steady_clock::now();
 
     std::vector<u32> frame_pixels;
     int frame_w = 320, frame_h = 240;
 
     if (headless) {
         std::cout << "[Main] Running in headless mode for " << headless_frames << " frames...\n";
+        if (!profile_path.empty() && !profiler::start(profile_path)) {
+            std::cerr << "[Main] --profile is not supported on this platform\n";
+        }
         for (int frame = 0; frame < headless_frames; ++frame) {
             // Apply scheduled button presses
             for (const auto& sp : scheduled_presses) {
@@ -180,6 +202,26 @@ int main(int argc, char* argv[]) {
 
             if (frame % 60 == 0) {
                 std::cout << "[Main] Frame " << frame << " / " << headless_frames << "\n";
+            }
+        }
+
+        profiler::stop();
+
+        {
+            // Wall time plus a fingerprint of the final machine state, so two
+            // runs (e.g. --cpu interp vs --cpu jit) can be compared at a glance.
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - run_start).count();
+            u64 hash = 0xCBF29CE484222325ULL; // FNV-1a
+            const u8* ram = emu.get_bus().get_rdram();
+            for (size_t i = 0; i < emu.get_bus().get_rdram_size(); ++i) hash = (hash ^ ram[i]) * 0x100000001B3ULL;
+            std::cout << "[Main] core=" << (emu.cpu_core() == CpuCore::Recompiler ? "jit" : "interp")
+                      << " frames=" << headless_frames << " time=" << std::fixed << std::setprecision(2) << secs
+                      << "s (" << (secs > 0 ? headless_frames / secs : 0.0) << " fps)"
+                      << " rdram_hash=" << std::hex << hash << std::dec << "\n";
+            if (jit_stats) {
+                std::cout << "[Main] time split: cpu=" << emu.prof_cpu_seconds() << "s, ai/vi/rsp/rdp="
+                          << emu.prof_other_seconds() << "s\n";
+                if (emu.cpu_core() == CpuCore::Recompiler) emu.get_jit().print_stats(std::cout);
             }
         }
 
