@@ -1,4 +1,5 @@
 #include "pif.hpp"
+#include <algorithm>
 #include <iostream>
 
 PIF::PIF() {
@@ -34,6 +35,22 @@ u8 PIF::read_rom(u32 addr) const {
     u32 offset = addr & (PIF_ROM_SIZE - 1);
     return rom[offset];
 }
+
+namespace {
+// CRC-8 (polynomial 0x85) the Controller Pak sends with every 32-byte block.
+u8 pak_crc(const u8* data) {
+    u8 crc = 0;
+    for (int i = 0; i <= 32; ++i) {
+        for (int mask = 0x80; mask; mask >>= 1) {
+            const u8 tap = (crc & 0x80) ? 0x85 : 0x00;
+            crc = static_cast<u8>(crc << 1);
+            if (i < 32 && (data[i] & mask)) crc |= 1;
+            crc ^= tap;
+        }
+    }
+    return crc;
+}
+} // namespace
 
 void PIF::process_commands(Controller controllers[4], Cartridge& cartridge) {
     u8 cmd_byte = ram[63];
@@ -88,7 +105,7 @@ void PIF::process_commands(Controller controllers[4], Cartridge& cartridge) {
                         if (idx + tx_len + 2 < 64) {
                             ram[idx + tx_len + 0] = 0x05; // Standard controller
                             ram[idx + tx_len + 1] = 0x00;
-                            ram[idx + tx_len + 2] = 0x01; // Controller Pak connected
+                            ram[idx + tx_len + 2] = channel == 0 ? 0x01 : 0x02; // Controller Pak in (port 1) / none
                         }
                     } else if (sub_cmd == 0x01) {
                         // Read controller status
@@ -100,16 +117,26 @@ void PIF::process_commands(Controller controllers[4], Cartridge& cartridge) {
                             ram[idx + tx_len + 3] = static_cast<u8>(ctrl.get_stick_y());
                         }
                     } else if (sub_cmd == 0x02) {
-                        // Read Controller Pak (MemPak)
-                        // Address in ram[idx+1], ram[idx+2]
-                        if (idx + tx_len + rx_len <= 64) {
-                            // Clear returned data + valid CRC (0x00)
-                            std::fill_n(&ram[idx + tx_len], rx_len, 0x00);
+                        // Read Controller Pak: 32 bytes + their CRC. Only
+                        // controller 1 has one; above 0x8000 (accessories
+                        // like the Rumble Pak) a memory card reads zeros.
+                        if (idx + tx_len + 33 <= 64 && tx_len >= 3) {
+                            const u32 addr = ((ram[idx + 1] << 8) | ram[idx + 2]) & 0xFFE0;
+                            u8* out = &ram[idx + tx_len];
+                            if (channel == 0 && addr < 0x8000) std::copy_n(cartridge.mempak_data() + addr, 32, out);
+                            else std::fill_n(out, 32, 0x00);
+                            out[32] = pak_crc(out);
                         }
                     } else if (sub_cmd == 0x03) {
-                        // Write Controller Pak (MemPak)
-                        if (idx + tx_len < 64) {
-                            ram[idx + tx_len] = 0x00; // CRC
+                        // Write Controller Pak: answers with the data's CRC.
+                        if (idx + tx_len + 1 <= 64 && tx_len >= 35) {
+                            const u32 addr = ((ram[idx + 1] << 8) | ram[idx + 2]) & 0xFFE0;
+                            const u8* in = &ram[idx + 3];
+                            if (channel == 0 && addr < 0x8000) {
+                                std::copy_n(in, 32, cartridge.mempak_data() + addr);
+                                cartridge.mempak_written();
+                            }
+                            ram[idx + tx_len] = pak_crc(in);
                         }
                     }
                 } else {

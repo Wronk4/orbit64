@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iostream>
 
+namespace { void format_mempak(std::vector<u8>& pak); }
+
 Cartridge::Cartridge() = default;
 
 Cartridge::~Cartridge() {
@@ -111,6 +113,16 @@ bool Cartridge::load_rom(const std::string& filepath) {
         }
     }
 
+    // Controller Pak for controller 1.
+    mempak_filepath.clear();
+    mempak_dirty = false;
+    format_mempak(mempak);
+    if (use_save_file_) {
+        mempak_filepath = (dot != std::string::npos ? filepath.substr(0, dot) : filepath) + ".mpk";
+        std::ifstream pak_file(utf8_path(mempak_filepath), std::ios::binary);
+        if (pak_file.is_open()) pak_file.read(reinterpret_cast<char*>(mempak.data()), mempak.size());
+    }
+
     std::cout << "[Cartridge] Loaded: \"" << title << "\" [" << game_code << "]\n";
     std::cout << "[Cartridge] Size: " << (rom.size() / (1024 * 1024)) << " MB, Entry: 0x" 
               << std::hex << entry_point << ", CRC1: 0x" << crc1 << ", CRC2: 0x" << crc2 << std::dec << "\n";
@@ -168,6 +180,30 @@ constexpr SaveEntry kSaveTypes[] = {
     {"HW", SaveType::NONE}, // Hot Wheels Turbo Racing
     {"SL", SaveType::NONE}, // Spider-Man
 };
+} // namespace
+
+namespace {
+// An empty, formatted Controller Pak file system (libultra's layout): the ID
+// block (with its checksums) four times on page 0, then the inode table and
+// its backup on pages 1-2 with every data page free, empty note table.
+void format_mempak(std::vector<u8>& pak) {
+    std::fill(pak.begin(), pak.end(), 0);
+    for (int i = 0; i < 32; ++i) pak[i] = static_cast<u8>(i == 0 ? 0x81 : i); // label area
+    u8 id[32] = {0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x1A, 0x5F, 0x13, 0, 0, 0, 0, 0, 0, 0, 0,
+                 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0, 0, 0, 0};
+    u32 sum = 0;
+    for (int i = 0; i < 28; i += 2) sum += (id[i] << 8) | id[i + 1];
+    const u16 chk = static_cast<u16>(sum), inv = static_cast<u16>(0xFFF2 - chk);
+    id[28] = chk >> 8; id[29] = chk & 0xFF; id[30] = inv >> 8; id[31] = inv & 0xFF;
+    for (u32 off : {0x20u, 0x60u, 0x80u, 0xC0u}) std::copy(id, id + 32, pak.begin() + off);
+    for (u32 page : {1u, 2u}) {
+        u8* p = pak.data() + page * 256;
+        for (int e = 1; e < 128; ++e) { p[e * 2] = 0x00; p[e * 2 + 1] = 0x03; } // free
+        u32 c = 0;
+        for (int b = 10; b < 256; ++b) c += p[b]; // checksum of the data pages' entries
+        p[0] = 0x00; p[1] = static_cast<u8>(c);
+    }
+}
 } // namespace
 
 void Cartridge::detect_cic_and_save() {
@@ -300,6 +336,13 @@ void Cartridge::dma_from_rdram(u32 off, const u8* src, u32 len) {
 }
 
 void Cartridge::save_backup() {
+    if (mempak_dirty && !mempak_filepath.empty()) {
+        std::ofstream pak_file(utf8_path(mempak_filepath), std::ios::binary);
+        if (pak_file.is_open()) {
+            pak_file.write(reinterpret_cast<const char*>(mempak.data()), mempak.size());
+            mempak_dirty = false;
+        }
+    }
     if (!sram_dirty && !eeprom_dirty) return;
     if (save_filepath.empty()) return;
 
