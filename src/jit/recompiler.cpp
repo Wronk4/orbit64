@@ -38,6 +38,8 @@ void Recompiler::invalidate_all() {
     }
     code_.reset();
     std::fill(code_pages_.begin(), code_pages_.end(), 0);
+    page_blocks_.clear();
+    dirty_pages_.clear();
     pending_links_.clear();
     map_pending_links_.clear();
     clear_jcache();
@@ -63,18 +65,51 @@ void Recompiler::request_invalidate(u32 paddr, u32 len) {
     u32 last_page = (paddr + len - 1) >> kPageShift;
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
         if (code_pages_[p]) {
+#if defined(ORBIT64_JIT_A64)
+            // Chained blocks jump into each other: drop everything.
             pending_invalidate_ = true;
             if (active_ctx_) active_ctx_->exit_req = 1; // leave the chain after this store
             return;
+#else
+            dirty_pages_.push_back(p);
+#endif
         }
     }
 }
 
-void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr) {
+void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot) {
     u32 first_page = start_paddr >> kPageShift;
     u32 last_page = (end_paddr == start_paddr) ? first_page : (end_paddr - 1) >> kPageShift;
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
         code_pages_[p] = 1;
+#if !defined(ORBIT64_JIT_A64)
+        const u32 entry = start_paddr | (delay_slot ? 1u : 0u);
+        std::vector<u32>& list = page_blocks_[p];
+        if (list.empty() || list.back() != entry) list.push_back(entry);
+#endif
+    }
+}
+
+void Recompiler::drop_dirty_pages() {
+    for (u32 p : dirty_pages_) {
+        if (!code_pages_[p]) continue; // already dropped
+        code_pages_[p] = 0;
+        auto it = page_blocks_.find(p);
+        if (it == page_blocks_.end()) continue;
+        // A block that also covers other pages stays listed there; dropping
+        // whatever sits at its address again later only costs a recompile.
+        for (u32 entry : it->second) {
+            BlockMap& map = (entry & 1) ? ds_blocks_ : blocks_;
+            const u32 paddr = entry & ~3u;
+            if (auto& table = map.tables[paddr >> kTableShift]) (*table)[(paddr >> 2) & (kSlotsPerTable - 1)] = Block{};
+        }
+        page_blocks_.erase(it);
+        if (stats_on_) stats_.page_drops++;
+    }
+    dirty_pages_.clear();
+    for (BlockMap* map : {&blocks_, &ds_blocks_}) {
+        map->last_paddr = 0xFFFFFFFFu;
+        map->last_block = nullptr;
     }
 }
 
@@ -118,6 +153,9 @@ u32 Recompiler::run(CPU& cpu, Bus& bus, u32 budget) {
     }
     const bool delay_slot = cpu.jit_pending_delay_slot();
     const Block* blk = lookup_or_compile(cpu, bus, paddr, delay_slot, mapped);
+    // COP1 code with the FPU disabled goes to the interpreter (see run_step()).
+    // TODO: a chain can still jump straight into such a block.
+    if (blk && blk->fpu && !(cpu.get_cp0(CP0Reg::STATUS) & (1u << 29))) blk = nullptr;
     if (!blk || !blk->fn || !rt_ready_) {
         if (stats_on_) count_fallback(bus, pc);
         return cpu.step();
@@ -182,6 +220,7 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
         invalidate_all();
         if (stats_on_) stats_.invalidations++;
     }
+    if (!dirty_pages_.empty()) drop_dirty_pages();
 
     u64 pc = cpu.get_pc();
     // Only KSEG0/KSEG1 (the fixed, TLB-free window almost all game code runs
@@ -208,6 +247,9 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     // normal multi-instruction one - see ds_blocks_.
     const bool delay_slot = cpu.jit_pending_delay_slot();
     const Block* blk = lookup_or_compile(cpu, bus, paddr, delay_slot);
+    // COP1 code with the FPU disabled: the interpreter raises Coprocessor
+    // Unusable at the right instruction (compiled COP1 code doesn't check).
+    if (blk && blk->fpu && !(cpu.get_cp0(CP0Reg::STATUS) & (1u << 29))) blk = nullptr;
     if (!blk || !blk->fn) {
         if (stats_on_) count_fallback(bus, pc);
         return cpu.step();
@@ -275,8 +317,14 @@ const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 p
         *slot = compile_block(cpu, bus, paddr, delay_slot);
 #endif
         slot->valid = true;
+        if (slot->fn) {
+            for (u32 i = 0; i < slot->length && !slot->fpu; ++i) {
+                const u32 op = fetch_instr(bus.get_rdram(), paddr + i * 4) >> 26;
+                slot->fpu = op == 0x11 || op == 0x31 || op == 0x35 || op == 0x39 || op == 0x3D;
+            }
+        }
         if (stats_on_) stats_.compiles++;
-        if (slot->fn) mark_code_pages(paddr, paddr + slot->length * 4);
+        if (slot->fn) mark_code_pages(paddr, paddr + slot->length * 4, delay_slot);
 #if defined(ORBIT64_JIT_A64)
         if (slot->fn) {
             u8* code = reinterpret_cast<u8*>(slot->fn);
@@ -425,10 +473,11 @@ void Recompiler::print_stats(std::ostream& out) const {
                   static_cast<unsigned long long>(s.interp_instrs), pct(s.interp_instrs),
                   static_cast<unsigned long long>(s.interp_unmapped), pct(s.interp_unmapped));
     out << line;
-    std::snprintf(line, sizeof line, "[JIT] block entries: %llu, avg %.2f instr/entry, compiles: %llu, cache drops: %llu\n",
+    std::snprintf(line, sizeof line, "[JIT] block entries: %llu, avg %.2f instr/entry, compiles: %llu, cache drops: %llu, page drops: %llu\n",
                   static_cast<unsigned long long>(s.jit_entries),
                   s.jit_entries ? static_cast<double>(s.jit_instrs) / static_cast<double>(s.jit_entries) : 0.0,
-                  static_cast<unsigned long long>(s.compiles), static_cast<unsigned long long>(s.invalidations));
+                  static_cast<unsigned long long>(s.compiles), static_cast<unsigned long long>(s.invalidations),
+                  static_cast<unsigned long long>(s.page_drops));
     out << line;
 
     std::vector<std::pair<u64, u32>> top;
@@ -515,7 +564,9 @@ void emit_epilogue(Assembler& x) {
 // Calls a jit_helpers thunk of the form `u32 fn(JitCtx*, u64 addr, u32 arg, u32 site)`.
 // `addr` must already be in ARG1 and `arg` in ARG2. On return, if RAX != 0 the
 // block aborts (a TLB fault redirected cpu->pc already); this bakes in the
-// instruction's index as the returned "instructions executed" count.
+// instructions up to and including this one as the returned "instructions
+// executed" count (COUNT/RANDOM advance for the faulting one too, as in
+// CPU::step()).
 void emit_helper_call(Assembler& x, void* fn, u32 site, std::vector<size_t>& fault_patches) {
     x.mov_reg_reg64(ARG0, R_CTX);
     x.mov_reg_imm32(ARG3, site);
@@ -523,7 +574,7 @@ void emit_helper_call(Assembler& x, void* fn, u32 site, std::vector<size_t>& fau
     x.call_reg(RAX);
     x.test_rr(false, RAX, RAX);
     size_t skip = x.jcc_rel32(Cc::E); // RAX==0 -> success, skip the fault path
-    x.mov_reg_imm32(RAX, site_index(site));
+    x.mov_reg_imm32(RAX, site_index(site) + 1); // the faulting instruction counts, as in the interpreter
     fault_patches.push_back(x.jmp_rel32());
     x.patch_rel32(skip, x.pos());
 }
@@ -1285,7 +1336,7 @@ void emit_interp_call(Assembler& x, const Decoded& d, u32 site, std::vector<size
     x.call_reg(RAX);
     x.test_rr(false, RAX, RAX);
     size_t skip = x.jcc_rel32(Cc::E);
-    x.mov_reg_imm32(RAX, site_index(site));
+    x.mov_reg_imm32(RAX, site_index(site) + 1); // the faulting instruction counts, as in the interpreter
     fault_patches.push_back(x.jmp_rel32());
     x.patch_rel32(skip, x.pos());
 }
@@ -1448,7 +1499,7 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
     for (size_t site : fault_patches) x.patch_rel32(site, epilogue_pos);
     // Out-of-line stubs for trapping arithmetic that overflowed: raise EXC_OV
     // via the interpreter's own trigger_exception() (through jit_overflow),
-    // report the instructions before it as executed, then fall into the same
+    // report the instructions up to and including it as executed, then fall into the same
     // epilogue as everything else.
     for (const OverflowSite& s : overflow_sites) {
         x.patch_rel32(s.patch, x.pos());
@@ -1456,7 +1507,7 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
         x.mov_reg_imm32(ARG1, s.site);
         x.mov_reg_imm64(RAX, reinterpret_cast<u64>(&jit_overflow));
         x.call_reg(RAX);
-        x.mov_reg_imm32(RAX, site_index(s.site));
+        x.mov_reg_imm32(RAX, site_index(s.site) + 1);
         x.patch_rel32(x.jmp_rel32(), epilogue_pos);
     }
 

@@ -47,6 +47,7 @@ public:
         u32 length = 0;          // guest instructions covered (incl. a terminating branch + delay slot)
         bool valid = false;      // false = not compiled yet
         bool link_ok = false;    // AArch64: other blocks may jump straight here
+        bool fpu = false;        // contains COP1 code: only run while STATUS.CU1 is set
     };
 
     // AArch64 chaining runtime, emitted at the start of the code arena (see
@@ -120,6 +121,7 @@ public:
         u64 interp_unmapped = 0; //   ... of which pc was outside KSEG0/KSEG1
         u64 compiles = 0;        // blocks compiled (incl. "not JIT-able" verdicts)
         u64 invalidations = 0;   // whole-cache drops
+        u64 page_drops = 0;      // x64: 64-byte pages whose blocks were dropped after a write
     };
     void set_stats_enabled(bool on) { stats_on_ = on; }
     void print_stats(std::ostream& out) const;
@@ -171,6 +173,14 @@ private:
     CodeBuffer code_;
     std::vector<u8> code_pages_; // page index -> nonzero if a cached block covers this page (read by compiled stores)
     bool pending_invalidate_ = false;
+    // x64: a write to code drops only the blocks on the pages it hit (blocks
+    // never jump to each other there, so nothing else refers to them).
+    // page_blocks_ lists, per 64-byte page, the blocks covering it as
+    // start paddr | 1 for ds_blocks_; dirty_pages_ waits for the next
+    // run_step() like pending_invalidate_ does.
+    std::unordered_map<u32, std::vector<u32>> page_blocks_;
+    std::vector<u32> dirty_pages_;
+    void drop_dirty_pages();
 
     // --- AArch64 chaining (see run()) ---
     bool chain_ = true;
@@ -200,7 +210,7 @@ private:
     // yet are returned in `links`.
     Block compile_block_linked(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot, bool mapped,
                                std::vector<PendingLink>& links);
-    void mark_code_pages(u32 start_paddr, u32 end_paddr);
+    void mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot);
     // Entry of the compiled, linkable block at `paddr` (in map_blocks_ if
     // `mapped`), or null.
     const void* link_target(u32 paddr, bool mapped) const;

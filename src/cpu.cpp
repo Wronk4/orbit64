@@ -228,6 +228,17 @@ void CPU::execute(u32 instr, u64 cur_pc) {
     u8 funct = instr & 0x3F;
 
     u16 imm = instr & 0xFFFF;
+
+    // COP1 (and its loads/stores) with STATUS.CU1 clear raises Coprocessor
+    // Unusable (CE = 1). libultra depends on it: a thread's FPU registers are
+    // only saved and restored across context switches once that thread has
+    // taken this exception, so without it threads clobber each other's FPRs.
+    if ((op == 0x11 || op == 0x31 || op == 0x35 || op == 0x39 || op == 0x3D) &&
+        !(cp0[CP0Reg::STATUS] & (1u << 29))) {
+        cp0[CP0Reg::CAUSE] = (cp0[CP0Reg::CAUSE] & ~(3ULL << 28)) | (1ULL << 28);
+        trigger_exception(11); // EXC_CPU
+        return;
+    }
     s64 simm = sign_extend_16_64(static_cast<s16>(imm));
     u32 target = (instr & 0x03FFFFFF) << 2;
 
