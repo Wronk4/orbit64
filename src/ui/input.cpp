@@ -34,6 +34,7 @@ void InputManager::handle_event(const SDL_Event& e) {
             pads_.erase(std::remove_if(pads_.begin(), pads_.end(),
                                        [&](const GamepadInfo& g) {
                                            if (g.id != e.gdevice.which) return false;
+                                           for (auto& r : rumble_) if (r.pad == g.handle) r = {};
                                            SDL_CloseGamepad(g.handle);
                                            return true;
                                        }),
@@ -93,6 +94,36 @@ SDL_Gamepad* InputManager::pad_for_device(int device) const {
     return pads_[device - 1].handle;
 }
 
+bool InputManager::can_rumble(int device) const {
+    SDL_Gamepad* pad = pad_for_device(device);
+    return pad && SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
+}
+
+void InputManager::rumble(int port, const PortConfig& cfg, float strength) {
+    RumbleState& r = rumble_[port & 3];
+    SDL_Gamepad* pad = cfg.plugged && strength > 0.0f ? pad_for_device(cfg.device) : nullptr;
+    // Stop the pad that was vibrating when it changes or the motor turns off.
+    if (r.pad && r.pad != pad) {
+        SDL_RumbleGamepad(r.pad, 0, 0, 0);
+        r = {};
+    }
+    if (!pad) return;
+    // Rumble requests expire, so a running motor is renewed now and then; a
+    // stalled UI thread then can't leave the pad vibrating.
+    const std::uint64_t now = SDL_GetTicks();
+    if (r.pad == pad && r.strength == strength && now - r.sent_ms < 100) return;
+    const auto v = static_cast<Uint16>(std::clamp(strength, 0.0f, 1.0f) * 0xFFFF);
+    SDL_RumbleGamepad(pad, v, v, 250);
+    r = {pad, strength, now};
+}
+
+void InputManager::test_rumble(const PortConfig& cfg) {
+    if (SDL_Gamepad* pad = pad_for_device(cfg.device)) {
+        const auto v = static_cast<Uint16>(std::clamp(cfg.rumble_strength, 0, 100) * 0xFFFF / 100);
+        SDL_RumbleGamepad(pad, v, v, 400);
+    }
+}
+
 float InputManager::pad_value(SDL_Gamepad* pad, int binding) const {
     if (!pad || binding < 0) return 0.0f;
     if (binding < kPadAxisBase)
@@ -106,6 +137,8 @@ float InputManager::pad_value(SDL_Gamepad* pad, int binding) const {
 ControllerSnapshot InputManager::poll(const PortConfig& cfg, bool keyboard_enabled) const {
     ControllerSnapshot s;
     s.plugged = cfg.plugged;
+    s.pak = cfg.pak;
+    if (cfg.pak == 3) s.gb_rom = cfg.gb_rom;
     if (!cfg.plugged) return s;
 
     static const std::uint16_t kMasks[] = {

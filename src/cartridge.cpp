@@ -113,14 +113,16 @@ bool Cartridge::load_rom(const std::string& filepath) {
         }
     }
 
-    // Controller Pak for controller 1.
-    mempak_filepath.clear();
-    mempak_dirty = false;
-    format_mempak(mempak);
-    if (use_save_file_) {
-        mempak_filepath = (dot != std::string::npos ? filepath.substr(0, dot) : filepath) + ".mpk";
-        std::ifstream pak_file(utf8_path(mempak_filepath), std::ios::binary);
-        if (pak_file.is_open()) pak_file.read(reinterpret_cast<char*>(mempak.data()), mempak.size());
+    // Controller Paks.
+    for (int i = 0; i < 4; ++i) {
+        mempak_filepath[i].clear();
+        mempak_dirty[i] = false;
+        format_mempak(mempaks[i]);
+        if (!use_save_file_) continue;
+        mempak_filepath[i] = (dot != std::string::npos ? filepath.substr(0, dot) : filepath) +
+                             (i == 0 ? ".mpk" : ".p" + std::to_string(i + 1) + ".mpk");
+        std::ifstream pak_file(utf8_path(mempak_filepath[i]), std::ios::binary);
+        if (pak_file.is_open()) pak_file.read(reinterpret_cast<char*>(mempaks[i].data()), mempaks[i].size());
     }
 
     std::cout << "[Cartridge] Loaded: \"" << title << "\" [" << game_code << "]\n";
@@ -346,11 +348,12 @@ void Cartridge::dma_from_rdram(u32 off, const u8* src, u32 len) {
 }
 
 void Cartridge::save_backup() {
-    if (mempak_dirty && !mempak_filepath.empty()) {
-        std::ofstream pak_file(utf8_path(mempak_filepath), std::ios::binary);
+    for (int i = 0; i < 4; ++i) {
+        if (!mempak_dirty[i] || mempak_filepath[i].empty()) continue;
+        std::ofstream pak_file(utf8_path(mempak_filepath[i]), std::ios::binary);
         if (pak_file.is_open()) {
-            pak_file.write(reinterpret_cast<const char*>(mempak.data()), mempak.size());
-            mempak_dirty = false;
+            pak_file.write(reinterpret_cast<const char*>(mempaks[i].data()), mempaks[i].size());
+            mempak_dirty[i] = false;
         }
     }
     if (!sram_dirty && !eeprom_dirty) return;

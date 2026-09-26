@@ -62,6 +62,7 @@ struct EmuCore::FrameClock {
 bool EmuCore::start(const std::filesystem::path& rom, std::string& error) {
     stop();
     auto emu = std::make_unique<Emulator>();
+    emu->set_expansion_pak(expansion_pak_);
     if (!emu->load_rom(platform::path_to_utf8(rom))) {
         error = "The file could not be read or is not a valid Nintendo 64 ROM.";
         return false;
@@ -127,6 +128,7 @@ void EmuCore::stop() {
         frame_serial_++;
     }
     state_ = RunState::Stopped;
+    for (auto& r : rumble_) r = false;
     fast_forward_ = false;
     advance_req_ = 0;
     {
@@ -316,6 +318,14 @@ void EmuCore::process_state_requests(FrameClock& fc) {
     }
 }
 
+bool EmuCore::poll_message(std::string& msg) {
+    std::lock_guard<std::mutex> lk(message_mutex_);
+    if (messages_.empty()) return false;
+    msg = std::move(messages_.front());
+    messages_.erase(messages_.begin());
+    return true;
+}
+
 void EmuCore::set_input(int port, const ControllerSnapshot& s) {
     std::lock_guard<std::mutex> lk(input_mutex_);
     input_[port & 3] = s;
@@ -491,16 +501,30 @@ void EmuCore::run_one_frame(FrameClock& fc) {
         }
     }
     emu_->get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale_.load(), 1, 8)));
+    std::string gb_rom[4];
     {
         std::lock_guard<std::mutex> lk(input_mutex_);
         for (int p = 0; p < 4; ++p) {
             Controller& c = emu_->get_controller(p);
+            if (input_[p].pak == 3) gb_rom[p] = input_[p].gb_rom;
             c.set_plugged_in(input_[p].plugged);
             for (int bit = 0; bit < 16; ++bit) {
                 std::uint16_t mask = static_cast<std::uint16_t>(1u << bit);
                 c.set_button(mask, (input_[p].buttons & mask) != 0);
             }
             c.set_stick(input_[p].stick_x, input_[p].stick_y);
+            c.set_accessory(static_cast<Accessory>(std::clamp(input_[p].pak, 0, 3)));
+        }
+    }
+    // A Transfer Pak takes the Game Boy cartridge the player picked (reading
+    // the file happens here, outside the input lock).
+    for (int p = 0; p < 4; ++p) {
+        TransferPak& tp = emu_->get_controller(p).transfer_pak();
+        if (emu_->get_controller(p).accessory() != Accessory::TransferPak || tp.rom_path() == gb_rom[p]) continue;
+        std::string error;
+        if (!tp.insert(gb_rom[p], error)) {
+            std::lock_guard<std::mutex> lk(message_mutex_);
+            messages_.push_back("Transfer Pak (port " + std::to_string(p + 1) + "): " + error);
         }
     }
 
@@ -512,6 +536,7 @@ void EmuCore::run_one_frame(FrameClock& fc) {
     apply_memory_writes();
     auto t0 = Clock::now();
     emu_->step_frame();
+    for (int p = 0; p < 4; ++p) rumble_[p] = emu_->get_controller(p).rumble();
     emu_->render_frame(fc.frame);
     auto t1 = Clock::now();
     apply_memory_writes();
@@ -608,6 +633,7 @@ void EmuCore::thread_main() {
             }
             if (reset_req_) {
                 std::lock_guard<std::mutex> al(audio_mutex_);
+                emu_->set_expansion_pak(expansion_pak_);
                 emu_->reset();
                 audio_.flush();
                 reset_req_ = false;
@@ -642,6 +668,7 @@ void EmuCore::thread_main() {
 
         if (reset_req_) {
             std::lock_guard<std::mutex> al(audio_mutex_);
+            emu_->set_expansion_pak(expansion_pak_);
             emu_->reset();
             audio_.flush();
             reset_req_ = false;

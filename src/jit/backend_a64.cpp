@@ -74,6 +74,7 @@ struct Gen {
     const A64BlockEnv* env = nullptr;
     const u8* rdram = nullptr;
     size_t rdram_size = 0;
+    u32 ram_limit = RDRAM_SIZE; // Bus::get_ram_limit: the fastmem bound
     u32 start_paddr = 0;
     u32 code_end = 0;   // physical address the block may not reach into
     bool mapped = false; // reached through the TLB: see A64BlockEnv::mapped
@@ -336,7 +337,8 @@ size_t emit_mem_helper(Gen& g, const Decoded& d, bool is_store, const void* help
 // which is the physical address divided by the access size when the address
 // is in KSEG0 or KSEG1 and aligned; anything else (TLB-mapped segments, a
 // misaligned address - its low bits rotate into the top) makes it at least
-// RDRAM_SIZE >> log2(size), and the access takes the helper instead.
+// RDRAM_SIZE >> log2(size), and the access takes the helper instead. The
+// bound is the RDRAM the CPU sees (Bus::get_ram_limit), fixed per block.
 size_t emit_interp_slow(Gen& g, const Decoded& d, u32 site);
 
 // `helper` is the jit_load_*/jit_store_* slow path; null for the COP1 forms
@@ -381,7 +383,7 @@ void emit_load_store(Gen& g, const Decoded& d, u32 site, const void* helper) {
     a.eor_imm(1, 0, 0x80000000u, false);
     a.and_imm(1, 1, 0xDFFFFFFFu, false);
     if (k) a.ror_imm(1, 1, k, false);
-    a.cmp_imm(1, (RDRAM_SIZE >> k) >> 12, false, true);
+    a.cmp_imm(1, (g.ram_limit >> k) >> 12, false, true); // 4 or 8 MB (Bus::get_ram_limit)
     const size_t to_slow = a.bcond(HS);
 
     if (is_store) {
@@ -983,6 +985,7 @@ bool compilable(const Gen& g, const Decoded& d) {
     scratch.env = g.env;
     scratch.rdram = g.rdram;
     scratch.rdram_size = g.rdram_size;
+    scratch.ram_limit = g.ram_limit;
     scratch.hi_off = g.hi_off;
     scratch.lo_off = g.lo_off;
     scratch.fpr_off = g.fpr_off;
@@ -1192,6 +1195,7 @@ Recompiler::Block compile_block_a64(CPU& cpu, Bus& bus, u32 start_paddr, CodeBuf
     g.env = &env;
     g.rdram = bus.get_rdram();
     g.rdram_size = bus.get_rdram_size();
+    g.ram_limit = bus.get_ram_limit();
     g.start_paddr = start_paddr;
     g.mapped = env.mapped;
     g.code_end = env.mapped ? std::min<u32>((start_paddr & ~0xFFFu) + 0x1000, static_cast<u32>(g.rdram_size))

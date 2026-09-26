@@ -31,7 +31,12 @@ struct PortConfig {
     std::array<int, kN64InputCount> pad{};   // see encoding above
     float deadzone = 0.15f;
     float sensitivity = 1.0f;  // analog scale, 1.0 = full N64 range (±80)
-    int pak = 0;               // 0 None, 1 Controller Pak, 2 Rumble Pak (display only)
+    // Accessory slot: 0 None, 1 Controller Pak (saved as <rom>.mpk, or
+    // <rom>.pN.mpk for port N > 1), 2 Rumble Pak (vibrates the gamepad),
+    // 3 Transfer Pak (holds the Game Boy ROM `gb_rom`).
+    int pak = 0;
+    int rumble_strength = 100; // 0..100 %
+    std::string gb_rom;        // UTF-8 path, "" = no cartridge
 };
 
 struct Settings {
@@ -78,6 +83,7 @@ struct Settings {
     int ucode_override = 0;  // 0 = Auto, then MicrocodeType order
     int ff_speed = 3;        // fast-forward multiplier (0 = unlimited)
     bool limit_speed = true;
+    bool expansion_pak = true; // 8 MB RDRAM; off = 4 MB (applies at the next start / reset)
     bool autosave_backup = true;
     int fps_limit = 0;       // 0 = console default (VI rate), >0 = locked FPS
     int render_scale = 1;    // 1 = native, 2..8 = integer scale, 0 = custom size

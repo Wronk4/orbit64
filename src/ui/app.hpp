@@ -72,6 +72,9 @@ private:
     // ---- actions (app.cpp)
     void action_open_rom();
     void action_add_folder();
+    // Transfer Pak: picks the Game Boy ROM for a port.
+    void action_choose_gb_rom(int port);
+    void on_gb_rom_picked(const std::filesystem::path& rom);
     void launch(const std::filesystem::path& rom);
     void request_stop(std::function<void()> then = nullptr);
     void stop_now();
@@ -271,6 +274,8 @@ private:
     bool settings_open_ = false;
     SettingsPage settings_page_ = SettingsPage::General;
     int settings_port_ = 0;
+    int gb_pick_port_ = 0; // port whose Game Boy ROM the file picker chooses
+    int ui_test_pak_ = 3; // UI walkthrough: port 2's accessory while it shows the Transfer Pak
     bool about_open_ = false;
     bool props_open_ = false;
     std::string props_key_;

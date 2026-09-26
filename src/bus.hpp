@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.hpp"
+#include <algorithm>
 #include <vector>
 #include <array>
 
@@ -68,6 +69,12 @@ public:
     u8* get_rdram() { return rdram.data(); }
     const u8* get_rdram() const { return rdram.data(); }
     size_t get_rdram_size() const { return rdram.size(); }
+    // The RDRAM the CPU sees: 8 MB with the Expansion Pak, 4 MB without.
+    // Above it the CPU reads zeros and its writes go nowhere, which is how
+    // libultra's osGetMemSize() finds out. The buffer itself stays 8 MB.
+    // The JIT compiles this into its blocks: flush it after a change.
+    void set_ram_limit(u32 bytes) { ram_limit_ = std::min<u32>(bytes, RDRAM_SIZE); }
+    u32 get_ram_limit() const { return ram_limit_; }
 
     MI& get_mi() { return mi; }
     const MI& get_mi() const { return mi; }
@@ -98,6 +105,7 @@ private:
     RDP& rdp;
 
     std::vector<u8> rdram;
+    u32 ram_limit_{RDRAM_SIZE};
     std::array<TLBEntry, 32> tlb_entries{};
     u32 tlb_gen_ = 0;
 

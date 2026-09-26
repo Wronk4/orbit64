@@ -105,7 +105,7 @@ void PIF::process_commands(Controller controllers[4], Cartridge& cartridge) {
                         if (idx + tx_len + 2 < 64) {
                             ram[idx + tx_len + 0] = 0x05; // Standard controller
                             ram[idx + tx_len + 1] = 0x00;
-                            ram[idx + tx_len + 2] = channel == 0 ? 0x01 : 0x02; // Controller Pak in (port 1) / none
+                            ram[idx + tx_len + 2] = ctrl.accessory() != Accessory::None ? 0x01 : 0x02; // accessory in / none
                         }
                     } else if (sub_cmd == 0x01) {
                         // Read controller status
@@ -117,26 +117,42 @@ void PIF::process_commands(Controller controllers[4], Cartridge& cartridge) {
                             ram[idx + tx_len + 3] = static_cast<u8>(ctrl.get_stick_y());
                         }
                     } else if (sub_cmd == 0x02) {
-                        // Read Controller Pak: 32 bytes + their CRC. Only
-                        // controller 1 has one; above 0x8000 (accessories
-                        // like the Rumble Pak) a memory card reads zeros.
+                        // Read accessory: 32 bytes + their CRC. A Controller
+                        // Pak maps its 32 KB below 0x8000; a Rumble Pak
+                        // answers 0x80 at 0x8000-0x8FFF, which is how
+                        // libultra's osMotorInit tells it apart; a Transfer
+                        // Pak has its own map (transfer_pak.cpp). Everything
+                        // else reads zeros.
                         if (idx + tx_len + 33 <= 64 && tx_len >= 3) {
                             const u32 addr = ((ram[idx + 1] << 8) | ram[idx + 2]) & 0xFFE0;
                             u8* out = &ram[idx + tx_len];
-                            if (channel == 0 && addr < 0x8000) std::copy_n(cartridge.mempak_data() + addr, 32, out);
+                            const Accessory acc = ctrl.accessory();
+                            if (acc == Accessory::ControllerPak && addr < 0x8000)
+                                std::copy_n(cartridge.mempak_data(channel) + addr, 32, out);
+                            else if (acc == Accessory::TransferPak)
+                                ctrl.transfer_pak().read(static_cast<u16>(addr), out);
+                            else if (acc == Accessory::RumblePak && addr >= 0x8000 && addr < 0x9000)
+                                std::fill_n(out, 32, 0x80);
                             else std::fill_n(out, 32, 0x00);
-                            out[32] = pak_crc(out);
+                            out[32] = acc == Accessory::None ? static_cast<u8>(~pak_crc(out)) : pak_crc(out);
                         }
                     } else if (sub_cmd == 0x03) {
-                        // Write Controller Pak: answers with the data's CRC.
+                        // Write accessory: answers with the data's CRC. A
+                        // Rumble Pak's motor follows writes to 0xC000-0xCFFF
+                        // (osMotorStart/Stop write 32 x 0x01 / 0x00).
                         if (idx + tx_len + 1 <= 64 && tx_len >= 35) {
                             const u32 addr = ((ram[idx + 1] << 8) | ram[idx + 2]) & 0xFFE0;
                             const u8* in = &ram[idx + 3];
-                            if (channel == 0 && addr < 0x8000) {
-                                std::copy_n(in, 32, cartridge.mempak_data() + addr);
-                                cartridge.mempak_written();
+                            const Accessory acc = ctrl.accessory();
+                            if (acc == Accessory::ControllerPak && addr < 0x8000) {
+                                std::copy_n(in, 32, cartridge.mempak_data(channel) + addr);
+                                cartridge.mempak_written(channel);
+                            } else if (acc == Accessory::TransferPak) {
+                                ctrl.transfer_pak().write(static_cast<u16>(addr), in);
+                            } else if (acc == Accessory::RumblePak && addr >= 0xC000) {
+                                ctrl.set_rumble(in[31] != 0);
                             }
-                            ram[idx + tx_len] = pak_crc(in);
+                            ram[idx + tx_len] = acc == Accessory::None ? static_cast<u8>(~pak_crc(in)) : pak_crc(in);
                         }
                     }
                 } else {

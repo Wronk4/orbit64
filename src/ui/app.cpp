@@ -137,6 +137,7 @@ bool App::init() {
     browser_.on_native_requested = [this](FileBrowser::Mode m) {
         native_mode_ = m;
         native_job_ = std::async(std::launch::async, [m]() {
+            if (m == FileBrowser::Mode::OpenGbRom) return platform::native_open_file("Choose Game Boy ROM", {"gb", "gbc"});
             return m == FileBrowser::Mode::OpenRom ? platform::native_open_file("Open Nintendo 64 ROM", {"z64", "n64", "v64"})
                                                    : platform::native_pick_folder("Choose ROM Folder");
         });
@@ -357,6 +358,7 @@ void App::main_loop() {
         update_audio_volume();
         debug_update();
         poll_state_events();
+        for (std::string msg; core_.poll_message(msg);) toast(msg, ToastKind::Error);
 
         // Native file dialog finished?
         if (native_job_ && native_job_->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -364,6 +366,7 @@ void App::main_loop() {
             native_job_.reset();
             if (res && !res->empty()) {
                 if (native_mode_ == FileBrowser::Mode::OpenRom) launch(*res);
+                else if (native_mode_ == FileBrowser::Mode::OpenGbRom) on_gb_rom_picked(*res);
                 else on_folder_picked(*res);
             }
             SDL_RaiseWindow(window_);
@@ -585,6 +588,10 @@ void App::update_input() {
         ControllerSnapshot s = input_.poll(settings_.ports[p], keyboard_to_game);
         if (p == 0 && test_input_) s.buttons |= test_input_(core_.stats().frame);
         core_.set_input(p, s);
+        // Rumble Pak: the game's motor drives the gamepad while it runs.
+        const PortConfig& pc = settings_.ports[p];
+        const bool motor = pc.pak == 2 && core_.state() == RunState::Running && core_.rumble(p);
+        input_.rumble(p, pc, motor ? pc.rumble_strength / 100.0f : 0.0f);
     }
 
     // Fast-forward while Tab is held (only when the game has keyboard focus).
@@ -594,6 +601,7 @@ void App::update_input() {
     core_.set_limit_speed(settings_.limit_speed);
     core_.set_fps_limit(settings_.fps_limit);
     core_.set_internal_scale(settings_.internal_scale);
+    core_.set_expansion_pak(settings_.expansion_pak);
 }
 
 void App::update_game_texture() {
@@ -728,6 +736,26 @@ void App::action_choose_boxart_folder() {
     for (const auto& d : settings_.rom_dirs) browser_.library_dirs.push_back(platform::utf8_to_path(d));
     browser_.open(FileBrowser::Mode::PickFolder,
                   settings_.rom_dirs.empty() ? platform::home_dir() : platform::utf8_to_path(settings_.rom_dirs.front()));
+}
+
+void App::action_choose_gb_rom(int port) {
+    if (native_job_) return;
+    gb_pick_port_ = port;
+    if (settings_.use_native_dialogs && browser_.native_available) {
+        browser_.on_native_requested(FileBrowser::Mode::OpenGbRom);
+        return;
+    }
+    const std::string& cur = settings_.ports[port].gb_rom;
+    browser_.library_dirs.clear();
+    for (const auto& d : settings_.rom_dirs) browser_.library_dirs.push_back(platform::utf8_to_path(d));
+    browser_.open(FileBrowser::Mode::OpenGbRom, !cur.empty() ? platform::utf8_to_path(cur).parent_path()
+                                              : settings_.rom_dirs.empty() ? platform::home_dir()
+                                                                           : platform::utf8_to_path(settings_.rom_dirs.front()));
+}
+
+void App::on_gb_rom_picked(const fs::path& rom) {
+    settings_.ports[gb_pick_port_ & 3].gb_rom = platform::path_to_utf8(rom);
+    save_settings();
 }
 
 void App::action_add_folder() {

@@ -34,6 +34,7 @@ void App::draw_picker_dialogs() {
     picker_drawn_ = true;
     if (browser_.draw()) {
         if (browser_.mode() == FileBrowser::Mode::OpenRom) pending_launch_ = browser_.result();
+        else if (browser_.mode() == FileBrowser::Mode::OpenGbRom) on_gb_rom_picked(browser_.result());
         else on_folder_picked(browser_.result());
     }
     draw_native_wait();
@@ -293,7 +294,7 @@ void App::draw_native_wait() {
         ImGui::PopFont();
         ImGui::PushFont(g_fonts.small);
         ImGui::TextColored(g_pal.text_dim, "Choose a %s in the system window.",
-                           native_mode_ == FileBrowser::Mode::OpenRom ? "ROM" : "folder");
+                           native_mode_ == FileBrowser::Mode::PickFolder ? "folder" : "ROM");
         ImGui::PopFont();
         ImGui::EndGroup();
         ImGui::EndPopup();

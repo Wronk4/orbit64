@@ -60,6 +60,11 @@ public:
         return controllers[index & 3];
     }
 
+    // Expansion Pak (the 4 MB RDRAM upgrade): without it the game is told it
+    // has 4 MB. Takes effect at the next reset().
+    void set_expansion_pak(bool on) { expansion_pak_ = on; }
+    bool expansion_pak() const { return expansion_pak_; }
+
     Cartridge& get_cartridge() { return cart; }
     CPU& get_cpu() { return cpu; }
     Recompiler& get_jit() { return jit; }
@@ -78,6 +83,7 @@ private:
     Cartridge cart;
     PIF pif;
     Controller controllers[4];
+    bool expansion_pak_{true};
     MI mi;
     VI vi;
     AI ai;

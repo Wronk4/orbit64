@@ -149,7 +149,7 @@ void FileBrowser::refresh() {
         std::error_code ec2;
         e.dir = de.is_directory(ec2);
         if (!e.dir) {
-            e.rom = is_rom_extension(e.path);
+            e.rom = mode_ == Mode::OpenGbRom ? is_gb_rom_extension(e.path) : is_rom_extension(e.path);
             e.size = de.file_size(ec2);
         }
         auto ft = de.last_write_time(ec2);
@@ -170,7 +170,7 @@ void FileBrowser::select(const std::string& file_name) {
         if (entries_[i].name == file_name) {
             selected_ = static_cast<int>(i);
             scroll_to_selected_ = true;
-            if (entries_[i].rom) preview_ = inspect_rom(entries_[i].path);
+            if (entries_[i].rom && mode_ == Mode::OpenRom) preview_ = inspect_rom(entries_[i].path);
         }
     }
 }
@@ -195,8 +195,8 @@ bool FileBrowser::confirm(const Entry* e) {
 
 bool FileBrowser::draw() {
     confirmed_ = false;
-    const char* title = mode_ == Mode::OpenRom ? "Open ROM" : "Choose Folder";
-    if (!begin_modal("##file_browser", title, dp(1040, 660), &open_, mode_ == Mode::OpenRom ? Icon::Chip : Icon::Folder))
+    const char* title = mode_ == Mode::OpenRom ? "Open ROM" : mode_ == Mode::OpenGbRom ? "Choose Game Boy ROM" : "Choose Folder";
+    if (!begin_modal("##file_browser", title, dp(1040, 660), &open_, mode_ == Mode::PickFolder ? Icon::Folder : Icon::Chip))
         return false;
 
     ImVec2 ws = ImGui::GetWindowSize();
@@ -233,6 +233,7 @@ bool FileBrowser::draw() {
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + dp(8));
     ImGui::PushFont(g_fonts.small);
     if (mode_ == Mode::OpenRom) ImGui::TextColored(g_pal.text_faint, "%d ROM%s in this folder", roms, roms == 1 ? "" : "s");
+    else if (mode_ == Mode::OpenGbRom) ImGui::TextColored(g_pal.text_faint, "%d Game Boy ROM%s in this folder \xC2\xB7 its save is the .sav next to it", roms, roms == 1 ? "" : "s");
     else ImGui::TextColored(g_pal.text_faint, "Folders containing ROMs are scanned recursively");
     ImGui::PopFont();
     modal_footer_end();
@@ -283,7 +284,7 @@ void FileBrowser::draw_toolbar(float width) {
     if (icon_button("up", Icon::ArrowUp, bs, "Parent folder", false, has_parent)) navigate(cwd_.parent_path());
     ImGui::SameLine(0, dp(10));
 
-    float right_w = mode_ == Mode::OpenRom ? dp(200) + dp(130) : dp(200);
+    float right_w = mode_ != Mode::PickFolder ? dp(200) + dp(130) : dp(200);
     float crumb_x = ImGui::GetCursorScreenPos().x;
     float crumb_w = width - (crumb_x - p0.x) - right_w - dp(28);
 
@@ -372,7 +373,7 @@ void FileBrowser::draw_toolbar(float width) {
     float rx = p0.x + width - dp(16) - right_w;
     ImGui::SetCursorScreenPos(ImVec2(rx, y - dp(1)));
     search_field("filter", filter_, sizeof filter_, "Filter", dp(200));
-    if (mode_ == Mode::OpenRom) {
+    if (mode_ != Mode::PickFolder) {
         ImGui::SetCursorScreenPos(ImVec2(rx + dp(214), y + dp(4)));
         toggle("allfiles", &show_all_);
         ImGui::SameLine(0, dp(8));
@@ -445,7 +446,7 @@ void FileBrowser::draw_list(float width, float height) {
     for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
         const Entry& e = entries_[i];
         if (mode_ == Mode::PickFolder && !e.dir) continue;
-        if (mode_ == Mode::OpenRom && !e.dir && !e.rom && !show_all_) continue;
+        if (mode_ != Mode::PickFolder && !e.dir && !e.rom && !show_all_) continue;
         if (!filt.empty()) {
             std::string n = e.name;
             std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -481,7 +482,7 @@ void FileBrowser::draw_list(float width, float height) {
         ImVec2 p = ImGui::GetCursorScreenPos();
         draw_icon(ImGui::GetWindowDrawList(), Icon::Folder, ImVec2(p.x + width * 0.5f - dp(8), p.y + dp(16)), dp(34), col(g_pal.text_faint));
         ImGui::Dummy(dp(0, 44));
-        const char* msg = mode_ == Mode::OpenRom ? "No ROMs or folders here" : "No sub-folders here";
+        const char* msg = mode_ != Mode::PickFolder ? "No ROMs or folders here" : "No sub-folders here";
         float tw = ImGui::CalcTextSize(msg).x;
         ImGui::SetCursorPosX((width - tw) * 0.5f);
         ImGui::TextColored(g_pal.text_dim, "%s", msg);
@@ -515,14 +516,14 @@ void FileBrowser::draw_list(float width, float height) {
                 if (ImGui::Selectable("##row", sel, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick,
                                       ImVec2(0, dp(32)))) {
                     selected_ = i;
-                    if (e.rom) preview_ = inspect_rom(e.path);
+                    if (e.rom && mode_ == Mode::OpenRom) preview_ = inspect_rom(e.path);
                     // Deferred: confirming a folder rebuilds entries_ while this loop still uses them.
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) pending_confirm_ = i;
                 }
                 if (sel && scroll_to_selected_) {
                     ImGui::SetScrollHereY();
                     scroll_to_selected_ = false;
-                    if (e.rom && preview_.path != e.path) preview_ = inspect_rom(e.path);
+                    if (e.rom && mode_ == Mode::OpenRom && preview_.path != e.path) preview_ = inspect_rom(e.path);
                 }
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 Icon ic = e.dir ? Icon::Folder : (e.rom ? Icon::Chip : Icon::File);

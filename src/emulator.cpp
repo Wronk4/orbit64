@@ -6,6 +6,8 @@
 Emulator::Emulator()
     : bus(cart, pif, controllers, mi, vi, ai, pi, si, rsp, rdp),
       cpu(bus) {
+    // Controller 1 has a Controller Pak unless the front end says otherwise.
+    controllers[0].set_accessory(Accessory::ControllerPak);
 }
 
 Emulator::~Emulator() {
@@ -23,6 +25,7 @@ bool Emulator::load_rom(const std::string& rom_path) {
 
 void Emulator::reset() {
     bus.reset();
+    bus.set_ram_limit(expansion_pak_ ? RDRAM_SIZE : 0x400000u);
     mi.reset();
     vi.reset();
     ai.reset();
@@ -75,11 +78,13 @@ void Emulator::reset() {
     write_u32(0x30C, 0);          // osResetType
     write_u32(0x310, cart.get_cic_id());   // osCicId (e.g. 6105 = 0x17D9)
     write_u32(0x314, 0);          // osVersion
-    write_u32(0x318, bus.get_rdram_size()); // osMemSize (8MB = 0x00800000)
+    // osMemSize: 8 MB with the Expansion Pak, 4 MB without.
+    const u32 mem_size = bus.get_ram_limit();
+    write_u32(0x318, mem_size);
     if (cart.get_cic_type() == CICType::CIC_6105) {
         // 6105's IPL3 stores the memory size at 0x3F0 instead, and leaves a
         // few instructions at the start of SP IMEM that its games check.
-        write_u32(0x3F0, bus.get_rdram_size());
+        write_u32(0x3F0, mem_size);
         static const u32 imem_words[] = {0x3C0DBFC0, 0x8DA807FC, 0x25AD07C0, 0x31080080,
                                          0x5500FFFC, 0x3C0DBFC0, 0x8DA80024, 0x3C0BB000};
         u8* imem = rsp.get_imem();
@@ -267,6 +272,24 @@ template <class S> void Emulator::serialize(S& s) {
     section("RSP ", rsp);
     section("RDP ", rdp);
     section("CART", cart);
+    // Added after state version 6 was out, at the end, so its states (which
+    // stop here: 8 MB, one Controller Pak) still load. The RDRAM size belongs
+    // to the machine in the state, not to the current setting.
+    u32 ram_limit = bus.get_ram_limit();
+    if constexpr (S::loading) {
+        ram_limit = RDRAM_SIZE;
+        if (s.at_end()) {
+            bus.set_ram_limit(ram_limit);
+            return;
+        }
+    }
+    // Accessories: controllers 2-4's Controller Paks, the Transfer Paks.
+    s.begin_section("PAKS");
+    s(ram_limit);
+    cart.serialize_extra_paks(s);
+    for (auto& c : controllers) c.transfer_pak().serialize(s);
+    s.end_section();
+    if constexpr (S::loading) bus.set_ram_limit(ram_limit == 0x400000u ? ram_limit : RDRAM_SIZE);
 }
 
 std::vector<u8> Emulator::save_state() {

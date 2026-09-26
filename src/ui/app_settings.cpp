@@ -541,6 +541,41 @@ void App::settings_controller() {
     }
     row_end();
 
+    row_begin("Accessory", "Controller Pak: game saves, kept in a .mpk file next to the ROM. Rumble Pak: vibrates your gamepad. "
+              "Transfer Pak: a Game Boy cartridge (Pok\xC3\xA9mon Stadium, Mario Golf...). Games check the slot when they start.", cw);
+    {
+        const char* items[] = {"None", "Controller Pak", "Rumble Pak", "Transfer Pak"};
+        combo("pak", &pc.pak, items, 4, cw);
+    }
+    row_end();
+
+    if (pc.pak == 3) {
+        row_begin("Game Boy cartridge", pc.gb_rom.empty() ? "Choose a .gb or .gbc ROM. Its save is the .sav file next to it, shared with Game Boy emulators."
+                                                          : pc.gb_rom.c_str(), cw);
+        std::string name = pc.gb_rom.empty() ? "Choose ROM\xE2\x80\xA6" : platform::path_to_utf8(platform::utf8_to_path(pc.gb_rom).filename());
+        const float eject_w = pc.gb_rom.empty() ? 0.0f : dp(34) + dp(8);
+        if (button(name.c_str(), Icon::FolderOpen, ButtonKind::Subtle, cw - eject_w)) action_choose_gb_rom(settings_port_);
+        if (!pc.gb_rom.empty()) {
+            ImGui::SameLine(0, dp(8));
+            if (icon_button("eject", Icon::Close, dp(34), "Remove the cartridge")) pc.gb_rom.clear();
+        }
+        row_end();
+    }
+
+    if (pc.pak == 2) {
+        const bool can = input_.can_rumble(pc.device);
+        const bool connected = pc.device > 0 && pc.device <= static_cast<int>(input_.gamepads().size());
+        row_begin("Rumble strength", can ? nullptr
+                  : pc.device == 0 ? "Select a gamepad as the input device to feel the Rumble Pak."
+                  : !connected     ? "Connect the gamepad to feel the Rumble Pak."
+                                   : "This gamepad doesn't report vibration support.", cw);
+        slider_int("rumble", &pc.rumble_strength, 0, 100, "%d%%", cw * 0.62f);
+        ImGui::SameLine(0, dp(8));
+        if (button("Test", Icon::Play, ButtonKind::Subtle, cw * 0.38f - dp(8), can && pc.rumble_strength > 0))
+            input_.test_rumble(pc);
+        row_end();
+    }
+
     ImGui::BeginDisabled(!pc.plugged);
     const bool keyboard = pc.device == 0;
     float avail = ImGui::GetContentRegionAvail().x;
@@ -663,6 +698,11 @@ void App::settings_emulation() {
             core_.set_cpu_core(settings_.cpu_core);
         }
     }
+    row_end();
+
+    row_begin("Expansion Pak", "The 4 MB memory upgrade (8 MB in total). Some games need it (Majora's Mask, Donkey Kong 64, Perfect Dark's campaign) "
+              "and others use it for a high-resolution mode. Applies when a game starts or is reset.", cw);
+    if (toggle("expak", &settings_.expansion_pak) && core_.loaded()) toast("Reset the game to apply", ToastKind::Info);
     row_end();
 
     row_begin("Graphics microcode", "Auto-detect works for nearly every game. Override only if a game renders incorrectly.", cw);

@@ -2,6 +2,7 @@
 #include "platform.hpp"
 
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -50,7 +51,7 @@ void Settings::reset_audio() {
 void Settings::reset_emulation() {
     Settings d;
     cpu_core = d.cpu_core; ucode_override = d.ucode_override; ff_speed = d.ff_speed; limit_speed = d.limit_speed;
-    autosave_backup = d.autosave_backup; fps_limit = d.fps_limit;
+    autosave_backup = d.autosave_backup; fps_limit = d.fps_limit; expansion_pak = d.expansion_pak;
 }
 
 void Settings::reset_port(int port) {
@@ -58,6 +59,7 @@ void Settings::reset_port(int port) {
     p = PortConfig{};
     p.plugged = (port == 0);
     p.device = (port == 0) ? 0 : port; // port 1 -> keyboard, others -> gamepads
+    p.pak = (port == 0) ? 1 : 0;       // Controller Pak in port 1
     p.keys.fill(SDL_SCANCODE_UNKNOWN);
     p.pad.fill(-1);
     if (port == 0) {
@@ -165,7 +167,7 @@ bool Settings::save(const std::string& path) const {
     w.section("emulation");
     w.kv("cpu_core", cpu_core);
     w.kv("ucode", ucode_override); w.kv("ff_speed", ff_speed); w.kv("limit_speed", limit_speed);
-    w.kv("autosave", autosave_backup);
+    w.kv("autosave", autosave_backup); w.kv("expansion_pak", expansion_pak);
     w.kv("fps_limit", fps_limit); w.kv("render_scale", render_scale);
     w.kv("render_w", render_w); w.kv("render_h", render_h);
 
@@ -174,7 +176,7 @@ bool Settings::save(const std::string& path) const {
         w.section(s.c_str());
         const PortConfig& p = ports[i];
         w.kv("plugged", p.plugged); w.kv("device", p.device); w.kv("deadzone", p.deadzone);
-        w.kv("sensitivity", p.sensitivity); w.kv("pak", p.pak);
+        w.kv("sensitivity", p.sensitivity); w.kv("accessory", p.pak); w.kv("rumble_strength", p.rumble_strength); w.kv("gb_rom", p.gb_rom);
         for (int k = 0; k < kN64InputCount; ++k) {
             w.kv(std::string("key_") + kInputIds[k], p.keys[k]);
             w.kv(std::string("pad_") + kInputIds[k], p.pad[k]);
@@ -234,7 +236,7 @@ bool Settings::load(const std::string& path) {
     r.sec = "emulation";
     r.get("cpu_core", cpu_core);
     r.get("ucode", ucode_override); r.get("ff_speed", ff_speed); r.get("limit_speed", limit_speed);
-    r.get("autosave", autosave_backup);
+    r.get("autosave", autosave_backup); r.get("expansion_pak", expansion_pak);
     r.get("fps_limit", fps_limit); r.get("render_scale", render_scale);
     r.get("render_w", render_w); r.get("render_h", render_h);
 
@@ -242,7 +244,9 @@ bool Settings::load(const std::string& path) {
         r.sec = "port" + std::to_string(i + 1);
         PortConfig& p = ports[i];
         r.get("plugged", p.plugged); r.get("device", p.device); r.get("deadzone", p.deadzone);
-        r.get("sensitivity", p.sensitivity); r.get("pak", p.pak);
+        r.get("sensitivity", p.sensitivity); r.get("accessory", p.pak); r.get("rumble_strength", p.rumble_strength); r.get("gb_rom", p.gb_rom);
+        if (p.pak < 0 || p.pak > 3) p.pak = 0;
+        p.rumble_strength = std::clamp(p.rumble_strength, 0, 100);
         for (int k = 0; k < kN64InputCount; ++k) {
             r.get((std::string("key_") + kInputIds[k]).c_str(), p.keys[k]);
             r.get((std::string("pad_") + kInputIds[k]).c_str(), p.pad[k]);

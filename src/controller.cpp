@@ -9,6 +9,8 @@ void Controller::reset() {
     stick_x = 0;
     stick_y = 0;
     plugged_in = true;
+    rumble_ = false;
+    tpak_.reset();
 }
 
 void Controller::set_button(u16 button, bool pressed) {

@@ -34,6 +34,12 @@ bool is_rom_extension(const fs::path& p) {
     return ext == ".z64" || ext == ".n64" || ext == ".v64";
 }
 
+bool is_gb_rom_extension(const fs::path& p) {
+    std::string ext = platform::path_to_utf8(p.extension());
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+    return ext == ".gb" || ext == ".gbc";
+}
+
 static std::string trim(std::string s) {
     auto ns = [](unsigned char c) { return !std::isspace(c); };
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), ns));

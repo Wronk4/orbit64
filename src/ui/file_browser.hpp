@@ -1,5 +1,5 @@
 #pragma once
-// Built-in ROM / folder picker.
+// Built-in ROM / folder picker (also Game Boy ROMs for the Transfer Pak).
 //
 // Works identically on every OS through std::filesystem, so the app never
 // depends on a native dialog being present (e.g. minimal Linux setups
@@ -19,7 +19,8 @@ namespace ui {
 
 class FileBrowser {
 public:
-    enum class Mode { OpenRom, PickFolder };
+    // OpenGbRom: a Game Boy ROM for a Transfer Pak.
+    enum class Mode { OpenRom, PickFolder, OpenGbRom };
 
     void open(Mode mode, const std::filesystem::path& start_dir);
     bool is_open() const { return open_; }

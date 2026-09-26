@@ -86,6 +86,8 @@ struct ControllerSnapshot {
     std::uint16_t buttons = 0;
     std::int8_t stick_x = 0, stick_y = 0;
     bool plugged = false;
+    int pak = 0; // PortConfig::pak
+    std::string gb_rom; // Transfer Pak: the Game Boy ROM in it ("" = none)
 };
 
 struct CoreStats {
@@ -161,6 +163,14 @@ public:
     void set_texture_target(std::uint32_t vtx_phys) { texture_target_ = vtx_phys; }
 
     void set_input(int port, const ControllerSnapshot& s);
+    // Expansion Pak: 8 MB of RDRAM instead of 4. Applied when the game
+    // starts or is reset.
+    void set_expansion_pak(bool on) { expansion_pak_ = on; }
+    // Problems the UI should show (e.g. a Game Boy ROM the Transfer Pak
+    // can't use), oldest first.
+    bool poll_message(std::string& msg);
+    // Whether the game has the port's Rumble Pak motor running.
+    bool rumble(int port) const { return rumble_[port & 3].load(std::memory_order_relaxed); }
 
     // ---- Save states
     // Saves the machine after the current frame / loads one before the next
@@ -259,6 +269,10 @@ private:
 
     std::mutex input_mutex_;
     ControllerSnapshot input_[4];
+    std::atomic<bool> rumble_[4] = {};
+    std::atomic<bool> expansion_pak_{true};
+    std::mutex message_mutex_;
+    std::vector<std::string> messages_;
 
     std::mutex frame_mutex_;
     VideoFrame frame_;

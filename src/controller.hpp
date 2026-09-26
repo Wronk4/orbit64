@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.hpp"
+#include "transfer_pak.hpp"
 #include <string>
 
 namespace Button {
@@ -20,6 +21,9 @@ namespace Button {
     constexpr u16 C_RIGHT  = 0x0001;
 }
 
+// What is plugged into the controller's accessory slot.
+enum class Accessory : u8 { None, ControllerPak, RumblePak, TransferPak };
+
 class Controller {
 public:
     Controller();
@@ -36,6 +40,14 @@ public:
     bool is_plugged_in() const { return plugged_in; }
     void set_plugged_in(bool plug) { plugged_in = plug; }
 
+    Accessory accessory() const { return accessory_; }
+    void set_accessory(Accessory a) { accessory_ = a; if (a != Accessory::RumblePak) rumble_ = false; }
+    // Rumble Pak motor, switched by the game through the accessory slot.
+    bool rumble() const { return rumble_; }
+    void set_rumble(bool on) { rumble_ = on; }
+    // The Transfer Pak and its Game Boy cartridge (used while accessory() is TransferPak).
+    TransferPak& transfer_pak() { return tpak_; }
+
     // Helper for command string input (e.g. "start", "a", "b", "up", etc.)
     void press_named_button(const std::string& name, bool pressed);
 
@@ -44,4 +56,7 @@ private:
     s8 stick_x{0};
     s8 stick_y{0};
     bool plugged_in{true};
+    Accessory accessory_{Accessory::None};
+    bool rumble_{false};
+    TransferPak tpak_;
 };

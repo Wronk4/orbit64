@@ -645,7 +645,10 @@ void emit_store(Assembler& x, const Decoded& d, void* fn, u32 site, std::vector<
 // compiled code does exactly that itself; anything else - TLB-mapped, MMIO,
 // cartridge, unaligned - takes the helper call as before.
 static_assert(RDRAM_SIZE == 0x800000, "fastmem masks assume 8 MB of RDRAM");
-constexpr u32 kFastmemMask = 0xDF800000u; // bit 31, 30, 28..23: KSEG0/KSEG1 (bit 29 free) within 8 MB
+// Bits 31, 30 and 28 down to log2(RDRAM the CPU sees): KSEG0/KSEG1 (bit 29
+// free) within 8 MB (0xDF800000), or 4 MB without the Expansion Pak. Set per
+// block from Bus::get_ram_limit (compile_block_x64).
+u32 g_fastmem_mask = 0xDF800000u;
 
 // RAX = guest address rs + simm; ECX = its RDRAM offset. Returns the Jcc to
 // the slow path, taken when the fast path doesn't apply.
@@ -653,7 +656,7 @@ size_t emit_fastmem_address(Assembler& x, const Decoded& d, u32 size) {
     x.load_mem64(RAX, R_GPR, d.rs * 8);
     x.add_ri(true, RAX, static_cast<u32>(d.simm));
     x.mov_reg_reg32(RCX, RAX);
-    x.and_ri(false, RCX, kFastmemMask | (size - 1));
+    x.and_ri(false, RCX, g_fastmem_mask | (size - 1));
     x.cmp_ri(false, RCX, 0x80000000u);
     const size_t slow = x.jcc_rel32(Cc::NE);
     x.mov_reg_reg32(RCX, RAX);
@@ -1479,6 +1482,7 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
                                      : bus.get_rdram_size();
     const u8* rdram = bus.get_rdram();
     const u32 max_len = delay_slot ? 1 : kMaxBlockLen;
+    g_fastmem_mask = 0xDFFFFFFFu & ~(bus.get_ram_limit() - 1);
 
     Assembler x;
     emit_prologue(x);

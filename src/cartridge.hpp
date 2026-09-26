@@ -40,10 +40,12 @@ public:
     u8 read_sram(u32 addr) const;
     void write_sram(u32 addr, u8 val);
 
-    // Controller Pak (32 KB memory card) in controller 1, kept next to the
-    // ROM as <name>.mpk; a new one starts out formatted and empty.
-    u8* mempak_data() { return mempak.data(); }
-    void mempak_written() { mempak_dirty = true; }
+    // Controller Paks (32 KB memory cards), one per controller, kept next
+    // to the ROM as <name>.mpk (controller 1) and <name>.p2.mpk ..
+    // <name>.p4.mpk; a new one starts out formatted and empty and is only
+    // written once the game saves something to it.
+    u8* mempak_data(int port) { return mempaks[port & 3].data(); }
+    void mempak_written(int port) { mempak_dirty[port & 3] = true; }
 
     // Cartridge domain 2 (0x08000000): SRAM, or FlashRAM and its command
     // interface. `off` is relative to 0x08000000.
@@ -83,9 +85,23 @@ public:
         s.fixed(sram);
         s.fixed(eeprom);
         s(flash_mode, flash_status, flash_erase_offset, flash_erase_chip, flash_buf);
-        s.fixed(mempak);
-        if constexpr (S::loading) mempak_dirty = true;
+        s.fixed(mempaks[0]);
+        if constexpr (S::loading) mempak_dirty[0] = true;
         if constexpr (S::loading) sram_dirty = eeprom_dirty = true;
+    }
+    // Controllers 2-4's paks, a section added after the rest (Emulator::serialize).
+    template <class S> void serialize_extra_paks(S& s) {
+        for (int i = 1; i < 4; ++i) {
+            if constexpr (S::loading) {
+                // Only a pak the state changes is written back, so unused
+                // ports don't leave .pN.mpk files behind.
+                const std::vector<u8> before = mempaks[i];
+                s.fixed(mempaks[i]);
+                if (mempaks[i] != before) mempak_dirty[i] = true;
+            } else {
+                s.fixed(mempaks[i]);
+            }
+        }
     }
 
 private:
@@ -96,9 +112,10 @@ private:
     std::vector<u8> eeprom;
     bool sram_dirty{false};
     bool eeprom_dirty{false};
-    std::vector<u8> mempak = std::vector<u8>(0x8000);
-    bool mempak_dirty{false};
-    std::string mempak_filepath;
+    std::array<std::vector<u8>, 4> mempaks{std::vector<u8>(0x8000), std::vector<u8>(0x8000),
+                                           std::vector<u8>(0x8000), std::vector<u8>(0x8000)};
+    std::array<bool, 4> mempak_dirty{};
+    std::array<std::string, 4> mempak_filepath;
 
     // FlashRAM (128 KB, kept in `sram`): the libultra osFlash* protocol.
     enum FlashMode : u8 { FLASH_READ_ARRAY, FLASH_STATUS, FLASH_ID, FLASH_WRITE_BUFFER };

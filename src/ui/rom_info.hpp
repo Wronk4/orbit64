@@ -32,6 +32,7 @@ struct RomInfo {
 const char* format_name(RomFormat f);
 std::string format_size(std::uintmax_t bytes);
 bool is_rom_extension(const std::filesystem::path& p);
+bool is_gb_rom_extension(const std::filesystem::path& p); // .gb / .gbc (Transfer Pak)
 RomInfo inspect_rom(const std::filesystem::path& p);
 
 } // namespace ui
