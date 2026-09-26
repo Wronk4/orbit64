@@ -253,6 +253,16 @@ u8 Cartridge::get_cic_seed() const {
     }
 }
 
+u32 Cartridge::get_cic_id() const {
+    switch (cic_type) {
+        case CICType::CIC_6101: return 6101;
+        case CICType::CIC_6103: return 6103;
+        case CICType::CIC_6105: return 6105;
+        case CICType::CIC_6106: return 6106;
+        default: return 6102;
+    }
+}
+
 u32 Cartridge::get_boot_address() const {
     u32 entry = entry_point ? entry_point : 0x80000400;
     if (cic_type == CICType::CIC_6103) entry -= 0x100000;

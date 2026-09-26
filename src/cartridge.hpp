@@ -53,9 +53,12 @@ public:
     void dma_from_rdram(u32 off, const u8* src, u32 len); // PI write (RDRAM -> cart)
 
     // What the CIC chip's boot code (IPL3) does differently per chip: the
-    // seed it passes on, and where it copies the game's boot code and jumps
-    // (6103 and 6106 subtract 1 or 2 MB from the header's entry point).
+    // seed it passes on in s6, the CIC identifier it stores at 0x80000310
+    // (osCicId; 6103/6105 games such as Conker check this), and where it
+    // copies the game's boot code and jumps (6103 and 6106 subtract 1 or 2 MB
+    // from the header's entry point).
     u8 get_cic_seed() const;
+    u32 get_cic_id() const;
     u32 get_boot_address() const;
 
     // EEPROM access

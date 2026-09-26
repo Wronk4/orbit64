@@ -73,7 +73,7 @@ void Emulator::reset() {
     write_u32(0x304, 0);          // osRomType (0 = cartridge)
     write_u32(0x308, 0x10000000); // osRomBase (Cartridge Domain 1)
     write_u32(0x30C, 0);          // osResetType
-    write_u32(0x310, cart.get_cic_seed()); // osCicId
+    write_u32(0x310, cart.get_cic_id());   // osCicId (e.g. 6105 = 0x17D9)
     write_u32(0x314, 0);          // osVersion
     write_u32(0x318, bus.get_rdram_size()); // osMemSize (8MB = 0x00800000)
     if (cart.get_cic_type() == CICType::CIC_6105) {
