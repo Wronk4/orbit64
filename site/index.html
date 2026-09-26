@@ -40,7 +40,7 @@
       "applicationCategory": "GameApplication",
       "applicationSubCategory": "Emulator",
       "operatingSystem": "Windows 10, Windows 11, macOS 11+, Linux",
-      "description": "Free Nintendo 64 emulator with a dynamic recompiler, GPU-rendered 2x-8x internal resolution, save states and gamepad support.",
+      "description": "Free Nintendo 64 emulator (work in progress) with a dynamic recompiler, GPU-rendered 2x-8x internal resolution, save states and gamepad support.",
       "url": "https://wronk4.github.io/orbit64/",
       "downloadUrl": "https://github.com/Wronk4/orbit64/releases/latest",
       "image": "https://wronk4.github.io/orbit64/icon-512.png",
@@ -67,6 +67,8 @@
       "mainEntity": [
         {"@type": "Question", "name": "Is Orbit64 free?",
          "acceptedAnswer": {"@type": "Answer", "text": "Yes. Orbit64 is free to download and use, and its source code is on GitHub."}},
+        {"@type": "Question", "name": "Is Orbit64 finished? Will every game work?",
+         "acceptedAnswer": {"@type": "Answer", "text": "Not yet. Orbit64 is a work in progress. Many games are playable, but some still have graphical or audio glitches, and some don't boot. Save states from one version may not load in the next."}},
         {"@type": "Question", "name": "Does Orbit64 run on Apple Silicon Macs?",
          "acceptedAnswer": {"@type": "Answer", "text": "Yes. The macOS build is a universal binary. On M1, M2, M3 and newer Macs the recompiler generates native ARM64 code, and the GPU renderer uses Metal."}},
         {"@type": "Question", "name": "Do I need an N64 BIOS or PIF ROM?",
@@ -86,16 +88,19 @@
   :root {
     --bg: #f6f5fb; --bg2: #eeecf8; --fg: #16151f; --muted: #575468; --card: #ffffff; --line: #e1dff0;
     --accent: #5b47e0; --accent-fg: #ffffff; --accent-soft: rgba(91, 71, 224, 0.10); --code: #efedf9;
+    --warn: #b45309; --warn-soft: #fff7e6; --warn-line: #f5d9a8;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #0e0d15; --bg2: #15131f; --fg: #eceaf6; --muted: #a09db4; --card: #17151f; --line: #2a2738;
       --accent: #8b7bff; --accent-fg: #0e0d15; --accent-soft: rgba(139, 123, 255, 0.14); --code: #1f1c2b;
+      --warn: #f5a524; --warn-soft: rgba(245, 165, 36, 0.10); --warn-line: rgba(245, 165, 36, 0.35);
     }
   }
   :root[data-theme="dark"] {
     --bg: #0e0d15; --bg2: #15131f; --fg: #eceaf6; --muted: #a09db4; --card: #17151f; --line: #2a2738;
     --accent: #8b7bff; --accent-fg: #0e0d15; --accent-soft: rgba(139, 123, 255, 0.14); --code: #1f1c2b;
+      --warn: #f5a524; --warn-soft: rgba(245, 165, 36, 0.10); --warn-line: rgba(245, 165, 36, 0.35);
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
@@ -123,6 +128,10 @@
   .btn { display: inline-block; padding: 11px 20px; border-radius: 10px; text-decoration: none; font-weight: 600;
     border: 1px solid var(--line); color: var(--fg); background: var(--card); }
   .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .wip { display: flex; gap: 12px; align-items: flex-start; margin: 28px 0 0; padding: 14px 16px; border-radius: 12px;
+    background: var(--warn-soft); border: 1px solid var(--warn-line); font-size: 0.95rem; }
+  .wip svg { flex: none; width: 20px; height: 20px; margin-top: 2px; color: var(--warn); }
+  .wip p { margin: 0; }
   .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
   .pill { font-size: 0.85rem; padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--fg); }
 
@@ -181,6 +190,12 @@
       <div class="buttons">
         <a class="btn primary" href="https://github.com/Wronk4/orbit64/releases/latest">Download Orbit64</a>
         <a class="btn" href="https://github.com/Wronk4/orbit64">View the source on GitHub</a>
+      </div>
+      <div class="wip" role="note">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/></svg>
+        <p><strong>Work in progress.</strong> Orbit64 is under active development. Many games are playable, but others
+          may show graphical glitches, missing sound, crashes or not start at all. Features and save state files can
+          change between releases. Please <a href="https://github.com/Wronk4/orbit64/issues">report the problems you find</a>.</p>
       </div>
       <div class="pills" aria-label="Supported platforms">
         <span class="pill">Windows 10 / 11</span><span class="pill">macOS – Apple Silicon &amp; Intel</span>
@@ -317,6 +332,10 @@
     <p class="sub">Answers to common questions about Orbit64.</p>
     <details open><summary>Is Orbit64 free?</summary>
       <p>Yes. Orbit64 is free to download and use, and its source code is on GitHub.</p></details>
+    <details><summary>Is Orbit64 finished? Will every game work?</summary>
+      <p>Not yet. Orbit64 is a work in progress. Many games are playable, but some still have graphical or audio
+        glitches, and some don't boot. Save states from one version may not load in the next. New releases come out
+        often, so check the <a href="https://github.com/Wronk4/orbit64/releases">releases page</a> for fixes.</p></details>
     <details><summary>Does Orbit64 run on Apple Silicon Macs?</summary>
       <p>Yes. The macOS build is a universal binary. On M1, M2, M3 and newer Macs the recompiler generates native ARM64
         code, and the GPU renderer uses Metal.</p></details>

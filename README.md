@@ -1,5 +1,8 @@
 # Orbit64: Nintendo 64 emulator
 
+> **Work in progress.** Orbit64 is under active development. Many games are playable, but others may have graphical
+> or audio glitches, crash or not start. Features and the save state format can change between releases.
+
 A desktop frontend built on SDL3 and Dear ImGui for the N64 emulation core in `src/`. Graphics go through SDL_GPU:
 Metal on macOS, Vulkan on Linux and Windows (Direct3D 12 on Windows machines without Vulkan).
 It runs on **Windows, macOS and Linux** from a single codebase.
