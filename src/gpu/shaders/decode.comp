@@ -1,0 +1,42 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Decodes the tiles the frame's draws sample into the texel buffer (see
+// shaders/layout.h), so raster.comp reads a texel instead of decoding TMEM
+// for every sample. A workgroup decodes GPU_DECODE_BLOCK texels of one job.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 1
+#define NUM_RW_TEX 0
+#include "common.glsl"
+#include "layout.h"
+
+layout(std430, RO_BUFFER(0)) readonly buffer FrameData { uint D[]; };
+layout(std430, RW_BUFFER(0)) buffer Texels { uint T[]; };
+
+layout(std140, UNIFORM(0)) uniform Decode {
+    uint jobs;      // word offset of the first job
+    uint job_count;
+    uint blocks;    // blocks of all jobs
+    uint groups_x;  // workgroups per row of the dispatch
+} J;
+
+#include "tmem.glsl"
+
+void main() {
+    uint block = gl_WorkGroupID.y * J.groups_x + gl_WorkGroupID.x;
+    if (block >= J.blocks) return;
+    // The job whose blocks include this one (jobs are in block order).
+    uint lo = 0u, hi = J.job_count - 1u;
+    while (lo < hi) {
+        uint mid = (lo + hi + 1u) / 2u;
+        if (D[J.jobs + mid * GPU_JOB_WORDS + 6u] <= block) lo = mid;
+        else hi = mid - 1u;
+    }
+    uint j = J.jobs + lo * GPU_JOB_WORDS;
+    uint w = D[j + 3u], h = D[j + 4u];
+    uint i = (block - D[j + 6u]) * GPU_DECODE_BLOCK + gl_LocalInvocationID.x;
+    if (i >= w * h) return;
+    T[D[j + 5u] + i] = fetch_wrapped(D[j], D[j + 1u], D[j + 2u], int(i % w), int(i / w));
+}

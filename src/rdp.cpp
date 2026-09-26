@@ -173,13 +173,8 @@ void RDP::reset() {
 
     draw_state_dirty_ = true;
     ++tmem_gen_;
-    hires_shadow_ = nullptr;
-    if (hires_) {
-        // Start over from an empty set of high-resolution buffers.
-        const u32 scale = hires_->scale();
-        hires_.reset();
-        hires_ = std::make_unique<HiResRenderer>(scale);
-    }
+    // Start over from an empty set of high-resolution buffers.
+    recreate_hires();
 }
 
 void RDP::state_loaded() {
@@ -192,12 +187,22 @@ void RDP::state_loaded() {
     tmem_dirty = true;
     tex_run.active = false;
     tex_last_tlut = ~0u;
+    recreate_hires();
+}
+
+std::unique_ptr<HiResRenderer> RDP::make_hires(u32 scale) const {
+    if (hires_factory_)
+        if (auto r = hires_factory_(scale)) return r;
+    return std::make_unique<CpuHiResRenderer>(scale);
+}
+
+void RDP::recreate_hires() {
+    flush_native();
     hires_shadow_ = nullptr;
-    if (hires_) {
-        const u32 scale = hires_->scale();
-        hires_.reset();
-        hires_ = std::make_unique<HiResRenderer>(scale);
-    }
+    if (!hires_) return;
+    const u32 scale = hires_->scale();
+    hires_.reset();
+    hires_ = make_hires(scale);
 }
 
 void RDP::clear_zbuffer() {
@@ -212,7 +217,7 @@ void RDP::set_hires_scale(u32 scale) {
     if (scale == hires_scale()) return;
     hires_shadow_ = nullptr;
     hires_.reset();
-    if (scale > 1) hires_ = std::make_unique<HiResRenderer>(scale);
+    if (scale > 1) hires_ = make_hires(scale);
 }
 
 HiResTarget* RDP::hires_target(u8* rdram, size_t rdram_size) {
@@ -2258,9 +2263,6 @@ void RDP::queue_native(NativeCmd& cmd, u8* rdram, size_t rdram_size) {
     native_rdram_ = rdram;
     native_rdram_size_ = rdram_size;
     native_queue_.push_back(cmd);
-    // The high-resolution pass shadows every native pixel write as it
-    // happens (see hires_target()), so it gets no deferral at all.
-    if (hires_) flush_native();
 }
 
 void RDP::flush_native() {

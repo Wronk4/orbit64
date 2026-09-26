@@ -239,7 +239,7 @@ SDL_Texture* App::debug_texture(const CapturedTexture& t) {
     if (!tex) return nullptr;
     SDL_UpdateTexture(tex, nullptr, t.argb.data(), static_cast<int>(t.width) * 4);
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    SDL_SetTextureScaleMode(tex, settings_.filter == 0 ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+    SDL_SetTextureScaleMode(tex, settings_.filter == 0 ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
     dbg_textures_[h] = tex;
     return tex;
 }
@@ -489,12 +489,10 @@ bool App::export_mesh_obj(const std::filesystem::path& obj_path) {
 
     for (auto& [raw_tex, mat_name] : tex_list) {
         SDL_Texture* sdl_tex = static_cast<SDL_Texture*>(raw_tex);
-        int tw = 0, th = 0;
-        SDL_QueryTexture(sdl_tex, nullptr, nullptr, &tw, &th);
+        const int tw = sdl_tex ? sdl_tex->w : 0, th = sdl_tex ? sdl_tex->h : 0;
         if (tw <= 0 || th <= 0) continue;
 
-        SDL_Surface* surf = SDL_CreateRGBSurface(0, tw, th, 32,
-                                                 0x00FF0000u, 0x0000FF00u, 0x000000FFu, 0xFF000000u);
+        SDL_Surface* surf = SDL_CreateSurface(tw, th, SDL_PIXELFORMAT_ARGB8888);
         if (!surf) continue;
 
         // Prefer original pixel data when available.
@@ -526,9 +524,11 @@ bool App::export_mesh_obj(const std::filesystem::path& obj_path) {
                 SDL_SetRenderTarget(renderer_, rt);
                 SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 0);
                 SDL_RenderClear(renderer_);
-                SDL_RenderCopy(renderer_, sdl_tex, nullptr, nullptr);
-                SDL_RenderReadPixels(renderer_, nullptr, SDL_PIXELFORMAT_ARGB8888,
-                                     surf->pixels, surf->pitch);
+                SDL_RenderTexture(renderer_, sdl_tex, nullptr, nullptr);
+                if (SDL_Surface* read = SDL_RenderReadPixels(renderer_, nullptr)) {
+                    SDL_BlitSurface(read, nullptr, surf, nullptr);
+                    SDL_DestroySurface(read);
+                }
                 SDL_SetRenderTarget(renderer_, nullptr);
                 SDL_DestroyTexture(rt);
 
@@ -539,7 +539,7 @@ bool App::export_mesh_obj(const std::filesystem::path& obj_path) {
 
         fs::path bmp_path = dir / (mat_name + ".bmp");
         SDL_SaveBMP(surf, platform::path_to_utf8(bmp_path).c_str());
-        SDL_FreeSurface(surf);
+        SDL_DestroySurface(surf);
     }
 
     // ---- Write MTL file ----------------------------------------------------

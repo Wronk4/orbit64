@@ -2,15 +2,20 @@ cmake_minimum_required(VERSION 3.16)
 project(orbit64 VERSION 1.0.0 LANGUAGES CXX)
 
 # Orbit64 - Nintendo 64 emulator with a cross-platform (Windows / macOS / Linux)
-# desktop frontend built on SDL2 + Dear ImGui.
+# desktop frontend built on SDL3 + Dear ImGui. Graphics go through SDL_GPU
+# (Metal on macOS, Vulkan or Direct3D 12 on Windows, Vulkan on Linux), which
+# also runs the high-resolution RDP renderer's compute shaders.
 #
 #   cmake -S . -B out -DCMAKE_BUILD_TYPE=Release
 #   cmake --build out --config Release
 #
-# SDL2 is the only external dependency:
-#   Windows : vcpkg install sdl2   (then -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake)
-#   macOS   : brew install sdl2
-#   Linux   : apt install libsdl2-dev / dnf install SDL2-devel / pacman -S sdl2
+# SDL3 (3.4 or newer) is the only external dependency. An installed copy is
+# used when CMake finds one:
+#   Windows : vcpkg install sdl3   (then -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake)
+#   macOS   : brew install sdl3
+#   Linux   : apt install libsdl3-dev / dnf install SDL3-devel / pacman -S sdl3
+# Otherwise (or with -DORBIT64_VENDOR_SDL3=ON) SDL3 is downloaded and built
+# from source as part of the project.
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,12 +25,23 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(ORBIT64_WIN_CONSOLE "Windows: keep a console window (useful for --headless and logs)" OFF)
+option(ORBIT64_VENDOR_SDL3 "Always build SDL3 from source instead of using an installed copy" OFF)
+set(ORBIT64_SDL3_VERSION "3.4.16" CACHE STRING "SDL3 release built when no installed SDL3 is used")
 
-find_package(SDL2 CONFIG QUIET)
-if(NOT SDL2_FOUND)
-    # Fallback for systems that ship only a pkg-config file.
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SDL2_PC REQUIRED IMPORTED_TARGET sdl2>=2.0.18)
+if(NOT ORBIT64_VENDOR_SDL3)
+    find_package(SDL3 3.4 CONFIG QUIET)
+endif()
+if(NOT SDL3_FOUND)
+    message(STATUS "Orbit64: building SDL3 ${ORBIT64_SDL3_VERSION} from source")
+    include(FetchContent)
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(SDL3
+        URL "https://github.com/libsdl-org/SDL/releases/download/release-${ORBIT64_SDL3_VERSION}/SDL3-${ORBIT64_SDL3_VERSION}.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(SDL3)
 endif()
 find_package(Threads REQUIRED)
 
@@ -35,6 +51,9 @@ file(GLOB JIT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/jit/*.c
 list(REMOVE_ITEM JIT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/jit/jit_selftest_main.cpp")
 list(APPEND CORE_SOURCES ${JIT_SOURCES})
 file(GLOB UI_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.cpp")
+# The GPU renderer (SDL_GPU compute shaders, prebuilt into src/gpu/shaders_gen.cpp
+# by tools/gen_shaders.py).
+file(GLOB GPU_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/*.cpp")
 
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
 set(IMGUI_SOURCES
@@ -42,30 +61,22 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp)
+    ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
 
-add_executable(n64 ${CORE_SOURCES} ${UI_SOURCES} ${IMGUI_SOURCES})
+add_executable(n64 ${CORE_SOURCES} ${UI_SOURCES} ${GPU_SOURCES} ${IMGUI_SOURCES})
 set_target_properties(n64 PROPERTIES OUTPUT_NAME "orbit64")
 target_include_directories(n64 PRIVATE src ${IMGUI_DIR} ${IMGUI_DIR}/backends third_party/stb)
 # IMGUI_ENABLE_TEST_ENGINE compiles in Dear ImGui's item hooks used by the UI
 # clickability audit (src/ui/ui_audit.cpp); they are inactive unless the audit runs.
 target_compile_definitions(n64 PRIVATE IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_ENABLE_TEST_ENGINE)
 
-# SDL2 exposes imported targets in its CMake config; older distro packages only
-# provide variables, so support both.
-if(TARGET SDL2::SDL2main)
-    target_link_libraries(n64 PRIVATE SDL2::SDL2main)
-endif()
-if(TARGET SDL2::SDL2)
-    target_link_libraries(n64 PRIVATE SDL2::SDL2)
-elseif(TARGET SDL2::SDL2-static)
-    target_link_libraries(n64 PRIVATE SDL2::SDL2-static)
-elseif(TARGET PkgConfig::SDL2_PC)
-    target_link_libraries(n64 PRIVATE PkgConfig::SDL2_PC)
-else()
-    target_include_directories(n64 PRIVATE ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(n64 PRIVATE ${SDL2_LIBRARIES})
+target_link_libraries(n64 PRIVATE SDL3::SDL3)
+if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+    # SDL3.dll next to orbit64.exe, wherever it came from.
+    add_custom_command(TARGET n64 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:n64> $<TARGET_FILE_DIR:n64>
+        COMMAND_EXPAND_LISTS)
 endif()
 target_link_libraries(n64 PRIVATE Threads::Threads)
 
@@ -101,6 +112,14 @@ add_executable(savestate_check EXCLUDE_FROM_ALL tools/savestate_check.cpp ${CHEC
 target_include_directories(savestate_check PRIVATE src third_party/stb)
 target_link_libraries(savestate_check PRIVATE Threads::Threads)
 
+# GPU renderer vs CPU renderer, frame by frame (tools/gpu_check.cpp), not built by default.
+add_executable(gpu_check EXCLUDE_FROM_ALL tools/gpu_check.cpp ${CHECK_SOURCES} ${GPU_SOURCES})
+target_include_directories(gpu_check PRIVATE src third_party/stb)
+target_link_libraries(gpu_check PRIVATE SDL3::SDL3 Threads::Threads)
+if(WIN32)
+    target_compile_definitions(gpu_check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+endif()
+
 # Host audio path checks (tools/audio_check.cpp), not built by default.
 add_executable(audio_check EXCLUDE_FROM_ALL tools/audio_check.cpp src/audio_stream.cpp)
 target_include_directories(audio_check PRIVATE src)
@@ -109,6 +128,3 @@ target_include_directories(audio_check PRIVATE src)
 add_executable(test_rdp EXCLUDE_FROM_ALL src/test_rdp.cpp src/rdp.cpp src/hires.cpp src/mi.cpp)
 target_include_directories(test_rdp PRIVATE src)
 target_link_libraries(test_rdp PRIVATE Threads::Threads)
-if(TARGET SDL2::SDL2)
-    target_link_libraries(test_rdp PRIVATE SDL2::SDL2)
-endif()

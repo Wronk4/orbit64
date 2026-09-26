@@ -109,9 +109,7 @@ void App::draw_settings() {
             case SettingsPage::General: settings_.reset_general(); break;
             case SettingsPage::Graphics:
                 settings_.reset_graphics();
-#if SDL_VERSION_ATLEAST(2, 0, 18)
-                SDL_RenderSetVSync(renderer_, settings_.vsync ? 1 : 0);
-#endif
+                SDL_SetRenderVSync(renderer_, settings_.vsync ? 1 : SDL_RENDERER_VSYNC_DISABLED);
                 break;
             case SettingsPage::Audio: settings_.reset_audio(); open_audio(); break;
             case SettingsPage::Controller: settings_.reset_port(settings_port_); break;
@@ -298,11 +296,7 @@ void App::settings_graphics() {
     row_end();
 
     row_begin("Vertical sync", "Synchronise the interface with the display refresh to avoid tearing.", cw);
-    if (toggle("vsync", &settings_.vsync)) {
-#if SDL_VERSION_ATLEAST(2, 0, 18)
-        SDL_RenderSetVSync(renderer_, settings_.vsync ? 1 : 0);
-#endif
-    }
+    if (toggle("vsync", &settings_.vsync)) SDL_SetRenderVSync(renderer_, settings_.vsync ? 1 : SDL_RENDERER_VSYNC_DISABLED);
     row_end();
 
     row_begin("Fullscreen mode", "Borderless is instant and alt-tab friendly. Exclusive switches the display mode.", cw);
@@ -319,7 +313,20 @@ void App::settings_graphics() {
     toggle("fpsov", &settings_.show_fps_overlay);
     row_end();
 
-    row_begin("Renderer", "Chosen automatically for this platform (Direct3D, Metal or OpenGL).", cw);
+    row_begin("Video backend",
+              "GPU uses Metal, Vulkan or Direct3D 12 and renders high internal resolutions on the graphics card. "
+              "Compatibility works with any driver but renders on the CPU. Applies after a restart.",
+              cw);
+    {
+        const char* items[] = {"GPU", "Compatibility"};
+        if (segmented("vbackend", items, 2, &settings_.video_backend, cw)) {
+            save_settings();
+            toast("The video backend changes the next time Orbit64 starts", ToastKind::Info);
+        }
+    }
+    row_end();
+
+    row_begin("Renderer", "The graphics driver in use.", cw);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + dp(5));
     ImGui::PushFont(g_fonts.mono);
     ImGui::TextColored(g_pal.text_dim, "%s", renderer_name_.c_str());

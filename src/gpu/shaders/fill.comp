@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Sets every word of a buffer to one value (new colour buffers, depth clears).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 0
+#define NUM_RW_TEX 0
+#include "common.glsl"
+
+layout(std430, RW_BUFFER(0)) buffer Target { uint words[]; };
+
+layout(std140, UNIFORM(0)) uniform Fill {
+    uint count;
+    uint value;
+    uint stride; // invocations in the whole dispatch
+} F;
+
+void main() {
+    for (uint i = gl_GlobalInvocationID.x; i < F.count; i += F.stride) words[i] = F.value;
+}

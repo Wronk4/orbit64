@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// The displayed frame: the part of the frame buffer the VI shows, placed on
+// its canvas (black borders around it), each pixel taken from the
+// high-resolution buffer unless something other than the RDP changed it in
+// RDRAM since the RDP drew it (then the RDRAM colour, enlarged).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 2
+#define NUM_RW_TEX 1
+#include "common.glsl"
+
+layout(std430, RO_BUFFER(0)) readonly buffer FrameData { uint D[]; };
+layout(std430, RO_BUFFER(1)) readonly buffer ColorBuffer { uint color_buf[]; };
+layout(rgba8, RW_IMAGE(0)) uniform writeonly image2D out_image;
+
+layout(std140, UNIFORM(0)) uniform Compose {
+    uint scale;      // S
+    uint width;      // frame buffer width (native): the override image's stride
+    uint first_line; // target line shown on the first displayed line
+    uint lines;      // displayed lines (native)
+    uint shown_w;    // displayed columns (native)
+    uint x0, y0;     // where the picture sits on the canvas (native)
+    uint out_w, out_h;
+    uint overrides;  // word offset: 0 = high-resolution pixel, else ARGB from RDRAM, per native pixel
+} C;
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x, oy = gl_GlobalInvocationID.y;
+    if (ox >= C.out_w || oy >= C.out_h) return;
+    uint S = C.scale;
+    uint argb = 0xFF000000u;
+    uint bx = C.x0 * S, by = C.y0 * S;
+    if (ox >= bx && oy >= by) {
+        uint lx = ox - bx, ly = oy - by;
+        if (lx < min(C.shown_w, C.width) * S && ly < C.lines * S) {
+            uint ov = D[C.overrides + (ly / S) * C.width + lx / S];
+            argb = ov != 0u ? ov : (color_buf[((ly / S + C.first_line) * S + ly % S) * (C.width * S) + lx] | 0xFF000000u);
+        }
+    }
+    vec4 col = vec4(float((argb >> 16u) & 0xFFu), float((argb >> 8u) & 0xFFu), float(argb & 0xFFu), 255.0) / 255.0;
+    imageStore(out_image, ivec2(int(ox), int(oy)), col);
+}

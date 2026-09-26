@@ -73,7 +73,7 @@ inline void fill_span(u32* row, u32 x0, u32 x1, u32 v) {
 // ---------------------------------------------------------------------------
 // Arena
 
-void* HiResRenderer::Arena::alloc(size_t bytes) {
+void* CpuHiResRenderer::Arena::alloc(size_t bytes) {
     bytes = (bytes + 15) & ~size_t(15);
     used_ += bytes;
     for (;;) {
@@ -96,7 +96,7 @@ void* HiResRenderer::Arena::alloc(size_t bytes) {
     }
 }
 
-void HiResRenderer::Arena::reset() {
+void CpuHiResRenderer::Arena::reset() {
     // Keep a few standard blocks for the next use; oversized ones go.
     std::vector<std::unique_ptr<u8[]>> keep;
     for (size_t i = 0; i < blocks_.size(); ++i)
@@ -111,7 +111,7 @@ void HiResRenderer::Arena::reset() {
 // ---------------------------------------------------------------------------
 // Setup / teardown
 
-HiResRenderer::HiResRenderer(u32 scale) : scale_(std::clamp<u32>(scale, 1, kMaxScale)) {
+CpuHiResRenderer::CpuHiResRenderer(u32 scale) : HiResRenderer(scale) {
     for (Segment& s : segs_) s.chunks = std::make_unique<std::unique_ptr<Cmd[]>[]>(kMaxChunks);
     segs_[0].end.store(~0ull, std::memory_order_relaxed);
 
@@ -130,10 +130,10 @@ HiResRenderer::HiResRenderer(u32 scale) : scale_(std::clamp<u32>(scale, 1, kMaxS
         bands_[b].y0 = rows * b / nbands_;
         bands_[b].y1 = rows * (b + 1) / nbands_;
     }
-    for (int i = 0; i < nworkers_; ++i) workers_.emplace_back(&HiResRenderer::worker_main, this, i);
+    for (int i = 0; i < nworkers_; ++i) workers_.emplace_back(&CpuHiResRenderer::worker_main, this, i);
 }
 
-HiResRenderer::~HiResRenderer() {
+CpuHiResRenderer::~CpuHiResRenderer() {
     quit_.store(true, std::memory_order_release);
     { std::lock_guard<std::mutex> lk(mutex_); }
     cv_.notify_all();
@@ -143,7 +143,7 @@ HiResRenderer::~HiResRenderer() {
 // ---------------------------------------------------------------------------
 // Command storage
 
-const HiResRenderer::Cmd& HiResRenderer::cmd_at(u64 i, int& hint) const {
+const CpuHiResRenderer::Cmd& CpuHiResRenderer::cmd_at(u64 i, int& hint) const {
     for (int k = 0; k < kSegments; ++k) {
         const int si = (hint + k) % kSegments;
         const Segment& s = segs_[si];
@@ -161,7 +161,7 @@ const HiResRenderer::Cmd& HiResRenderer::cmd_at(u64 i, int& hint) const {
     std::abort(); // every published command belongs to a segment
 }
 
-void HiResRenderer::reserve() {
+void CpuHiResRenderer::reserve() {
     const Segment& s = segs_[cur_];
     if (count_ + 1 - s.start.load(std::memory_order_relaxed) >= static_cast<u64>(kMaxChunks) * kChunkSize ||
         s.arena.used() > kMaxArenaBytes) {
@@ -172,7 +172,7 @@ void HiResRenderer::reserve() {
     if (!r.chunks[chunk]) r.chunks[chunk].reset(new Cmd[kChunkSize]);
 }
 
-HiResRenderer::Cmd& HiResRenderer::append(CmdType type, HiResTarget* t, const DrawState* st, HiResDepth* d) {
+CpuHiResRenderer::Cmd& CpuHiResRenderer::append(CmdType type, HiResTarget* t, const DrawState* st, HiResDepth* d) {
     const Segment& s = segs_[cur_];
     const u64 local = count_ - s.start.load(std::memory_order_relaxed);
     Cmd& c = s.chunks[local >> kChunkBits][local & (kChunkSize - 1)];
@@ -185,7 +185,7 @@ HiResRenderer::Cmd& HiResRenderer::append(CmdType type, HiResTarget* t, const Dr
     return c;
 }
 
-void HiResRenderer::publish() {
+void CpuHiResRenderer::publish() {
     ++count_;
     published_.store(count_, std::memory_order_release);
     // Waking the workers per command would cost more than drawing small
@@ -193,14 +193,14 @@ void HiResRenderer::publish() {
     if (count_ - notified_ >= 256) flush();
 }
 
-void HiResRenderer::flush() {
+void CpuHiResRenderer::flush() {
     if (notified_ == count_) return;
     notified_ = count_;
     { std::lock_guard<std::mutex> lk(mutex_); }
     cv_.notify_all();
 }
 
-void HiResRenderer::rotate() {
+void CpuHiResRenderer::rotate() {
     flush();
     const int next = (cur_ + 1) % kSegments;
     Segment& n = segs_[next];
@@ -221,32 +221,30 @@ void HiResRenderer::rotate() {
 // ---------------------------------------------------------------------------
 // Recording
 
-HiResTarget* HiResRenderer::find(u32 addr, u32 width, u8 size) const {
+HiResTarget* CpuHiResRenderer::find(u32 addr, u32 width, u8 size) const {
     for (const auto& t : targets_)
         if (t->addr == addr && t->width == width && t->size == size) return t.get();
     return nullptr;
 }
 
-// The colour image the VI is showing. libultra's VI modes often point the
-// origin one or more lines into the frame buffer, so a target also matches
-// when the scan-out starts a whole number of lines past its address.
-HiResTarget* HiResRenderer::find_scanout(const VIScanout& so, u32& first_line) const {
-    const u8 size = so.bpp == 2 ? 2 : 3;
-    const u32 line_bytes = so.width * so.bpp;
-    HiResTarget* best = nullptr;
-    for (const auto& t : targets_) {
-        if (t->width != so.width || t->size != size || so.fb_base < t->addr) continue;
-        const u32 off = so.fb_base - t->addr;
-        if (off % line_bytes != 0 || off / line_bytes >= kFbLines) continue;
-        if (!best || t->addr > best->addr) { // the closest start wins
-            best = t.get();
-            first_line = off / line_bytes;
+void hires::scan_changes(HiResTarget& t, const u8* rdram, size_t rdram_size, std::vector<ChangedPixel>& changed) {
+    changed.clear();
+    const u32 bpp = t.size == 2 ? 2 : 4;
+    for (u32 y = 0; y < kFbLines; ++y) {
+        const size_t row = static_cast<size_t>(t.addr) + static_cast<size_t>(y) * t.width * bpp;
+        if (row + static_cast<size_t>(t.width) * bpp > rdram_size) break;
+        u32* sh = t.shadow.data() + static_cast<size_t>(y) * t.width;
+        for (u32 x = 0; x < t.width; ++x) {
+            const u32 raw = fb_read_pixel(rdram + row + x * bpp, bpp);
+            if (raw != sh[x]) {
+                sh[x] = raw;
+                changed.push_back({static_cast<u16>(x), static_cast<u16>(y), fb_pixel_to_argb(raw, bpp)});
+            }
         }
     }
-    return best;
 }
 
-HiResTarget* HiResRenderer::bind(u32 addr, u32 width, u8 size, const u8* rdram, size_t rdram_size) {
+HiResTarget* CpuHiResRenderer::bind(u32 addr, u32 width, u8 size, const u8* rdram, size_t rdram_size) {
     if (bound_ && bound_->addr == addr && bound_->width == width && bound_->size == size) return bound_;
     if (width == 0 || width > kMaxWidth || (size != 2 && size != 3)) return nullptr;
 
@@ -278,19 +276,7 @@ HiResTarget* HiResRenderer::bind(u32 addr, u32 width, u8 size, const u8* rdram, 
     } else {
         // Copy in the pixels something other than the RDP changed since it last drew here.
         std::vector<UploadPx>& changed = changed_;
-        changed.clear();
-        for (u32 y = 0; y < kFbLines; ++y) {
-            const size_t row = static_cast<size_t>(addr) + static_cast<size_t>(y) * width * bpp;
-            if (row + static_cast<size_t>(width) * bpp > rdram_size) break;
-            u32* sh = t->shadow.data() + static_cast<size_t>(y) * width;
-            for (u32 x = 0; x < width; ++x) {
-                u32 raw = fb_read_pixel(rdram + row + x * bpp, bpp);
-                if (raw != sh[x]) {
-                    sh[x] = raw;
-                    changed.push_back({static_cast<u16>(x), static_cast<u16>(y), fb_pixel_to_argb(raw, bpp)});
-                }
-            }
-        }
+        hires::scan_changes(*t, rdram, rdram_size, changed);
         if (!changed.empty()) {
             reserve();
             auto* items = static_cast<UploadPx*>(arena().alloc(changed.size() * sizeof(UploadPx)));
@@ -305,7 +291,7 @@ HiResTarget* HiResRenderer::bind(u32 addr, u32 width, u8 size, const u8* rdram, 
     return t;
 }
 
-DrawState* HiResRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, bool needs_tmem) {
+DrawState* CpuHiResRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, bool needs_tmem) {
     if (rec_state_ && rec_serial_ == serial && (!needs_tmem || rec_tmem_gen_ == tmem_gen)) return rec_state_;
     DrawState* s = arena().make(st);
     // The native pass's decoded textures (RDP::attach_native_tex_cache) are
@@ -336,7 +322,7 @@ DrawState* HiResRenderer::recorded_state(const DrawState& st, u64 serial, u64 tm
 // of this segment that samples the same TMEM contents through the same tile.
 // Workers only read tex[tile].cache for draws that use the tile, and those
 // are published after this.
-void HiResRenderer::attach_tex_cache(DrawState* rs, u32 tile, u64 tmem_gen) {
+void CpuHiResRenderer::attach_tex_cache(DrawState* rs, u32 tile, u64 tmem_gen) {
     raster::TexUnit& tu = rs->tex[tile & 7];
     if (tu.cache || !rs->tmem) return;
     u32 w = 0, h = 0;
@@ -355,7 +341,7 @@ void HiResRenderer::attach_tex_cache(DrawState* rs, u32 tile, u64 tmem_gen) {
     tu.cache = it->second;
 }
 
-HiResDepth* HiResRenderer::depth_for(const DrawState& st) {
+HiResDepth* CpuHiResRenderer::depth_for(const DrawState& st) {
     if (!st.z_compare && !st.z_update) return nullptr;
     for (auto& d : depths_) {
         if (d->width == st.fb_w) {
@@ -375,7 +361,7 @@ HiResDepth* HiResRenderer::depth_for(const DrawState& st) {
     return depths_.back().get();
 }
 
-void HiResRenderer::triangle(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen,
+void CpuHiResRenderer::triangle(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen,
                              const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area) {
     reserve();
     DrawState* rs = recorded_state(st, serial, tmem_gen, st.texture_enabled);
@@ -393,7 +379,7 @@ void HiResRenderer::triangle(HiResTarget* t, const DrawState& st, u64 serial, u6
     publish();
 }
 
-void HiResRenderer::tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly,
+void CpuHiResRenderer::tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly,
                              u32 lrx, u32 lry, u32 tile, f32 s, f32 tc, f32 dsdx, f32 dtdy, bool flip) {
     reserve();
     DrawState* rs = recorded_state(st, serial, tmem_gen, true);
@@ -405,14 +391,14 @@ void HiResRenderer::tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u6
     publish();
 }
 
-void HiResRenderer::fill_rect(HiResTarget* t, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb) {
+void CpuHiResRenderer::fill_rect(HiResTarget* t, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb) {
     reserve();
     Cmd& c = append(CmdType::Fill, t, nullptr, nullptr);
     c.fill = {x0, y0, x1, y1, argb};
     publish();
 }
 
-void HiResRenderer::pixels(HiResTarget* t, const DrawState& st, u64 serial, const std::vector<Pixel>& px) {
+void CpuHiResRenderer::pixels(HiResTarget* t, const DrawState& st, u64 serial, const std::vector<Pixel>& px) {
     if (px.empty()) return;
     reserve();
     const DrawState* rs = recorded_state(st, serial, 0, false);
@@ -423,7 +409,7 @@ void HiResRenderer::pixels(HiResTarget* t, const DrawState& st, u64 serial, cons
     publish();
 }
 
-void HiResRenderer::blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h,
+void CpuHiResRenderer::blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h,
                          const u32* colors) {
     if (w == 0 || h == 0) return;
     reserve();
@@ -435,7 +421,7 @@ void HiResRenderer::blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0
     publish();
 }
 
-void HiResRenderer::clear_depth() {
+void CpuHiResRenderer::clear_depth() {
     if (depths_.empty()) return;
     reserve();
     auto** planes = static_cast<HiResDepth**>(arena().alloc(depths_.size() * sizeof(HiResDepth*)));
@@ -451,7 +437,7 @@ void HiResRenderer::clear_depth() {
 // ---------------------------------------------------------------------------
 // Execution
 
-bool HiResRenderer::run_bands(int first, u64 limit) {
+bool CpuHiResRenderer::run_bands(int first, u64 limit) {
     bool worked = false;
     const u64 end = std::min(limit, published_.load(std::memory_order_acquire));
     for (int k = 0; k < nbands_; ++k) {
@@ -469,7 +455,7 @@ bool HiResRenderer::run_bands(int first, u64 limit) {
     return worked;
 }
 
-void HiResRenderer::worker_main(int index) {
+void CpuHiResRenderer::worker_main(int index) {
     const int first = index * nbands_ / nworkers_;
     while (!quit_.load(std::memory_order_acquire)) {
         const u64 seen = published_.load(std::memory_order_acquire);
@@ -481,13 +467,13 @@ void HiResRenderer::worker_main(int index) {
     }
 }
 
-u64 HiResRenderer::executed() const {
+u64 CpuHiResRenderer::executed() const {
     u64 n = ~0ull;
     for (int b = 0; b < nbands_; ++b) n = std::min(n, bands_[b].next.load(std::memory_order_acquire));
     return n;
 }
 
-void HiResRenderer::wait_executed(u64 n) {
+void CpuHiResRenderer::wait_executed(u64 n) {
     if (executed() >= n) return;
     flush();
     while (executed() < n) {
@@ -495,7 +481,7 @@ void HiResRenderer::wait_executed(u64 n) {
     }
 }
 
-void HiResRenderer::execute(const Cmd& c, s32 y0, s32 y1) const {
+void CpuHiResRenderer::execute(const Cmd& c, s32 y0, s32 y1) const {
     const u32 S = scale_;
     switch (c.type) {
         case CmdType::Triangle: {
@@ -564,7 +550,7 @@ void HiResRenderer::execute(const Cmd& c, s32 y0, s32 y1) const {
 // ---------------------------------------------------------------------------
 // Output
 
-bool HiResRenderer::compose(const VIScanout& so, const u8* rdram, size_t rdram_size, std::vector<u32>& out,
+bool CpuHiResRenderer::compose(const VIScanout& so, const u8* rdram, size_t rdram_size, std::vector<u32>& out,
                             int& out_w, int& out_h) {
     const u32 S = scale_;
     out_w = static_cast<int>(so.width * S);
@@ -574,7 +560,7 @@ bool HiResRenderer::compose(const VIScanout& so, const u8* rdram, size_t rdram_s
         return true;
     }
     u32 first_line = 0;
-    HiResTarget* t = find_scanout(so, first_line);
+    HiResTarget* t = hires::find_scanout(targets_, so, first_line);
     if (!t) return false;
     t->last_used = frame_;
     // Only the draws into the displayed buffer have to be finished.
@@ -629,7 +615,16 @@ bool HiResRenderer::compose(const VIScanout& so, const u8* rdram, size_t rdram_s
     return true;
 }
 
-void HiResRenderer::end_frame() {
+bool CpuHiResRenderer::present(const VIScanout& so, const u8* rdram, size_t rdram_size, VideoFrame& out) {
+    int cw = 0, ch = 0;
+    if (!compose(so, rdram, rdram_size, composed_, cw, ch)) return false;
+    out.gpu.reset();
+    so.place(composed_.data(), static_cast<u32>(cw), scale_, out.pixels, out.w, out.h);
+    out.scale = static_cast<int>(scale_);
+    return true;
+}
+
+void CpuHiResRenderer::end_frame() {
     rotate();
     // Colour images and depth planes the game hasn't drawn to or shown for
     // ten seconds are gone (or were one-off render targets). Buffers queued

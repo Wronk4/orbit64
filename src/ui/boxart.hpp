@@ -10,7 +10,7 @@
 // ImageCache decodes PNG/JPEG files on a worker thread (stb_image) and turns
 // them into SDL textures on the UI thread, so large grids never stall a frame.
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #include <condition_variable>
 #include <deque>

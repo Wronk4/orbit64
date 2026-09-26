@@ -9,8 +9,9 @@
 #include "library.hpp"
 #include "settings.hpp"
 #include "widgets.hpp"
+#include "../gpu/device.hpp"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -50,9 +51,17 @@ private:
     void main_loop();
     void process_event(const SDL_Event& e);
     bool handle_shortcut(const SDL_KeyboardEvent& k);
+    bool create_renderer();
+    void destroy_renderer();
+    void pump_video();
     void update_ui_scale(bool force);
     void update_input();
     void update_game_texture();
+    // The frontend texture showing a frame the GPU renderer left in video
+    // memory (nullptr if it can't be shown directly).
+    SDL_Texture* gpu_frame_texture(const std::shared_ptr<GpuImage>& image);
+    void release_gpu_frames();
+    void apply_hires_renderer();
     void update_audio_volume();
     void open_audio();
     void close_audio();
@@ -182,6 +191,7 @@ private:
 
     // ---- state
     SDL_Window* window_ = nullptr;
+    SDL_GPUDevice* gpu_ = nullptr; // the GPU renderer's device (nullptr: another SDL renderer)
     SDL_Renderer* renderer_ = nullptr;
     SDL_Texture* game_tex_ = nullptr;
     int game_tex_w_ = 0, game_tex_h_ = 0;
@@ -190,7 +200,16 @@ private:
     int frame_native_w() const { return game_tex_w_ > 0 ? game_tex_w_ / game_scale_ : 320; }
     int frame_native_h() const { return game_tex_h_ > 0 ? game_tex_h_ / game_scale_ : 240; }
     int game_tex_filter_ = -1;
-    std::vector<std::uint32_t> frame_pixels_;
+    VideoFrame frame_;                  // what game_tex_ shows
+    SDL_Texture* stream_tex_ = nullptr; // frames that come as pixels
+    int stream_w_ = 0, stream_h_ = 0;
+    // Frontend textures wrapping the GPU renderer's frame images.
+    struct WrappedImage {
+        std::weak_ptr<GpuImage> image;
+        SDL_Texture* tex;
+    };
+    std::vector<WrappedImage> wrapped_;
+    std::shared_ptr<gpu::Device> gpu_dev_; // the GPU renderer's pipelines
     std::uint64_t frame_serial_ = 0;
     bool has_frame_ = false;
     std::string renderer_name_;
@@ -235,7 +254,7 @@ private:
     double state_slots_checked_ = -1.0;
 
     // audio
-    SDL_AudioDeviceID audio_dev_ = 0;
+    SDL_AudioStream* audio_dev_ = nullptr; // bound to its own playback device
     int audio_freq_ = 0;  // rate the device actually opened at
     std::atomic<float> audio_volume_{1.0f};
     std::vector<std::string> audio_devices_;

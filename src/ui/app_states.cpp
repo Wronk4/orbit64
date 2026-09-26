@@ -149,7 +149,7 @@ void App::refresh_state_slots() {
                                         static_cast<int>(info.thumb_w), static_cast<int>(info.thumb_h));
             if (s.thumb) {
                 SDL_UpdateTexture(s.thumb, nullptr, info.thumb.data(), static_cast<int>(info.thumb_w) * 4);
-                SDL_SetTextureScaleMode(s.thumb, SDL_ScaleModeLinear);
+                SDL_SetTextureScaleMode(s.thumb, SDL_SCALEMODE_LINEAR);
             }
         }
     }

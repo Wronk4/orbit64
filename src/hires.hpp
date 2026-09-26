@@ -2,10 +2,11 @@
 // Internal-resolution rendering.
 //
 // The RDP (rdp.cpp) draws every primitive into RDRAM at the game's frame
-// buffer size, as the console does, and also records it here. Worker threads
-// replay the recorded draws at `scale` times that size into a high-resolution
-// copy of each colour image, and the displayed frame is composed from those
-// copies.
+// buffer size, as the console does, and also records it here. A renderer
+// replays the recorded draws at `scale` times that size into a
+// high-resolution copy of each colour image, and the displayed frame is
+// composed from those copies. CpuHiResRenderer (below) replays them on
+// worker threads; the GPU renderer (src/gpu/rdp_gpu.hpp) in compute shaders.
 //
 // RDRAM stays authoritative. Each high-resolution buffer keeps a shadow of
 // the value the RDP last wrote to every RDRAM pixel. Pixels the CPU or a DMA
@@ -13,14 +14,12 @@
 // and frame buffer effects still appear. Such changes are also copied into
 // the high-resolution buffer before the RDP draws into it again.
 //
-// Each worker takes whole horizontal bands of output rows and executes every
-// recorded command for its band in order. Bands never share pixels, so the
-// workers need no locking beyond claiming a band.
-
 #include "raster.hpp"
+#include "video_frame.hpp"
 #include "vi.hpp"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -65,13 +64,46 @@ struct HiResDepth {
     u64 last_cmd = 0;
 };
 
+// The part of the RDP's frame buffer handling both renderers share.
+namespace hires {
+
+// The colour image the VI is showing among `targets` (a range of pointers to
+// HiResTarget). libultra's VI modes often point the origin one or more lines
+// into the frame buffer, so a target also matches when the scan-out starts a
+// whole number of lines past its address.
+template <class Range>
+HiResTarget* find_scanout(const Range& targets, const VIScanout& so, u32& first_line) {
+    const u8 size = so.bpp == 2 ? 2 : 3;
+    const u32 line_bytes = so.width * so.bpp;
+    HiResTarget* best = nullptr;
+    for (const auto& t : targets) {
+        if (t->width != so.width || t->size != size || so.fb_base < t->addr) continue;
+        const u32 off = so.fb_base - t->addr;
+        if (off % line_bytes != 0 || off / line_bytes >= kFbLines) continue;
+        if (!best || t->addr > best->addr) { // the closest start wins
+            best = &*t;
+            first_line = off / line_bytes;
+        }
+    }
+    return best;
+}
+
+// A pixel RDRAM holds that the RDP didn't draw (native coordinates).
+struct ChangedPixel { u16 x, y; u32 argb; };
+
+// Brings a target's shadow up to date with RDRAM and lists the pixels that
+// differed: what the CPU or a DMA wrote since the RDP last drew there.
+void scan_changes(HiResTarget& t, const u8* rdram, size_t rdram_size, std::vector<ChangedPixel>& changed);
+
+} // namespace hires
+
+// What the RDP records into; see the top of this file.
 class HiResRenderer {
 public:
     static constexpr u32 kMaxScale = 8;
     static constexpr u32 kMaxWidth = 1024; // wider colour images are left at native resolution
 
-    explicit HiResRenderer(u32 scale);
-    ~HiResRenderer();
+    virtual ~HiResRenderer() = default;
     HiResRenderer(const HiResRenderer&) = delete;
     HiResRenderer& operator=(const HiResRenderer&) = delete;
 
@@ -81,42 +113,83 @@ public:
     // The high-resolution buffer of a colour image, created from RDRAM on first
     // use. After unbind(), the next bind() first copies in whatever changed in
     // RDRAM without the RDP drawing it. Returns nullptr for unsupported images.
-    HiResTarget* bind(u32 addr, u32 width, u8 size, const u8* rdram, size_t rdram_size);
+    // The RDP keeps the target's shadow up to date as it draws.
+    virtual HiResTarget* bind(u32 addr, u32 width, u8 size, const u8* rdram, size_t rdram_size) = 0;
     void unbind() { bound_ = nullptr; }
 
     // `serial` changes whenever the RDP state `st` was built from changes, and
     // `tmem_gen` whenever TMEM does, so consecutive draws share one recorded
     // copy of both.
-    void triangle(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen,
-                  const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area);
-    void tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly, u32 lrx,
-                  u32 lry, u32 tile, f32 s, f32 tc, f32 dsdx, f32 dtdy, bool flip);
+    virtual void triangle(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen,
+                          const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area) = 0;
+    virtual void tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly, u32 lrx,
+                          u32 lry, u32 tile, f32 s, f32 tc, f32 dsdx, f32 dtdy, bool flip) = 0;
     // FILL-mode rectangle, native pixel bounds [x0, x1) x [y0, y1).
-    void fill_rect(HiResTarget* t, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb);
+    virtual void fill_rect(HiResTarget* t, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb) = 0;
     // Pixels shaded at native resolution (lines), each drawn as a scale x scale block.
     struct Pixel { u16 x, y; u32 color; f32 z; };
-    void pixels(HiResTarget* t, const DrawState& st, u64 serial, const std::vector<Pixel>& px);
+    virtual void pixels(HiResTarget* t, const DrawState& st, u64 serial, const std::vector<Pixel>& px) = 0;
     // A block of colours shaded at native resolution and drawn at depth 0 (S2DEX backgrounds).
-    void blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h, const u32* colors);
-    void clear_depth();
-    // Starts the workers on everything recorded so far.
-    void flush();
+    virtual void blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h,
+                      const u32* colors) = 0;
+    virtual void clear_depth() = 0;
+    // Starts drawing everything recorded so far.
+    virtual void flush() = 0;
 
     // ---- Output (emulation thread) ----------------------------------------
-    // Builds the displayed image, (width * scale) x (240 * scale) ARGB8888,
-    // once the draws into the displayed buffer are done. (Draws into the
-    // buffer the game is working on next carry on in the background.)
+    // The displayed frame: the scanned-out part of the frame buffer placed on
+    // the VI's canvas, both `scale` times their size (VIScanout::place).
+    // Draws into the buffer the game works on next may still be going on.
     // Returns false when no high-resolution buffer covers the scanned-out
     // frame buffer.
+    virtual bool present(const VIScanout& so, const u8* rdram, size_t rdram_size, VideoFrame& out) = 0;
+    // Once per displayed frame, after present(): frees buffers the game
+    // stopped using.
+    virtual void end_frame() = 0;
+
+protected:
+    explicit HiResRenderer(u32 scale) : scale_(std::clamp<u32>(scale, 1, kMaxScale)) {}
+
+    const u32 scale_;
+    HiResTarget* bound_ = nullptr;
+};
+
+// Makes the renderer for a scale; the RDP uses CpuHiResRenderer without one.
+using HiResFactory = std::function<std::unique_ptr<HiResRenderer>(u32 scale)>;
+
+// Replays the recorded draws on worker threads. Each worker takes whole
+// horizontal bands of output rows and executes every recorded command for its
+// band in order. Bands never share pixels, so the workers need no locking
+// beyond claiming a band.
+class CpuHiResRenderer final : public HiResRenderer {
+public:
+    explicit CpuHiResRenderer(u32 scale);
+    ~CpuHiResRenderer() override;
+
+    HiResTarget* bind(u32 addr, u32 width, u8 size, const u8* rdram, size_t rdram_size) override;
+    void triangle(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen,
+                  const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area) override;
+    void tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly, u32 lrx,
+                  u32 lry, u32 tile, f32 s, f32 tc, f32 dsdx, f32 dtdy, bool flip) override;
+    void fill_rect(HiResTarget* t, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb) override;
+    void pixels(HiResTarget* t, const DrawState& st, u64 serial, const std::vector<Pixel>& px) override;
+    void blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h, const u32* colors) override;
+    void clear_depth() override;
+    void flush() override;
+    bool present(const VIScanout& so, const u8* rdram, size_t rdram_size, VideoFrame& out) override;
+    // Starts a new command segment and frees buffers the game stopped using.
+    void end_frame() override;
+
+    // Builds the frame buffer part of the displayed image, (width * scale) x
+    // (240 * scale) ARGB8888, once the draws into the displayed buffer are
+    // done. (Draws into the buffer the game is working on next carry on in
+    // the background.)
     bool compose(const VIScanout& so, const u8* rdram, size_t rdram_size, std::vector<u32>& out, int& out_w, int& out_h);
-    // Once per displayed frame, after compose(): starts a new command
-    // segment and frees buffers the game stopped using.
-    void end_frame();
 
 private:
     enum class CmdType : u8 { Triangle, TexRect, Fill, Pixels, Blit, Upload, DepthClear };
     struct RVert { f32 sx, sy, sz, w, u, v; u8 r, g, b, a; };
-    struct UploadPx { u16 x, y; u32 argb; };
+    using UploadPx = hires::ChangedPixel;
     struct TriData { RVert v[3]; f32 area; };
     struct RectData { u32 ulx, uly, lrx, lry, tile; f32 s, t, dsdx, dtdy; bool flip; };
     struct FillData { u32 x0, y0, x1, y1, argb; };
@@ -187,7 +260,6 @@ private:
     void attach_tex_cache(DrawState* rs, u32 tile, u64 tmem_gen);
     HiResDepth* depth_for(const DrawState& st);
     HiResTarget* find(u32 addr, u32 width, u8 size) const;
-    HiResTarget* find_scanout(const VIScanout& so, u32& first_line) const;
 
     u64 executed() const;        // number of commands every band has executed
     void wait_executed(u64 n);   // until executed() >= n; the calling thread helps
@@ -195,7 +267,6 @@ private:
     void worker_main(int index);
     void execute(const Cmd& c, s32 y0, s32 y1) const;
 
-    const u32 scale_;
     Segment segs_[kSegments];
     int cur_ = 0;                // segment being recorded
     u64 count_ = 0;              // commands recorded
@@ -218,8 +289,8 @@ private:
 
     std::vector<std::unique_ptr<HiResTarget>> targets_;
     std::vector<std::unique_ptr<HiResDepth>> depths_;
-    HiResTarget* bound_ = nullptr;
     std::vector<UploadPx> changed_; // scratch for bind()
+    std::vector<u32> composed_;     // scratch for present()
     u64 frame_ = 0;
 
     std::unique_ptr<Band[]> bands_;

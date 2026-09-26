@@ -1,12 +1,12 @@
 #pragma once
-// Maps host input (keyboard + SDL GameController devices, which covers
+// Maps host input (keyboard + SDL gamepad devices, which covers
 // XInput, DirectInput, PlayStation, Switch Pro and most USB pads on all three
 // desktop platforms) onto N64 controller state.
 
 #include "emu_core.hpp"
 #include "settings.hpp"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <string>
 #include <vector>
 
@@ -14,7 +14,7 @@ namespace ui {
 
 struct GamepadInfo {
     SDL_JoystickID id;
-    SDL_GameController* handle;
+    SDL_Gamepad* handle;
     std::string name;
 };
 
@@ -44,8 +44,8 @@ public:
     static std::string pad_label(int binding);
 
 private:
-    SDL_GameController* pad_for_device(int device) const;
-    float pad_value(SDL_GameController* pad, int binding) const;
+    SDL_Gamepad* pad_for_device(int device) const;
+    float pad_value(SDL_Gamepad* pad, int binding) const;
 
     std::vector<GamepadInfo> pads_;
     int capture_port_ = -1;

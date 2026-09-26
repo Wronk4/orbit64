@@ -1,13 +1,15 @@
 #include "app.hpp"
 #include "platform.hpp"
+#include "../gpu/rdp_gpu.hpp"
 
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
-#include "imgui_impl_sdlrenderer2.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_sdlrenderer3.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
 
 namespace ui {
@@ -22,12 +24,18 @@ namespace {
 struct AudioCtx {
     EmuCore* core;
     std::atomic<float>* volume;
+    std::vector<float> buf; // audio thread only
 };
 AudioCtx g_audio_ctx;
 
-void audio_callback(void* userdata, Uint8* stream, int len) {
+// SDL asks for `additional` more bytes of interleaved stereo float samples.
+void SDLCALL audio_callback(void* userdata, SDL_AudioStream* stream, int additional, int /*total*/) {
     auto* ctx = static_cast<AudioCtx*>(userdata);
-    ctx->core->pull_audio(reinterpret_cast<float*>(stream), static_cast<size_t>(len) / sizeof(float), ctx->volume->load());
+    const size_t count = static_cast<size_t>(std::max(additional, 0)) / sizeof(float) & ~size_t(1);
+    if (count == 0) return;
+    ctx->buf.resize(count);
+    ctx->core->pull_audio(ctx->buf.data(), count, ctx->volume->load());
+    SDL_PutAudioStreamData(stream, ctx->buf.data(), static_cast<int>(count * sizeof(float)));
 }
 } // namespace
 
@@ -44,17 +52,15 @@ int App::run(const std::string& initial_rom) {
 }
 
 bool App::init() {
-    // Per-monitor DPI awareness on Windows; harmless elsewhere.
-    // Hints are set by name so older SDL2 headers without these macros still compile.
-    SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
-    SDL_SetHint("SDL_IME_SHOW_UI", "1");
+    SDL_SetAppMetadata(kAppName, kAppVersion, "com.orbit64.emulator");
+    SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, "0"); // the OS draws the IME candidate window
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "0");
     // Keep gamepad input flowing while the window is in the background.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     // Don't minimise when a fullscreen window loses focus (alt-tab friendly).
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_TIMER) != 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kAppName, SDL_GetError(), nullptr);
         return false;
     }
@@ -73,7 +79,7 @@ bool App::init() {
     }
 
     // Window
-    Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN;
+    SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
     int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED;
     int w = 1280, h = 800;
     if (settings_.remember_window) {
@@ -82,36 +88,33 @@ bool App::init() {
         if (settings_.window_x != -1) {
             // Only restore the position if it's still on a connected display.
             SDL_Rect r{settings_.window_x, settings_.window_y, w, h};
-            for (int d = 0; d < SDL_GetNumVideoDisplays(); ++d) {
+            int count = 0;
+            SDL_DisplayID* displays = SDL_GetDisplays(&count);
+            for (int d = 0; displays && d < count; ++d) {
                 SDL_Rect b;
-                if (SDL_GetDisplayUsableBounds(d, &b) == 0 && SDL_HasIntersection(&r, &b)) {
+                if (SDL_GetDisplayUsableBounds(displays[d], &b) && SDL_HasRectIntersection(&r, &b)) {
                     x = settings_.window_x;
                     y = settings_.window_y;
                     break;
                 }
             }
+            SDL_free(displays);
         }
     }
     std::string title = std::string(kAppName) + " \xE2\x80\x94 Nintendo 64 Emulator";
-    window_ = SDL_CreateWindow(title.c_str(), x, y, w, h, flags);
+    window_ = SDL_CreateWindow(title.c_str(), w, h, flags);
     if (!window_) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kAppName, SDL_GetError(), nullptr);
         return false;
     }
+    SDL_SetWindowPosition(window_, x, y);
     SDL_SetWindowMinimumSize(window_, 800, 520);
     if (settings_.remember_window && settings_.window_maximized) SDL_MaximizeWindow(window_);
 
-    // SDL picks the best native backend: Direct3D on Windows, Metal on macOS,
-    // OpenGL on Linux. No platform-specific rendering code is needed.
-    Uint32 rflags = SDL_RENDERER_ACCELERATED | (settings_.vsync ? SDL_RENDERER_PRESENTVSYNC : 0);
-    renderer_ = SDL_CreateRenderer(window_, -1, rflags);
-    if (!renderer_) renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
-    if (!renderer_) {
+    if (!create_renderer()) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kAppName, SDL_GetError(), window_);
         return false;
     }
-    SDL_RendererInfo info;
-    if (SDL_GetRendererInfo(renderer_, &info) == 0) renderer_name_ = info.name;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -123,8 +126,8 @@ bool App::init() {
     // macOS convention: Cmd acts as the shortcut modifier inside text fields.
     io.ConfigMacOSXBehaviors = platform::current_os() == platform::OS::MacOS;
 
-    ImGui_ImplSDL2_InitForSDLRenderer(window_, renderer_);
-    ImGui_ImplSDLRenderer2_Init(renderer_);
+    ImGui_ImplSDL3_InitForSDLRenderer(window_, renderer_);
+    ImGui_ImplSDLRenderer3_Init(renderer_);
 
     update_ui_scale(true);
     input_.open_all();
@@ -161,21 +164,81 @@ void App::shutdown() {
     for (auto& [k, t] : thumbs_) if (t) SDL_DestroyTexture(t);
     thumbs_.clear();
     images_.clear();
-    if (game_tex_) SDL_DestroyTexture(game_tex_);
     if (scaled_tex_) SDL_DestroyTexture(scaled_tex_);
     for (auto& [k, t] : dbg_textures_) SDL_DestroyTexture(t);
     dbg_textures_.clear();
-    ImGui_ImplSDLRenderer2_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
+    ImGui_ImplSDLRenderer3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    SDL_DestroyRenderer(renderer_);
+    destroy_renderer();
     SDL_DestroyWindow(window_);
     SDL_Quit();
 }
 
+// SDL's GPU renderer on a device of our own (Metal on macOS, Vulkan or
+// Direct3D 12 on Windows, Vulkan on Linux), so the high-resolution RDP
+// renderer can run its compute shaders on the device that shows the UI.
+// Without a usable GPU driver any other SDL renderer will do; the RDP then
+// renders high resolutions on the CPU.
+bool App::create_renderer() {
+    if (settings_.video_backend != 1) { // 1 = compatibility (no SDL_GPU)
+        gpu_ = gpu::create_device();
+        if (gpu_) {
+            renderer_ = SDL_CreateGPURenderer(gpu_, window_);
+            if (!renderer_) {
+                SDL_Log("GPU renderer unavailable: %s", SDL_GetError());
+                SDL_DestroyGPUDevice(gpu_);
+                gpu_ = nullptr;
+            }
+        } else {
+            SDL_Log("No SDL_GPU device: %s", SDL_GetError());
+        }
+    }
+    if (!renderer_) renderer_ = SDL_CreateRenderer(window_, nullptr);
+    if (!renderer_) return false;
+    SDL_SetRenderVSync(renderer_, settings_.vsync ? 1 : SDL_RENDERER_VSYNC_DISABLED);
+    const char* rn = SDL_GetRendererName(renderer_);
+    renderer_name_ = rn ? rn : "SDL";
+    if (gpu_) {
+        renderer_name_ += std::string(" (") + SDL_GetGPUDeviceDriver(gpu_) + ")";
+        gpu_dev_ = std::make_shared<gpu::Device>(gpu_);
+    }
+    apply_hires_renderer();
+    return true;
+}
+
+// Internal resolutions render on the GPU when its pipelines work (and
+// ORBIT64_HIRES=cpu doesn't ask for the CPU renderer).
+void App::apply_hires_renderer() {
+    const char* force = std::getenv("ORBIT64_HIRES");
+    const bool use_gpu = gpu_dev_ && gpu_dev_->ok() && !(force && std::string(force) == "cpu");
+    core_.set_hires_factory(use_gpu ? gpu::make_hires_factory(gpu_dev_) : HiResFactory());
+}
+
+void App::destroy_renderer() {
+    core_.set_hires_factory(nullptr);
+    release_gpu_frames();
+    if (stream_tex_) SDL_DestroyTexture(stream_tex_);
+    stream_tex_ = nullptr;
+    game_tex_ = nullptr;
+    gpu_dev_.reset();
+    if (renderer_) SDL_DestroyRenderer(renderer_);
+    renderer_ = nullptr;
+    if (gpu_) SDL_DestroyGPUDevice(gpu_);
+    gpu_ = nullptr;
+}
+
+void App::release_gpu_frames() {
+    frame_ = VideoFrame{};
+    for (auto& w : wrapped_) SDL_DestroyTexture(w.tex);
+    wrapped_.clear();
+}
+
+void App::pump_video() {}
+
 void App::save_settings() {
     if (window_ && !fullscreen_) {
-        Uint32 f = SDL_GetWindowFlags(window_);
+        SDL_WindowFlags f = SDL_GetWindowFlags(window_);
         settings_.window_maximized = (f & SDL_WINDOW_MAXIMIZED) != 0;
         if (!settings_.window_maximized && !(f & SDL_WINDOW_MINIMIZED)) {
             SDL_GetWindowPosition(window_, &settings_.window_x, &settings_.window_y);
@@ -188,9 +251,9 @@ void App::save_settings() {
 void App::update_ui_scale(bool force) {
     int ww = 0, wh = 0, dw = 0, dh = 0;
     SDL_GetWindowSize(window_, &ww, &wh);
-    SDL_GetRendererOutputSize(renderer_, &dw, &dh);
+    SDL_GetWindowSizeInPixels(window_, &dw, &dh);
     float fb = ww > 0 ? static_cast<float>(dw) / ww : 1.0f;
-    float sys = platform::system_ui_scale(std::max(0, SDL_GetWindowDisplayIndex(window_)));
+    float sys = platform::system_ui_scale(SDL_GetDisplayForWindow(window_));
     float scale = settings_.ui_scale_pct > 0 ? settings_.ui_scale_pct / 100.0f : sys;
     scale = std::clamp(scale, 0.75f, 3.0f);
     if (!force && std::fabs(scale - applied_scale_) < 0.01f && std::fabs(fb - applied_fb_scale_) < 0.01f &&
@@ -205,39 +268,58 @@ void App::update_ui_scale(bool force) {
     apply_palette(settings_.accent);
     if (fonts_changed) {
         build_fonts(scale, fb);
-        ImGui_ImplSDLRenderer2_DestroyFontsTexture();
-        ImGui_ImplSDLRenderer2_CreateFontsTexture();
+        ImGui_ImplSDLRenderer3_DestroyFontsTexture();
+        ImGui_ImplSDLRenderer3_CreateFontsTexture();
     }
 }
 
 void App::open_audio() {
     close_audio();
     audio_devices_.clear();
-    for (int i = 0; i < SDL_GetNumAudioDevices(0); ++i)
-        if (const char* n = SDL_GetAudioDeviceName(i, 0)) audio_devices_.push_back(n);
+    SDL_AudioDeviceID chosen = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    int count = 0;
+    if (SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count)) {
+        for (int i = 0; i < count; ++i) {
+            const char* n = SDL_GetAudioDeviceName(ids[i]);
+            if (!n) continue;
+            audio_devices_.push_back(n);
+            if (!settings_.audio_device.empty() && settings_.audio_device == n) chosen = ids[i];
+        }
+        SDL_free(ids);
+    }
     if (!settings_.audio_enabled) return;
 
-    SDL_AudioSpec want{}, have{};
+    // The device buffer size; SDL treats it as a hint.
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, std::to_string(settings_.buffer_frames).c_str());
+    SDL_AudioSpec want{};
     want.freq = settings_.sample_rate;
-    want.format = AUDIO_F32SYS;
+    want.format = SDL_AUDIO_F32;
     want.channels = 2;
-    want.samples = static_cast<Uint16>(settings_.buffer_frames);
-    want.callback = audio_callback;
-    g_audio_ctx = {&core_, &audio_volume_};
-    want.userdata = &g_audio_ctx;
-    const char* dev = settings_.audio_device.empty() ? nullptr : settings_.audio_device.c_str();
-    audio_dev_ = SDL_OpenAudioDevice(dev, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-    if (!audio_dev_ && dev) audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    g_audio_ctx.core = &core_;
+    g_audio_ctx.volume = &audio_volume_;
+    audio_dev_ = SDL_OpenAudioDeviceStream(chosen, &want, audio_callback, &g_audio_ctx);
+    if (!audio_dev_ && chosen != SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK)
+        audio_dev_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, audio_callback, &g_audio_ctx);
     if (audio_dev_) {
-        audio_freq_ = have.freq;
-        core_.set_audio_output(static_cast<std::uint32_t>(have.freq), have.samples);
-        SDL_PauseAudioDevice(audio_dev_, 0);
+        // Produce samples at the rate the device really runs at, so SDL
+        // doesn't resample them a second time (the core's own resampler is
+        // better), and pace the emulation to the device's clock.
+        SDL_AudioSpec have{};
+        int frames = settings_.buffer_frames;
+        if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(audio_dev_), &have, &frames) && have.freq > 0 &&
+            have.freq != want.freq) {
+            want.freq = have.freq;
+            SDL_SetAudioStreamFormat(audio_dev_, &want, nullptr);
+        }
+        audio_freq_ = want.freq;
+        core_.set_audio_output(static_cast<std::uint32_t>(want.freq), static_cast<std::uint32_t>(std::max(frames, 64)));
+        SDL_ResumeAudioStreamDevice(audio_dev_);
     }
 }
 
 void App::close_audio() {
-    if (audio_dev_) SDL_CloseAudioDevice(audio_dev_);
-    audio_dev_ = 0;
+    if (audio_dev_) SDL_DestroyAudioStream(audio_dev_);
+    audio_dev_ = nullptr;
     audio_freq_ = 0;
     core_.set_audio_output(0, 0);
 }
@@ -259,7 +341,8 @@ void App::main_loop() {
         SDL_Event e;
         while (SDL_PollEvent(&e)) process_event(e);
 
-        Uint32 wflags = SDL_GetWindowFlags(window_);
+        pump_video(); // keeps the GPU renderer's queue moving even while minimised
+        SDL_WindowFlags wflags = SDL_GetWindowFlags(window_);
         if (wflags & SDL_WINDOW_MINIMIZED) {
             SDL_Delay(30);
             continue;
@@ -304,10 +387,11 @@ void App::main_loop() {
         bool hide_cursor = fullscreen_ && settings_.hide_cursor_fullscreen && view_ == View::Game &&
                            core_.state() == RunState::Running && ImGui::GetTime() - last_mouse_move_ > 2.0 &&
                            !settings_open_;
-        SDL_ShowCursor(hide_cursor ? SDL_DISABLE : SDL_ENABLE);
+        if (hide_cursor) SDL_HideCursor();
+        else SDL_ShowCursor();
 
-        ImGui_ImplSDLRenderer2_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
+        ImGui_ImplSDLRenderer3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         draw_root();
         ImGui::Render();
@@ -320,10 +404,10 @@ void App::main_loop() {
         // The SDL_Renderer backend emits logical (window) coordinates; SDL scales
         // them to physical pixels on Retina / high-DPI displays.
         const ImVec2 fbs = ImGui::GetIO().DisplayFramebufferScale;
-        SDL_RenderSetScale(renderer_, fbs.x, fbs.y);
+        SDL_SetRenderScale(renderer_, fbs.x, fbs.y);
         SDL_SetRenderDrawColor(renderer_, 10, 11, 14, 255);
         SDL_RenderClear(renderer_);
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer_);
+        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer_);
         if (!ui_test_dir_.empty()) ui_test_tick();
         SDL_RenderPresent(renderer_);
         if (!settings_.vsync) SDL_Delay(2); // keep the UI thread from spinning at thousands of fps
@@ -332,7 +416,7 @@ void App::main_loop() {
 
 void App::process_event(const SDL_Event& e) {
     // Rebinding capture takes priority over everything else.
-    if (input_.capturing() && (e.type == SDL_KEYDOWN || e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERAXISMOTION)) {
+    if (input_.capturing() && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION)) {
         input_.handle_event(e);
         int port, in, key, pad;
         if (input_.consume_capture(port, in, key, pad)) {
@@ -344,36 +428,41 @@ void App::process_event(const SDL_Event& e) {
         return;
     }
 
-    ImGui_ImplSDL2_ProcessEvent(&e);
+    ImGui_ImplSDL3_ProcessEvent(&e);
     input_.handle_event(e);
 
     switch (e.type) {
-        case SDL_QUIT: request_quit(); break;
-        case SDL_WINDOWEVENT:
-            if (e.window.windowID != SDL_GetWindowID(window_)) break;
-            if (e.window.event == SDL_WINDOWEVENT_CLOSE) request_quit();
-            if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                window_focused_ = false;
-                if (settings_.pause_on_focus_loss && core_.state() == RunState::Running && !native_job_) {
-                    core_.pause(true);
-                    auto_paused_ = true;
-                }
-            }
-            if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
-                window_focused_ = true;
-                if (auto_paused_ && core_.state() == RunState::Paused) core_.pause(false);
-                auto_paused_ = false;
-            }
-            if (e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED || e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-                update_ui_scale(false);
+        case SDL_EVENT_QUIT: request_quit(); break;
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            if (e.window.windowID == SDL_GetWindowID(window_)) request_quit();
             break;
-        case SDL_MOUSEMOTION: last_mouse_move_ = ImGui::GetTime(); break;
-        case SDL_KEYDOWN:
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            if (e.window.windowID != SDL_GetWindowID(window_)) break;
+            window_focused_ = false;
+            if (settings_.pause_on_focus_loss && core_.state() == RunState::Running && !native_job_) {
+                core_.pause(true);
+                auto_paused_ = true;
+            }
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            if (e.window.windowID != SDL_GetWindowID(window_)) break;
+            window_focused_ = true;
+            if (auto_paused_ && core_.state() == RunState::Paused) core_.pause(false);
+            auto_paused_ = false;
+            break;
+        case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        case SDL_EVENT_WINDOW_RESIZED:
+            if (e.window.windowID == SDL_GetWindowID(window_)) update_ui_scale(false);
+            break;
+        case SDL_EVENT_MOUSE_MOTION: last_mouse_move_ = ImGui::GetTime(); break;
+        case SDL_EVENT_KEY_DOWN:
             if (handle_shortcut(e.key)) break;
             break;
-        case SDL_DROPFILE: {
-            fs::path p = platform::utf8_to_path(e.drop.file);
-            SDL_free(e.drop.file);
+        case SDL_EVENT_DROP_FILE: {
+            if (!e.drop.data) break;
+            fs::path p = platform::utf8_to_path(e.drop.data);
             std::error_code ec;
             if (fs::is_directory(p, ec)) {
                 std::string s = platform::path_to_utf8(p);
@@ -419,26 +508,26 @@ std::vector<Shortcut> App::shortcuts() const {
 
 bool App::handle_shortcut(const SDL_KeyboardEvent& k) {
     if (k.repeat) return false;
-    const unsigned mod = k.keysym.mod;
+    const unsigned mod = k.mod;
     const bool primary = platform::primary_mod_down(mod);
-    const bool shift = (mod & KMOD_SHIFT) != 0;
-    const bool alt = (mod & KMOD_ALT) != 0;
+    const bool shift = (mod & SDL_KMOD_SHIFT) != 0;
+    const bool alt = (mod & SDL_KMOD_ALT) != 0;
     const bool mac = platform::current_os() == platform::OS::MacOS;
-    const SDL_Keycode key = k.keysym.sym;
+    const SDL_Keycode key = k.key;
     const bool modal_open = settings_open_ || about_open_ || confirm_open_ || browser_.is_open() || props_open_ || error_open_;
 
     if (primary) {
         switch (key) {
-            case SDLK_o:
+            case SDLK_O:
                 if (modal_open) return false;
                 if (shift) action_add_folder(); else action_open_rom();
                 return true;
-            case SDLK_l:
+            case SDLK_L:
                 if (modal_open) return false;
                 if (shift) load_state(state_slot_);
                 else view_ = view_ == View::Library ? View::Game : View::Library;
                 return true;
-            case SDLK_s:
+            case SDLK_S:
                 if (modal_open || shift) return false;
                 save_state(state_slot_);
                 return true;
@@ -447,15 +536,15 @@ bool App::handle_shortcut(const SDL_KeyboardEvent& k) {
                 if (modal_open || shift) return false;
                 select_state_slot(static_cast<int>(key - SDLK_0));
                 return true;
-            case SDLK_p: if (!modal_open) toggle_pause(); return true;
-            case SDLK_r: if (!modal_open) reset_game(); return true;
+            case SDLK_P: if (!modal_open) toggle_pause(); return true;
+            case SDLK_R: if (!modal_open) reset_game(); return true;
             case SDLK_PERIOD: if (!modal_open) request_stop(); return true;
-            case SDLK_i: settings_.show_info_panel = !settings_.show_info_panel; return true;
+            case SDLK_I: settings_.show_info_panel = !settings_.show_info_panel; return true;
             case SDLK_COMMA: if (!modal_open) open_settings(SettingsPage::General); return true;
-            case SDLK_q: request_quit(); return true;
-            case SDLK_f:
+            case SDLK_Q: request_quit(); return true;
+            case SDLK_F:
                 // macOS: Cmd+Ctrl+F is the system-standard fullscreen shortcut.
-                if (mac && (mod & KMOD_CTRL)) { toggle_fullscreen(); return true; }
+                if (mac && (mod & SDL_KMOD_CTRL)) { toggle_fullscreen(); return true; }
                 return false;
             default: break;
         }
@@ -499,7 +588,7 @@ void App::update_input() {
     }
 
     // Fast-forward while Tab is held (only when the game has keyboard focus).
-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const bool* keys = SDL_GetKeyboardState(nullptr);
     core_.set_fast_forward(keyboard_to_game && keys[SDL_SCANCODE_TAB]);
     core_.set_ff_multiplier(settings_.ff_speed);
     core_.set_limit_speed(settings_.limit_speed);
@@ -508,26 +597,78 @@ void App::update_input() {
 }
 
 void App::update_game_texture() {
-    int w = 0, h = 0, scale = 1;
-    if (!core_.fetch_frame(frame_pixels_, w, h, scale, frame_serial_)) return;
-    if (frame_pixels_.empty() || w <= 0 || h <= 0) {
+    if (!core_.fetch_frame(frame_, frame_serial_)) return;
+    if (frame_.empty()) {
         has_frame_ = false;
         return;
     }
-    if (!game_tex_ || w != game_tex_w_ || h != game_tex_h_) {
-        if (game_tex_) SDL_DestroyTexture(game_tex_);
-        game_tex_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
-        game_tex_w_ = w;
-        game_tex_h_ = h;
-        game_tex_filter_ = -1;
+    const int w = frame_.w, h = frame_.h;
+    SDL_Texture* tex = frame_.gpu ? gpu_frame_texture(frame_.gpu) : nullptr;
+    if (!tex) {
+        std::vector<std::uint32_t> read;
+        const std::vector<std::uint32_t>* px = &frame_.pixels;
+        if (frame_.gpu) {
+            frame_.gpu->read(read);
+            px = &read;
+        }
+        if (px->size() != static_cast<size_t>(w) * h) {
+            has_frame_ = false;
+            return;
+        }
+        if (!stream_tex_ || w != stream_w_ || h != stream_h_) {
+            if (stream_tex_) SDL_DestroyTexture(stream_tex_);
+            stream_tex_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+            stream_w_ = w;
+            stream_h_ = h;
+            game_tex_filter_ = -1;
+        }
+        if (!stream_tex_) {
+            has_frame_ = false;
+            return;
+        }
+        SDL_UpdateTexture(stream_tex_, nullptr, px->data(), w * static_cast<int>(sizeof(std::uint32_t)));
+        tex = stream_tex_;
     }
-    game_scale_ = std::max(1, scale);
+    if (tex != game_tex_) game_tex_filter_ = -1;
+    game_tex_ = tex;
+    game_tex_w_ = w;
+    game_tex_h_ = h;
+    game_scale_ = std::max(1, frame_.scale);
     if (game_tex_filter_ != settings_.filter) {
-        SDL_SetTextureScaleMode(game_tex_, settings_.filter == 0 ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+        SDL_SetTextureScaleMode(game_tex_, settings_.filter == 0 ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
         game_tex_filter_ = settings_.filter;
     }
-    SDL_UpdateTexture(game_tex_, nullptr, frame_pixels_.data(), w * static_cast<int>(sizeof(std::uint32_t)));
     has_frame_ = true;
+}
+
+SDL_Texture* App::gpu_frame_texture(const std::shared_ptr<GpuImage>& image) {
+    // Wrappers of images the renderer has let go of are stale. (Nothing
+    // queued for drawing uses them: the frame shown last time is frame_.)
+    wrapped_.erase(std::remove_if(wrapped_.begin(), wrapped_.end(),
+                                  [](const WrappedImage& w) {
+                                      if (!w.image.expired()) return false;
+                                      SDL_DestroyTexture(w.tex);
+                                      return true;
+                                  }),
+                   wrapped_.end());
+    if (!gpu_) return nullptr;
+    for (const auto& w : wrapped_)
+        if (w.image.lock() == image) return w.tex;
+    SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, image->texture());
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_ABGR8888); // R8G8B8A8 bytes
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, image->w);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, image->h);
+    SDL_Texture* tex = SDL_CreateTextureWithProperties(renderer_, props);
+    SDL_DestroyProperties(props);
+    if (!tex) {
+        SDL_Log("Can't show GPU frames directly: %s", SDL_GetError());
+        return nullptr;
+    }
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+    wrapped_.push_back({image, tex});
+    return tex;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +771,7 @@ void App::launch(const fs::path& rom) {
         last_thumb_time_ = ImGui::GetTime() - 50.0; // first thumbnail ~10 s in
         fps_history_.clear();
         has_frame_ = false;
+        game_tex_ = nullptr;
         view_ = View::Game;
         std::string title = current_rom_.display_title + " \xE2\x80\x94 " + kAppName;
         SDL_SetWindowTitle(window_, title.c_str());
@@ -651,6 +793,8 @@ void App::stop_now() {
     clear_state_slots();
     library_.add_play_time(current_key_, static_cast<std::int64_t>(played));
     has_frame_ = false;
+    game_tex_ = nullptr;
+    release_gpu_frames(); // the stopped game's frames in video memory
     // Debugger state refers to the stopped game's memory and scene.
     dbg_.snap.reset();
     dbg_.objects.clear();
@@ -700,9 +844,14 @@ void App::reset_game() {
 
 void App::set_fullscreen(bool on) {
     if (on == fullscreen_) return;
-    Uint32 mode = on ? (settings_.fullscreen_mode == 1 ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_FULLSCREEN_DESKTOP) : 0;
-    if (on) save_settings(); // remember windowed geometry first
-    if (SDL_SetWindowFullscreen(window_, mode) == 0) {
+    if (on) {
+        save_settings(); // remember windowed geometry first
+        // Exclusive fullscreen uses the desktop's own mode; "borderless" none.
+        const SDL_DisplayMode* dm = nullptr;
+        if (settings_.fullscreen_mode == 1) dm = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window_));
+        SDL_SetWindowFullscreenMode(window_, dm);
+    }
+    if (SDL_SetWindowFullscreen(window_, on)) {
         fullscreen_ = on;
         chrome_reveal_ = 1.0f;
         last_mouse_move_ = ImGui::GetTime();
@@ -712,12 +861,10 @@ void App::set_fullscreen(bool on) {
 void App::toggle_fullscreen() { set_fullscreen(!fullscreen_); }
 
 static bool write_bmp(const fs::path& path, const std::vector<std::uint32_t>& px, int w, int h) {
-    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormatFrom(const_cast<std::uint32_t*>(px.data()), w, h, 32, w * 4,
-                                                        SDL_PIXELFORMAT_ARGB8888);
+    SDL_Surface* s = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_ARGB8888, const_cast<std::uint32_t*>(px.data()), w * 4);
     if (!s) return false;
-    SDL_RWops* rw = SDL_RWFromFile(platform::path_to_utf8(path).c_str(), "wb"); // SDL expects UTF-8 on all platforms
-    bool ok = rw && SDL_SaveBMP_RW(s, rw, 1) == 0;
-    SDL_FreeSurface(s);
+    bool ok = SDL_SaveBMP(s, platform::path_to_utf8(path).c_str()); // SDL expects UTF-8 on all platforms
+    SDL_DestroySurface(s);
     return ok;
 }
 
@@ -769,8 +916,8 @@ SDL_Texture* App::thumbnail_texture(const std::string& key) {
     if (fs::exists(p, ec)) {
         if (SDL_Surface* s = SDL_LoadBMP(platform::path_to_utf8(p).c_str())) {
             tex = SDL_CreateTextureFromSurface(renderer_, s);
-            if (tex) SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
-            SDL_FreeSurface(s);
+            if (tex) SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+            SDL_DestroySurface(s);
         }
     }
     if (tex) thumbs_[key] = tex;

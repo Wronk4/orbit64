@@ -10,6 +10,7 @@
 #include <atomic>
 #include "../audio_stream.hpp"
 #include "../rdp.hpp"
+#include "../video_frame.hpp"
 #include <condition_variable>
 #include <cstring>
 #include <cstdint>
@@ -137,6 +138,10 @@ public:
     // Internal resolution of the software RDP: 1 = the game's frame buffer
     // size, 2..8 = that many times larger. Applied at the next frame.
     void set_internal_scale(int scale) { internal_scale_ = scale; }
+    // Who renders internal resolutions above 1 (the GPU renderer), or
+    // nullptr for the CPU. Applied at the next frame; the high-resolution
+    // buffers start over.
+    void set_hires_factory(HiResFactory f);
     // Turbo: run continuously at the fast-forward multiplier (like holding Tab).
     void set_turbo(bool on) { turbo_ = on; }
     bool turbo() const { return turbo_.load(); }
@@ -169,12 +174,12 @@ public:
     bool can_undo_load() const { return has_undo_.load(); }
     bool poll_state_event(StateEvent& ev);
 
-    // Video: copies the newest frame if it changed since `seen_serial`.
-    // Pixels are ARGB8888 (0xAARRGGBB) with alpha forced opaque. `scale` is
-    // the internal resolution it was rendered at: the game's frame buffer is
-    // (w / scale) x (h / scale).
-    bool fetch_frame(std::vector<std::uint32_t>& out, int& w, int& h, int& scale, std::uint64_t& seen_serial);
-    // Copy of the last completed frame regardless of serial (screenshots/thumbnails).
+    // Video: the newest frame if it changed since `seen_serial`. Pixels are
+    // ARGB8888 (0xAARRGGBB) with alpha forced opaque, unless the frame is
+    // in video memory (VideoFrame::gpu). `scale` is the internal resolution
+    // it was rendered at: the game's frame buffer is (w / scale) x (h / scale).
+    bool fetch_frame(VideoFrame& out, std::uint64_t& seen_serial);
+    // The last completed frame as pixels regardless of serial (screenshots/thumbnails).
     bool snapshot(std::vector<std::uint32_t>& out, int& w, int& h, int* scale = nullptr);
 
     CoreStats stats();
@@ -193,7 +198,7 @@ private:
     void log_pacing(FrameClock& fc);
     void apply_memory_writes();
     void publish_debug(std::uint64_t frame, bool frame_ran);
-    void publish_frame(FrameClock& fc, int w, int h, int scale);
+    void publish_frame(FrameClock& fc);
     void request_state(StateEvent::Op op, const std::filesystem::path& path);
     // Save states, on the emulation thread.
     void process_state_requests(FrameClock& fc);
@@ -216,6 +221,9 @@ private:
     std::atomic<int> cpu_core_{1};
     std::atomic<int> fps_limit_{0};
     std::atomic<int> internal_scale_{1};
+    std::mutex factory_mutex_;
+    HiResFactory hires_factory_;
+    bool factory_dirty_ = false; // guarded by factory_mutex_
     std::atomic<bool> turbo_{false};
     std::atomic<int> advance_req_{0};
     std::mutex wake_mutex_;
@@ -253,8 +261,7 @@ private:
     ControllerSnapshot input_[4];
 
     std::mutex frame_mutex_;
-    std::vector<std::uint32_t> frame_;
-    int frame_w_ = 0, frame_h_ = 0, frame_scale_ = 1;
+    VideoFrame frame_;
     std::uint64_t frame_serial_ = 0;
 
     std::mutex stats_mutex_;

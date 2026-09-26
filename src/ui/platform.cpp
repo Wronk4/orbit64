@@ -1,7 +1,7 @@
 #include "platform.hpp"
 #include "icons.hpp"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -482,12 +482,11 @@ std::optional<fs::path> native_pick_folder(const std::string& title) {
 // Display
 // ---------------------------------------------------------------------------
 
-float system_ui_scale(int display_index) {
+float system_ui_scale(unsigned display_id) {
     switch (current_os()) {
         case OS::Windows: {
-            float ddpi = 0, hdpi = 0, vdpi = 0;
-            if (SDL_GetDisplayDPI(display_index, &ddpi, &hdpi, &vdpi) == 0 && hdpi > 0) return hdpi / 96.0f;
-            return 1.0f;
+            const float s = SDL_GetDisplayContentScale(static_cast<SDL_DisplayID>(display_id));
+            return s > 0.0f ? s : 1.0f;
         }
         case OS::MacOS: return 1.0f;
         default: {
@@ -501,6 +500,12 @@ float system_ui_scale(int display_index) {
                 float f = static_cast<float>(std::atof(v));
                 if (f >= 0.5f && f <= 4.0f) return f;
             }
+            // X11 reports the desktop's Xft.dpi as the content scale. (Wayland
+            // scales windows through their pixel density instead.)
+            if (const char* drv = SDL_GetCurrentVideoDriver(); drv && std::strcmp(drv, "x11") == 0) {
+                const float s = SDL_GetDisplayContentScale(static_cast<SDL_DisplayID>(display_id));
+                if (s >= 0.5f && s <= 4.0f) return s;
+            }
             return 1.0f;
         }
     }
@@ -511,8 +516,8 @@ float system_ui_scale(int display_index) {
 // ---------------------------------------------------------------------------
 
 bool primary_mod_down(unsigned mod) {
-    if (current_os() == OS::MacOS) return (mod & KMOD_GUI) != 0;
-    return (mod & KMOD_CTRL) != 0;
+    if (current_os() == OS::MacOS) return (mod & SDL_KMOD_GUI) != 0;
+    return (mod & SDL_KMOD_CTRL) != 0;
 }
 
 const char* primary_mod_name() { return current_os() == OS::MacOS ? "Cmd" : "Ctrl"; }

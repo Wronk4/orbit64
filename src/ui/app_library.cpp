@@ -369,8 +369,7 @@ void App::draw_library_header(float width) {
 // ---------------------------------------------------------------------------
 
 void draw_texture_cover(ImDrawList* dl, SDL_Texture* tex, ImVec2 mn, ImVec2 mx, float rounding) {
-    int tw = 0, th = 0;
-    SDL_QueryTexture(tex, nullptr, nullptr, &tw, &th);
+    const float tw = static_cast<float>(tex->w), th = static_cast<float>(tex->h);
     // "Cover" fit: fill the box, crop the overflow.
     float bw = mx.x - mn.x, bh = mx.y - mn.y;
     float s = std::max(bw / tw, bh / th);

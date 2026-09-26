@@ -9,54 +9,56 @@
 namespace ui {
 
 InputManager::~InputManager() {
-    for (auto& p : pads_) SDL_GameControllerClose(p.handle);
+    for (auto& p : pads_) SDL_CloseGamepad(p.handle);
 }
 
 void InputManager::open_all() {
-    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-        if (!SDL_IsGameController(i)) continue;
-        SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    for (int i = 0; ids && i < count; ++i) {
+        const SDL_JoystickID id = ids[i];
         bool known = std::any_of(pads_.begin(), pads_.end(), [&](const GamepadInfo& g) { return g.id == id; });
         if (known) continue;
-        if (SDL_GameController* gc = SDL_GameControllerOpen(i)) {
-            const char* name = SDL_GameControllerName(gc);
+        if (SDL_Gamepad* gc = SDL_OpenGamepad(id)) {
+            const char* name = SDL_GetGamepadName(gc);
             pads_.push_back({id, gc, name ? name : "Gamepad"});
         }
     }
+    SDL_free(ids);
 }
 
 void InputManager::handle_event(const SDL_Event& e) {
     switch (e.type) {
-        case SDL_CONTROLLERDEVICEADDED: open_all(); break;
-        case SDL_CONTROLLERDEVICEREMOVED:
+        case SDL_EVENT_GAMEPAD_ADDED: open_all(); break;
+        case SDL_EVENT_GAMEPAD_REMOVED:
             pads_.erase(std::remove_if(pads_.begin(), pads_.end(),
                                        [&](const GamepadInfo& g) {
-                                           if (g.id != e.cdevice.which) return false;
-                                           SDL_GameControllerClose(g.handle);
+                                           if (g.id != e.gdevice.which) return false;
+                                           SDL_CloseGamepad(g.handle);
                                            return true;
                                        }),
                         pads_.end());
             break;
-        case SDL_KEYDOWN:
+        case SDL_EVENT_KEY_DOWN:
             if (capture_port_ >= 0 && !e.key.repeat) {
-                if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) { cancel_capture(); break; }
+                if (e.key.scancode == SDL_SCANCODE_ESCAPE) { cancel_capture(); break; }
                 captured_ = true;
-                captured_key_ = e.key.keysym.scancode;
+                captured_key_ = e.key.scancode;
                 captured_pad_ = -2; // unchanged
             }
             break;
-        case SDL_CONTROLLERBUTTONDOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
             if (capture_port_ >= 0) {
                 captured_ = true;
                 captured_key_ = -2;
-                captured_pad_ = e.cbutton.button;
+                captured_pad_ = e.gbutton.button;
             }
             break;
-        case SDL_CONTROLLERAXISMOTION:
-            if (capture_port_ >= 0 && std::abs(e.caxis.value) > 24000) {
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            if (capture_port_ >= 0 && std::abs(e.gaxis.value) > 24000) {
                 captured_ = true;
                 captured_key_ = -2;
-                captured_pad_ = kPadAxisBase + e.caxis.axis * 2 + (e.caxis.value > 0 ? 1 : 0);
+                captured_pad_ = kPadAxisBase + e.gaxis.axis * 2 + (e.gaxis.value > 0 ? 1 : 0);
             }
             break;
         default: break;
@@ -86,18 +88,18 @@ bool InputManager::consume_capture(int& port, int& input, int& key, int& pad) {
     return true;
 }
 
-SDL_GameController* InputManager::pad_for_device(int device) const {
+SDL_Gamepad* InputManager::pad_for_device(int device) const {
     if (device <= 0 || device - 1 >= static_cast<int>(pads_.size())) return nullptr;
     return pads_[device - 1].handle;
 }
 
-float InputManager::pad_value(SDL_GameController* pad, int binding) const {
+float InputManager::pad_value(SDL_Gamepad* pad, int binding) const {
     if (!pad || binding < 0) return 0.0f;
     if (binding < kPadAxisBase)
-        return SDL_GameControllerGetButton(pad, static_cast<SDL_GameControllerButton>(binding)) ? 1.0f : 0.0f;
+        return SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(binding)) ? 1.0f : 0.0f;
     int axis = (binding - kPadAxisBase) / 2;
     bool positive = ((binding - kPadAxisBase) % 2) == 1;
-    float v = SDL_GameControllerGetAxis(pad, static_cast<SDL_GameControllerAxis>(axis)) / 32767.0f;
+    float v = SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(axis)) / 32767.0f;
     return positive ? std::max(0.0f, v) : std::max(0.0f, -v);
 }
 
@@ -115,13 +117,13 @@ ControllerSnapshot InputManager::poll(const PortConfig& cfg, bool keyboard_enabl
     float values[kN64InputCount] = {};
     if (cfg.device == 0) {
         if (keyboard_enabled) {
-            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+            const bool* keys = SDL_GetKeyboardState(nullptr);
             for (int i = 0; i < kN64InputCount; ++i) {
                 int sc = cfg.keys[i];
-                if (sc > 0 && sc < SDL_NUM_SCANCODES && keys[sc]) values[i] = 1.0f;
+                if (sc > 0 && sc < SDL_SCANCODE_COUNT && keys[sc]) values[i] = 1.0f;
             }
         }
-    } else if (SDL_GameController* pad = pad_for_device(cfg.device)) {
+    } else if (SDL_Gamepad* pad = pad_for_device(cfg.device)) {
         for (int i = 0; i < kN64InputCount; ++i) values[i] = pad_value(pad, cfg.pad[i]);
     }
 
@@ -152,7 +154,7 @@ std::string InputManager::key_label(int scancode) {
 std::string InputManager::pad_label(int b) {
     if (b < 0) return "Unbound";
     if (b < kPadAxisBase) {
-        const char* n = SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(b));
+        const char* n = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b));
         std::string s = n ? n : "button";
         if (!s.empty()) s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
         return s;
@@ -160,12 +162,12 @@ std::string InputManager::pad_label(int b) {
     int axis = (b - kPadAxisBase) / 2;
     bool pos = ((b - kPadAxisBase) % 2) == 1;
     switch (axis) {
-        case SDL_CONTROLLER_AXIS_LEFTX: return pos ? "Left Stick Right" : "Left Stick Left";
-        case SDL_CONTROLLER_AXIS_LEFTY: return pos ? "Left Stick Down" : "Left Stick Up";
-        case SDL_CONTROLLER_AXIS_RIGHTX: return pos ? "Right Stick Right" : "Right Stick Left";
-        case SDL_CONTROLLER_AXIS_RIGHTY: return pos ? "Right Stick Down" : "Right Stick Up";
-        case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return "Left Trigger";
-        case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return "Right Trigger";
+        case SDL_GAMEPAD_AXIS_LEFTX: return pos ? "Left Stick Right" : "Left Stick Left";
+        case SDL_GAMEPAD_AXIS_LEFTY: return pos ? "Left Stick Down" : "Left Stick Up";
+        case SDL_GAMEPAD_AXIS_RIGHTX: return pos ? "Right Stick Right" : "Right Stick Left";
+        case SDL_GAMEPAD_AXIS_RIGHTY: return pos ? "Right Stick Down" : "Right Stick Up";
+        case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: return "Left Trigger";
+        case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: return "Right Trigger";
         default: return "Axis " + std::to_string(axis);
     }
 }

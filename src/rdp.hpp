@@ -70,7 +70,12 @@ public:
     u32 hires_scale() const { return hires_ ? hires_->scale() : 1; }
     HiResRenderer* hires() { return hires_.get(); }
     // Runs the high-resolution pass at any scale, including 1 (for tests; see tools/rdp_check.cpp).
-    void force_hires(u32 scale) { hires_.reset(); hires_ = std::make_unique<HiResRenderer>(scale); }
+    void force_hires(u32 scale) { hires_.reset(); hires_ = make_hires(scale); }
+    // Who draws the high-resolution pass (the GPU renderer, src/gpu/); the
+    // CPU renderer without one. Takes effect with the next renderer made.
+    void set_hires_factory(HiResFactory f) { hires_factory_ = std::move(f); }
+    // Starts the high-resolution pass over (after a factory change).
+    void recreate_hires();
 
     void set_ucode_type(MicrocodeType type) { ucode_type = type; }
     MicrocodeType get_ucode_type() const { return ucode_type; }
@@ -429,6 +434,8 @@ private:
 
     // Internal-resolution pass (nullptr at native resolution).
     std::unique_ptr<HiResRenderer> hires_;
+    HiResFactory hires_factory_;
+    std::unique_ptr<HiResRenderer> make_hires(u32 scale) const;
     // High-resolution buffer of the current colour image, or nullptr. Its
     // shadow receives every RDRAM pixel write_pixel() makes.
     HiResTarget* hires_target(u8* rdram, size_t rdram_size);

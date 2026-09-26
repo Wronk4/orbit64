@@ -1,7 +1,7 @@
 #include "settings.hpp"
 #include "platform.hpp"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -38,6 +38,7 @@ void Settings::reset_graphics() {
     Settings d;
     internal_scale = d.internal_scale;
     aspect = d.aspect; integer_scale = d.integer_scale; filter = d.filter; vsync = d.vsync;
+    video_backend = d.video_backend;
     scanlines = d.scanlines; show_fps_overlay = d.show_fps_overlay; fullscreen_mode = d.fullscreen_mode;
 }
 void Settings::reset_audio() {
@@ -81,24 +82,24 @@ void Settings::reset_port(int port) {
         k[(int)N64Input::StickRight] = SDL_SCANCODE_RIGHT;
     }
     auto& g = p.pad;
-    g[(int)N64Input::A] = SDL_CONTROLLER_BUTTON_A;
-    g[(int)N64Input::B] = SDL_CONTROLLER_BUTTON_X;
-    g[(int)N64Input::Z] = kPadAxisBase + SDL_CONTROLLER_AXIS_TRIGGERLEFT * 2 + 1;
-    g[(int)N64Input::Start] = SDL_CONTROLLER_BUTTON_START;
-    g[(int)N64Input::L] = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
-    g[(int)N64Input::R] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
-    g[(int)N64Input::CUp] = kPadAxisBase + SDL_CONTROLLER_AXIS_RIGHTY * 2 + 0;
-    g[(int)N64Input::CDown] = kPadAxisBase + SDL_CONTROLLER_AXIS_RIGHTY * 2 + 1;
-    g[(int)N64Input::CLeft] = kPadAxisBase + SDL_CONTROLLER_AXIS_RIGHTX * 2 + 0;
-    g[(int)N64Input::CRight] = kPadAxisBase + SDL_CONTROLLER_AXIS_RIGHTX * 2 + 1;
-    g[(int)N64Input::DUp] = SDL_CONTROLLER_BUTTON_DPAD_UP;
-    g[(int)N64Input::DDown] = SDL_CONTROLLER_BUTTON_DPAD_DOWN;
-    g[(int)N64Input::DLeft] = SDL_CONTROLLER_BUTTON_DPAD_LEFT;
-    g[(int)N64Input::DRight] = SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
-    g[(int)N64Input::StickUp] = kPadAxisBase + SDL_CONTROLLER_AXIS_LEFTY * 2 + 0;
-    g[(int)N64Input::StickDown] = kPadAxisBase + SDL_CONTROLLER_AXIS_LEFTY * 2 + 1;
-    g[(int)N64Input::StickLeft] = kPadAxisBase + SDL_CONTROLLER_AXIS_LEFTX * 2 + 0;
-    g[(int)N64Input::StickRight] = kPadAxisBase + SDL_CONTROLLER_AXIS_LEFTX * 2 + 1;
+    g[(int)N64Input::A] = SDL_GAMEPAD_BUTTON_SOUTH;
+    g[(int)N64Input::B] = SDL_GAMEPAD_BUTTON_WEST;
+    g[(int)N64Input::Z] = kPadAxisBase + SDL_GAMEPAD_AXIS_LEFT_TRIGGER * 2 + 1;
+    g[(int)N64Input::Start] = SDL_GAMEPAD_BUTTON_START;
+    g[(int)N64Input::L] = SDL_GAMEPAD_BUTTON_LEFT_SHOULDER;
+    g[(int)N64Input::R] = SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER;
+    g[(int)N64Input::CUp] = kPadAxisBase + SDL_GAMEPAD_AXIS_RIGHTY * 2 + 0;
+    g[(int)N64Input::CDown] = kPadAxisBase + SDL_GAMEPAD_AXIS_RIGHTY * 2 + 1;
+    g[(int)N64Input::CLeft] = kPadAxisBase + SDL_GAMEPAD_AXIS_RIGHTX * 2 + 0;
+    g[(int)N64Input::CRight] = kPadAxisBase + SDL_GAMEPAD_AXIS_RIGHTX * 2 + 1;
+    g[(int)N64Input::DUp] = SDL_GAMEPAD_BUTTON_DPAD_UP;
+    g[(int)N64Input::DDown] = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+    g[(int)N64Input::DLeft] = SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+    g[(int)N64Input::DRight] = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+    g[(int)N64Input::StickUp] = kPadAxisBase + SDL_GAMEPAD_AXIS_LEFTY * 2 + 0;
+    g[(int)N64Input::StickDown] = kPadAxisBase + SDL_GAMEPAD_AXIS_LEFTY * 2 + 1;
+    g[(int)N64Input::StickLeft] = kPadAxisBase + SDL_GAMEPAD_AXIS_LEFTX * 2 + 0;
+    g[(int)N64Input::StickRight] = kPadAxisBase + SDL_GAMEPAD_AXIS_LEFTX * 2 + 1;
 }
 
 void Settings::reset_defaults() {
@@ -153,6 +154,7 @@ bool Settings::save(const std::string& path) const {
     w.section("graphics");
     w.kv("internal_scale", internal_scale);
     w.kv("aspect", aspect); w.kv("integer_scale", integer_scale); w.kv("filter", filter); w.kv("vsync", vsync);
+    w.kv("video_backend", video_backend);
     w.kv("scanlines", scanlines); w.kv("fps_overlay", show_fps_overlay); w.kv("fullscreen_mode", fullscreen_mode);
 
     w.section("audio");
@@ -220,6 +222,8 @@ bool Settings::load(const std::string& path) {
     r.get("internal_scale", internal_scale);
     internal_scale = internal_scale < 1 ? 1 : (internal_scale > 8 ? 8 : internal_scale);
     r.get("aspect", aspect); r.get("integer_scale", integer_scale); r.get("filter", filter); r.get("vsync", vsync);
+    r.get("video_backend", video_backend);
+    video_backend = video_backend == 1 ? 1 : 0;
     r.get("scanlines", scanlines); r.get("fps_overlay", show_fps_overlay); r.get("fullscreen_mode", fullscreen_mode);
 
     r.sec = "audio";

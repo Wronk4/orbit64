@@ -1,0 +1,368 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// The RDP's pixel pipeline at S times the frame buffer resolution: one
+// invocation per output pixel runs every primitive of its tile's list in
+// drawing order, with the pixel's colour and depth kept in registers. It is
+// the pipeline of src/raster.hpp and HiResSink (src/hires.cpp), line for line,
+// so the GPU draws what the CPU high-resolution renderer draws.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 2
+#define NUM_RW_TEX 0
+#include "common.glsl"
+#include "layout.h"
+
+layout(std430, RO_BUFFER(0)) readonly buffer FrameData { uint D[]; };
+layout(std430, RO_BUFFER(1)) readonly buffer Texels { uint T[]; }; // decode.comp's tables
+layout(std430, RW_BUFFER(0)) buffer ColorBuffer { uint color_buf[]; };
+layout(std430, RW_BUFFER(1)) buffer DepthBuffer { float depth_buf[]; };
+
+layout(std140, UNIFORM(0)) uniform Pass {
+    uint scale;      // S
+    uint width;      // frame buffer width * S: row stride of both buffers
+    uint height;     // 240 * S
+    uint tiles_x;    // bins per row
+    uint tile_table; // word offset of the (first, count) pairs
+    uint work_list;  // word offset of the tiles with primitives
+    uint prims;      // word offset of primitive 0
+    uint has_depth;
+    float inv_scale; // 1 / S
+} P;
+
+float unit8(uint b) { return uintBitsToFloat(D[b]); }
+float fword(uint i) { return uintBitsToFloat(D[i]); }
+
+#include "tmem.glsl"
+
+int floor_to_int(float v) {
+    int i = int(v);
+    return v < float(i) ? i - 1 : i;
+}
+
+uint lerp8(uint a, uint b, float t) { return uint(clamp(float(a) + t * (float(b) - float(a)), 0.0, 255.0)); }
+
+uint bilerp_argb(uint c00, uint c10, uint c01, uint c11, float fs, float ft) {
+    uint o = 0u;
+    for (uint sh = 0u; sh < 32u; sh += 8u) {
+        uint top = lerp8((c00 >> sh) & 0xFFu, (c10 >> sh) & 0xFFu, fs);
+        uint bot = lerp8((c01 >> sh) & 0xFFu, (c11 >> sh) & 0xFFu, fs);
+        o |= lerp8(top, bot, ft) << sh;
+    }
+    return o;
+}
+
+uint sample_texture(uint sb, uint tile_idx, float s, float t) {
+    uint tb = sb + GPU_ST_TILES + (tile_idx & 7u) * GPU_TILE_WORDS;
+    float ss = s * fword(tb + 5u);
+    float st = t * fword(tb + 6u);
+    ss -= fword(tb + 7u);
+    st -= fword(tb + 8u);
+    bool point = (D[sb] & GPU_ST_POINT) != 0u;
+    int is0 = floor_to_int(ss), it0 = floor_to_int(st);
+    int s0 = wrap_s(tb, is0), t0 = wrap_t(tb, it0);
+    uint table = D[tb + 9u];
+    if (table != GPU_NO_TABLE) {
+        // Decoded texels: w is what tex_cache_dims() gives.
+        uint d = D[tb];
+        uint mask_s = (d >> 12u) & 15u;
+        uint w = mask_s != 0u ? (1u << mask_s) : uint(int(D[tb + 3u]) + 1);
+        uint c00 = T[table + uint(t0) * w + uint(s0)];
+        if (point) return c00;
+        uint s1 = uint(wrap_s(tb, is0 + 1)), t1 = uint(wrap_t(tb, it0 + 1));
+        uint c10 = T[table + uint(t0) * w + s1];
+        uint c01 = T[table + t1 * w + uint(s0)];
+        uint c11 = T[table + t1 * w + s1];
+        return bilerp_argb(c00, c10, c01, c11, ss - float(is0), st - float(it0));
+    }
+    uint tm = D[sb + 15u];
+    uint tlut = D[sb + 1u] & 15u;
+    uint c00 = fetch_wrapped(tb, tm, tlut, s0, t0);
+    if (point) return c00;
+    int s1 = wrap_s(tb, is0 + 1), t1 = wrap_t(tb, it0 + 1);
+    uint c10 = fetch_wrapped(tb, tm, tlut, s1, t0);
+    uint c01 = fetch_wrapped(tb, tm, tlut, s0, t1);
+    uint c11 = fetch_wrapped(tb, tm, tlut, s1, t1);
+    return bilerp_argb(c00, c10, c01, c11, ss - float(is0), st - float(it0));
+}
+
+// ---- Colour combiner ----------------------------------------------------------
+
+vec3 rgb_of(uint c) { return vec3(unit8((c >> 16u) & 0xFFu), unit8((c >> 8u) & 0xFFu), unit8(c & 0xFFu)); }
+vec3 rgb_of_rdp(uint c) { return vec3(unit8((c >> 24u) & 0xFFu), unit8((c >> 16u) & 0xFFu), unit8((c >> 8u) & 0xFFu)); }
+
+struct CombineIn {
+    vec3 t0, t1, prim, shade, env;
+    float t0a, t1a, pa, sa, ea;
+};
+
+vec3 color_abd(uint src, CombineIn ci, vec3 comb) {
+    switch (src) {
+        case 0u: return comb;
+        case 1u: return ci.t0;
+        case 2u: return ci.t1;
+        case 3u: return ci.prim;
+        case 4u: return ci.shade;
+        case 5u: return ci.env;
+        case 6u: return vec3(1.0);
+        default: return vec3(0.0);
+    }
+}
+
+vec3 color_c(uint src, CombineIn ci, vec3 comb, float comb_a) {
+    switch (src) {
+        case 0u: return comb;
+        case 1u: return ci.t0;
+        case 2u: return ci.t1;
+        case 3u: return ci.prim;
+        case 4u: return ci.shade;
+        case 5u: return ci.env;
+        case 6u: return vec3(1.0);
+        case 7u: return vec3(comb_a);
+        case 8u: return vec3(ci.t0a);
+        case 9u: return vec3(ci.t1a);
+        case 10u: return vec3(ci.pa);
+        case 11u: return vec3(ci.sa);
+        case 12u: return vec3(ci.ea);
+        default: return vec3(0.0);
+    }
+}
+
+float alpha_abd(uint src, CombineIn ci, float comb_a, bool c_slot) {
+    switch (src) {
+        case 0u: return comb_a;
+        case 1u: return ci.t0a;
+        case 2u: return ci.t1a;
+        case 3u: return ci.pa;
+        case 4u: return ci.sa;
+        case 5u: return ci.ea;
+        case 6u: return c_slot ? 0.0 : 1.0;
+        default: return 0.0;
+    }
+}
+
+uint combine(uint sb, uint tex0, uint tex1, uint shade) {
+    CombineIn ci;
+    ci.t0 = rgb_of(tex0);
+    ci.t1 = rgb_of(tex1);
+    ci.t0a = unit8(tex0 >> 24u);
+    ci.t1a = unit8(tex1 >> 24u);
+    ci.shade = vec3(unit8(shade & 0xFFu), unit8((shade >> 8u) & 0xFFu), unit8((shade >> 16u) & 0xFFu));
+    ci.sa = unit8(shade >> 24u);
+    uint prim = D[sb + 6u], env = D[sb + 7u];
+    ci.prim = rgb_of_rdp(prim);
+    ci.pa = unit8(prim & 0xFFu);
+    ci.env = rgb_of_rdp(env);
+    ci.ea = unit8(env & 0xFFu);
+
+    uint cc = D[sb + 2u], ac = D[sb + 3u];
+    // The first cycle's COMBINED colour is 0 and its COMBINED alpha TEXEL0's.
+    vec3 A = color_abd(cc & 0xFFu, ci, vec3(0.0));
+    vec3 B = color_abd((cc >> 8u) & 0xFFu, ci, vec3(0.0));
+    vec3 C = color_c((cc >> 16u) & 0xFFu, ci, vec3(0.0), ci.t0a);
+    vec3 Dd = color_abd(cc >> 24u, ci, vec3(0.0));
+    float Aa = alpha_abd(ac & 0xFFu, ci, ci.t0a, false);
+    float Ab = alpha_abd((ac >> 8u) & 0xFFu, ci, ci.t0a, false);
+    float Ac = alpha_abd((ac >> 16u) & 0xFFu, ci, ci.t0a, true);
+    float Ad = alpha_abd(ac >> 24u, ci, ci.t0a, false);
+    vec3 res = clamp((A - B) * C + Dd, vec3(0.0), vec3(1.0));
+    float res_a = clamp((Aa - Ab) * Ac + Ad, 0.0, 1.0);
+
+    if ((D[sb] & GPU_ST_TWO_CYCLE) != 0u) {
+        vec3 c0 = res;
+        float c0_a = res_a;
+        // The second cycle sees the texels rotated: its TEXEL0 is TEXEL1.
+        vec3 tt = ci.t0; ci.t0 = ci.t1; ci.t1 = tt;
+        float ta = ci.t0a; ci.t0a = ci.t1a; ci.t1a = ta;
+        cc = D[sb + 4u];
+        ac = D[sb + 5u];
+        A = color_abd(cc & 0xFFu, ci, c0);
+        B = color_abd((cc >> 8u) & 0xFFu, ci, c0);
+        C = color_c((cc >> 16u) & 0xFFu, ci, c0, c0_a);
+        Dd = color_abd(cc >> 24u, ci, c0);
+        Aa = alpha_abd(ac & 0xFFu, ci, c0_a, false);
+        Ab = alpha_abd((ac >> 8u) & 0xFFu, ci, c0_a, false);
+        Ac = alpha_abd((ac >> 16u) & 0xFFu, ci, c0_a, true);
+        Ad = alpha_abd(ac >> 24u, ci, c0_a, false);
+        res = clamp((A - B) * C + Dd, vec3(0.0), vec3(1.0));
+        res_a = clamp((Aa - Ab) * Ac + Ad, 0.0, 1.0);
+    }
+    uint r = uint(res.r * 255.0), g = uint(res.g * 255.0), b = uint(res.b * 255.0), a = uint(res_a * 255.0);
+    return (a << 24u) | (r << 16u) | (g << 8u) | b;
+}
+
+// ---- Blender and the frame buffer write ---------------------------------------------
+
+vec3 blend_pick(uint sel, uint sb, vec3 in_c, vec3 mem_c) {
+    if (sel == 0u) return in_c;
+    if (sel == 1u) return mem_c;
+    uint c = sel == 2u ? D[sb + 8u] : D[sb + 9u];
+    return vec3(float((c >> 24u) & 0xFFu), float((c >> 16u) & 0xFFu), float((c >> 8u) & 0xFFu));
+}
+
+uint blend_rgb(uint sb, uint src, uint dst) {
+    uint bl = D[sb + 10u];
+    uint bl_p = bl & 3u, bl_a = (bl >> 8u) & 3u, bl_m = (bl >> 16u) & 3u, bl_b = (bl >> 24u) & 3u;
+    float A = bl_a == 3u ? 0.0 : float(src >> 24u);
+    float B;
+    if (bl_b == 0u) B = 255.0 - A;
+    else if (bl_b == 1u) B = float(dst >> 24u);
+    else if (bl_b == 2u) B = 255.0;
+    else B = 0.0;
+    vec3 in_c = vec3(float((src >> 16u) & 0xFFu), float((src >> 8u) & 0xFFu), float(src & 0xFFu));
+    vec3 mem_c = vec3(float((dst >> 16u) & 0xFFu), float((dst >> 8u) & 0xFFu), float(dst & 0xFFu));
+    vec3 p = blend_pick(bl_p, sb, in_c, mem_c);
+    vec3 m = blend_pick(bl_m, sb, in_c, mem_c);
+    vec3 o = clamp((p * A + m * B) / 255.0, vec3(0.0), vec3(255.0));
+    return (uint(o.r) << 16u) | (uint(o.g) << 8u) | uint(o.b);
+}
+
+// HiResSink::write: scissor, alpha compare, depth test, blending, store.
+void sink_write(uint sb, uint x, uint y, uint src, float fz, inout uint c, inout float z) {
+    uint flags = D[sb];
+    if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
+    uint a = src >> 24u;
+    uint w1 = D[sb + 1u];
+    uint ac = (w1 >> 8u) & 3u;
+    if (ac == 1u) {
+        if (a < ((w1 >> 16u) & 0xFFu)) return;
+    } else if (ac == 3u) {
+        if (a == 0u) return;
+    }
+    if (a == 0u && (flags & GPU_ST_ZERO_KILL) != 0u) return;
+    if ((flags & GPU_ST_Z_COMPARE) != 0u && fz > z) return;
+    if ((flags & GPU_ST_Z_UPDATE) != 0u) z = fz;
+    uint rgb = src & 0x00FFFFFFu;
+    if ((flags & GPU_ST_BLEND) != 0u && a < 255u) rgb = blend_rgb(sb, src, c);
+    uint out_a = (flags & GPU_ST_16BIT) != 0u ? (a > 0u ? 255u : 0u) : a;
+    c = (out_a << 24u) | rgb;
+}
+
+// ---- Primitives -------------------------------------------------------------------
+
+void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z) {
+    float px = (float(x) + 0.5) * P.inv_scale;
+    float py = (float(y) + 0.5) * P.inv_scale;
+    float x0 = fword(pb + 3u), y0 = fword(pb + 4u);
+    float x1 = fword(pb + 10u), y1 = fword(pb + 11u);
+    float x2 = fword(pb + 17u), y2 = fword(pb + 18u);
+    float inv_area = fword(pb + 24u);
+    float w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * inv_area;
+    float w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * inv_area;
+    float w2 = 1.0 - w0 - w1;
+    if (!(w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0)) return;
+
+    uint flags = D[sb];
+    float fz = w0 * fword(pb + 5u) + w1 * fword(pb + 12u) + w2 * fword(pb + 19u);
+    // A pixel that fails the depth test is dropped whatever its colour
+    // (sink_write), so it isn't shaded at all.
+    if ((flags & GPU_ST_Z_COMPARE) != 0u && fz > z) return;
+    uint c0 = D[pb + 9u], c1 = D[pb + 16u], c2 = D[pb + 23u];
+    uint shade;
+    if ((flags & GPU_ST_SMOOTH) != 0u) {
+        shade = 0u;
+        for (uint sh = 0u; sh < 32u; sh += 8u) {
+            float v = w0 * float((c0 >> sh) & 0xFFu) + w1 * float((c1 >> sh) & 0xFFu) + w2 * float((c2 >> sh) & 0xFFu);
+            shade |= uint(clamp(v, 0.0, 255.0)) << sh;
+        }
+    } else {
+        shade = c0;
+    }
+
+    uint color;
+    if ((flags & GPU_ST_TEXTURED) != 0u) {
+        float iw = w0 * fword(pb + 6u) + w1 * fword(pb + 13u) + w2 * fword(pb + 20u);
+        float w_interp = iw != 0.0 ? 1.0 / iw : 1.0;
+        float u = (w0 * fword(pb + 7u) + w1 * fword(pb + 14u) + w2 * fword(pb + 21u)) * w_interp;
+        float v = (w0 * fword(pb + 8u) + w1 * fword(pb + 15u) + w2 * fword(pb + 22u)) * w_interp;
+        uint tile0 = (D[sb + 1u] >> 4u) & 7u;
+        if ((flags & GPU_ST_COMBINED) != 0u) {
+            uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, tile0, u, v) : 0u;
+            uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, tile0 + 1u, u, v) : 0u;
+            color = combine(sb, tex, tex1, shade);
+        } else {
+            // Texture modulated by the vertex colour.
+            uint tex = sample_texture(sb, tile0, u, v);
+            uint r = (shade & 0xFFu) * ((tex >> 16u) & 0xFFu) / 255u;
+            uint g = ((shade >> 8u) & 0xFFu) * ((tex >> 8u) & 0xFFu) / 255u;
+            uint b = ((shade >> 16u) & 0xFFu) * (tex & 0xFFu) / 255u;
+            uint a = (shade >> 24u) * (tex >> 24u) / 255u;
+            color = (a << 24u) | (r << 16u) | (g << 8u) | b;
+        }
+    } else if ((flags & GPU_ST_COMBINED) != 0u) {
+        color = combine(sb, 0xFFFFFFFFu, 0xFFFFFFFFu, shade);
+    } else {
+        color = ((shade >> 24u) << 24u) | ((shade & 0xFFu) << 16u) | (((shade >> 8u) & 0xFFu) << 8u) | ((shade >> 16u) & 0xFFu);
+    }
+    sink_write(sb, x, y, color, fz, c, z);
+}
+
+void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint c, inout float z) {
+    // Outside the scissor or behind what is there: dropped by sink_write anyway.
+    if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
+    if ((D[sb] & GPU_ST_Z_COMPARE) != 0u && 0.0 > z) return;
+    uint tile = D[pb + 3u];
+    float cur_s = fword(pb + 4u) + float(int(x) - int(rx0)) * fword(pb + 6u);
+    float cur_t = fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u);
+    bool flip = D[pb + 8u] != 0u;
+    float ss = flip ? cur_t : cur_s;
+    float st = flip ? cur_s : cur_t;
+    uint flags = D[sb];
+    uint color;
+    if ((flags & GPU_ST_COMBINED) == 0u || (flags & GPU_ST_COPY) != 0u) {
+        color = sample_texture(sb, tile, ss, st);
+    } else {
+        uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, tile, ss, st) : 0u;
+        uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, tile + 1u, ss, st) : 0u;
+        color = combine(sb, tex, tex1, 0xFFFFFFFFu);
+    }
+    sink_write(sb, x, y, color, 0.0, c, z);
+}
+
+void main() {
+    uint S = P.scale;
+    uint tile = D[P.work_list + gl_WorkGroupID.y];
+    uint sub = gl_WorkGroupID.x;
+    uint tx = tile % P.tiles_x, ty = tile / P.tiles_x;
+    uint x = tx * GPU_BIN_SIZE * S + (sub % S) * 8u + gl_LocalInvocationID.x;
+    uint y = ty * GPU_BIN_SIZE * S + (sub / S) * 8u + gl_LocalInvocationID.y;
+    if (x >= P.width || y >= P.height) return;
+
+    uint idx = y * P.width + x;
+    uint c = color_buf[idx];
+    bool depth = P.has_depth != 0u;
+    float z = depth ? depth_buf[idx] : 0.0;
+    float z_in = z;
+    uint c_in = c;
+
+    uint first = D[P.tile_table + tile * 2u];
+    uint count = D[P.tile_table + tile * 2u + 1u];
+    for (uint i = 0u; i < count; ++i) {
+        uint pb = P.prims + D[first + i] * GPU_PRIM_WORDS;
+        uint bx = D[pb + 1u], by = D[pb + 2u];
+        uint px0 = bx & 0xFFFFu, py0 = by & 0xFFFFu;
+        if (x < px0 || x > (bx >> 16u) || y < py0 || y > (by >> 16u)) continue;
+        uint type = D[pb];
+        uint sb = D[pb + GPU_PRIM_STATE];
+        if (type == GPU_PRIM_TRI) {
+            draw_triangle(pb, sb, x, y, c, z);
+        } else if (type == GPU_PRIM_RECT) {
+            draw_rect(pb, sb, x, y, px0, py0, c, z);
+        } else if (type == GPU_PRIM_FILL) {
+            c = D[pb + 3u];
+        } else if (type == GPU_PRIM_BLOCK) {
+            sink_write(sb, x, y, D[pb + 3u], fword(pb + 4u), c, z);
+        } else if (type == GPU_PRIM_BLIT) {
+            uint w = D[pb + 4u];
+            uint src = D[pb + 3u] + (y / S - D[pb + 6u]) * w + (x - D[pb + 5u] * S) / S;
+            sink_write(sb, x, y, D[src], 0.0, c, z);
+        } else if (type == GPU_PRIM_UPLOAD) {
+            uint w = D[pb + 4u];
+            uint e = D[pb + 3u] + ((y / S - D[pb + 6u]) * w + (x / S - D[pb + 5u])) * 2u;
+            if (D[e] != 0u) c = D[e + 1u];
+        }
+    }
+    if (c != c_in) color_buf[idx] = c;
+    if (depth && z != z_in) depth_buf[idx] = z;
+}

@@ -200,7 +200,7 @@ void ImageCache::pump(SDL_Renderer* renderer) {
             tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, d.w, d.h);
             if (tex) {
                 SDL_UpdateTexture(tex, nullptr, d.rgba.data(), d.w * 4);
-                SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+                SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
                 SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
             }
         }

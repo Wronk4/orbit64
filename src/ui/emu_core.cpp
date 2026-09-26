@@ -41,7 +41,7 @@ static const char* save_name(SaveType t) {
 }
 
 struct EmuCore::FrameClock {
-    std::vector<std::uint32_t> pixels;
+    VideoFrame frame;
     Clock::time_point next = Clock::now();
     Clock::time_point window_start = Clock::now();
     int window_frames = 0;
@@ -68,6 +68,11 @@ bool EmuCore::start(const std::filesystem::path& rom, std::string& error) {
     }
     emu->get_ai().set_sink(&audio_);
     audio_.flush();
+    {
+        std::lock_guard<std::mutex> lk(factory_mutex_);
+        emu->get_rdp().set_hires_factory(hires_factory_);
+        factory_dirty_ = false;
+    }
 
     {
         std::lock_guard<std::mutex> lk(stats_mutex_);
@@ -78,9 +83,7 @@ bool EmuCore::start(const std::filesystem::path& rom, std::string& error) {
     }
     {
         std::lock_guard<std::mutex> lk(frame_mutex_);
-        frame_.clear();
-        frame_w_ = frame_h_ = 0;
-        frame_scale_ = 1;
+        frame_ = VideoFrame{};
         frame_serial_++;
     }
     {
@@ -116,6 +119,12 @@ void EmuCore::stop() {
         // Destroying the emulator flushes SRAM/EEPROM saves to disk.
         std::lock_guard<std::mutex> lk(audio_mutex_);
         emu_.reset();
+    }
+    {
+        // The last frame may be in video memory the renderer owned.
+        std::lock_guard<std::mutex> lk(frame_mutex_);
+        frame_ = VideoFrame{};
+        frame_serial_++;
     }
     state_ = RunState::Stopped;
     fast_forward_ = false;
@@ -217,15 +226,14 @@ void EmuCore::save_state_now(const std::filesystem::path& path) {
     info.created = std::chrono::duration_cast<std::chrono::seconds>(
                        std::chrono::system_clock::now().time_since_epoch()).count();
     // The last published frame is what the saved machine shows.
-    int w = 0, h = 0, scale = 1;
+    VideoFrame shown;
     {
         std::lock_guard<std::mutex> lk(frame_mutex_);
-        info.thumb = frame_;
-        w = frame_w_;
-        h = frame_h_;
-        scale = frame_scale_;
+        shown = frame_;
     }
-    downscale_frame(info.thumb, w, h, scale);
+    int w = shown.w, h = shown.h;
+    if (!shown.to_pixels(info.thumb)) w = h = 0;
+    downscale_frame(info.thumb, w, h, shown.scale);
     info.thumb_w = static_cast<std::uint32_t>(w);
     info.thumb_h = static_cast<std::uint32_t>(h);
     std::vector<std::uint8_t> state = emu_->save_state();
@@ -255,9 +263,8 @@ bool EmuCore::load_state_now(const std::vector<std::uint8_t>& state, FrameClock&
     }
     audio_.flush(); // what was queued belongs to the machine that was replaced
     // Show the loaded machine right away, also while paused.
-    int w = 0, h = 0, scale = 1;
-    emu_->render_frame(fc.pixels, w, h, &scale);
-    publish_frame(fc, w, h, scale);
+    emu_->render_frame(fc.frame);
+    publish_frame(fc);
     debug_dirty_ = true;
     fc.next = Clock::now();
     return true;
@@ -314,25 +321,31 @@ void EmuCore::set_input(int port, const ControllerSnapshot& s) {
     input_[port & 3] = s;
 }
 
-bool EmuCore::fetch_frame(std::vector<std::uint32_t>& out, int& w, int& h, int& scale, std::uint64_t& seen) {
+bool EmuCore::fetch_frame(VideoFrame& out, std::uint64_t& seen) {
     std::lock_guard<std::mutex> lk(frame_mutex_);
     if (seen == frame_serial_) return false;
     seen = frame_serial_;
     out = frame_;
-    w = frame_w_;
-    h = frame_h_;
-    scale = frame_scale_;
     return true;
 }
 
 bool EmuCore::snapshot(std::vector<std::uint32_t>& out, int& w, int& h, int* scale) {
-    std::lock_guard<std::mutex> lk(frame_mutex_);
-    if (frame_.empty()) return false;
-    out = frame_;
-    w = frame_w_;
-    h = frame_h_;
-    if (scale) *scale = frame_scale_;
+    VideoFrame f;
+    {
+        std::lock_guard<std::mutex> lk(frame_mutex_);
+        f = frame_;
+    }
+    if (f.empty() || !f.to_pixels(out)) return false;
+    w = f.w;
+    h = f.h;
+    if (scale) *scale = f.scale;
     return true;
+}
+
+void EmuCore::set_hires_factory(HiResFactory f) {
+    std::lock_guard<std::mutex> lk(factory_mutex_);
+    hires_factory_ = std::move(f);
+    factory_dirty_ = true;
 }
 
 CoreStats EmuCore::stats() {
@@ -469,6 +482,14 @@ void EmuCore::run_one_frame(FrameClock& fc) {
         ucode_dirty_ = false;
     }
     emu_->set_cpu_core(cpu_core_.load() == 0 ? CpuCore::Interpreter : CpuCore::Recompiler);
+    {
+        std::lock_guard<std::mutex> lk(factory_mutex_);
+        if (factory_dirty_) {
+            emu_->get_rdp().set_hires_factory(hires_factory_);
+            emu_->get_rdp().recreate_hires();
+            factory_dirty_ = false;
+        }
+    }
     emu_->get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale_.load(), 1, 8)));
     {
         std::lock_guard<std::mutex> lk(input_mutex_);
@@ -490,16 +511,15 @@ void EmuCore::run_one_frame(FrameClock& fc) {
     // game always reads the forced value and the tools display it too.
     apply_memory_writes();
     auto t0 = Clock::now();
-    int w = 0, h = 0, scale = 1;
     emu_->step_frame();
-    emu_->render_frame(fc.pixels, w, h, &scale);
+    emu_->render_frame(fc.frame);
     auto t1 = Clock::now();
     apply_memory_writes();
     fc.frame_counter++;
     fc.window_frames++;
     fc.window_work_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
     if (debug_capture_) publish_debug(fc.frame_counter, true);
-    publish_frame(fc, w, h, scale);
+    publish_frame(fc);
 
     const int vi_hz = static_cast<int>(emu_->get_vi().get_refresh_hz());
     fc.uptime += 1.0 / vi_hz;
@@ -538,14 +558,15 @@ void EmuCore::run_one_frame(FrameClock& fc) {
     stats_.uptime_s = fc.uptime;
 }
 
-void EmuCore::publish_frame(FrameClock& fc, int w, int h, int scale) {
-    for (auto& px : fc.pixels) px |= 0xFF000000u;
-    std::lock_guard<std::mutex> lk(frame_mutex_);
-    frame_.swap(fc.pixels);
-    frame_w_ = w;
-    frame_h_ = h;
-    frame_scale_ = scale;
-    frame_serial_++;
+void EmuCore::publish_frame(FrameClock& fc) {
+    for (auto& px : fc.frame.pixels) px |= 0xFF000000u;
+    {
+        std::lock_guard<std::mutex> lk(frame_mutex_);
+        std::swap(frame_, fc.frame);
+        frame_serial_++;
+    }
+    // Let go of the frame before: its image can take the next frame.
+    fc.frame.gpu.reset();
 }
 
 void EmuCore::log_pacing(FrameClock& fc) {

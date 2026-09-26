@@ -1,7 +1,8 @@
 #include "emulator.hpp"
 #include "ui/app.hpp"
 #include "profiler.hpp"
-#include <SDL.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 #include <iostream>
 #include <filesystem>
 #include <fstream>

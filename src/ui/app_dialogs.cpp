@@ -59,10 +59,10 @@ void App::draw_about() {
     centered(g_fonts.body, g_pal.text_dim, std::string("Version ") + kAppVersion + "  \xC2\xB7  Nintendo 64 emulator");
     y += dp(16);
 
-    SDL_version linked;
-    SDL_GetVersion(&linked);
+    const int linked = SDL_GetVersion();
     char sdl[48];
-    std::snprintf(sdl, sizeof sdl, "%d.%d.%d", linked.major, linked.minor, linked.patch);
+    std::snprintf(sdl, sizeof sdl, "%d.%d.%d", SDL_VERSIONNUM_MAJOR(linked), SDL_VERSIONNUM_MINOR(linked),
+                  SDL_VERSIONNUM_MICRO(linked));
 #if defined(_MSC_VER)
     std::string compiler = "MSVC " + std::to_string(_MSC_VER);
 #elif defined(__clang__)

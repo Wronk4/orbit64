@@ -12,6 +12,7 @@
 #include <cfloat>
 #include <cstdlib>
 #include <fstream>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -20,13 +21,19 @@ namespace ui {
 namespace fs = std::filesystem;
 
 void App::ui_test_capture(const std::string& name) {
-    int w = 0, h = 0;
-    SDL_GetRendererOutputSize(renderer_, &w, &h);
-    std::vector<std::uint32_t> px(static_cast<size_t>(w) * h);
-    if (SDL_RenderReadPixels(renderer_, nullptr, SDL_PIXELFORMAT_ARGB8888, px.data(), w * 4) != 0) {
+    SDL_Surface* shot = SDL_RenderReadPixels(renderer_, nullptr);
+    SDL_Surface* conv = shot ? SDL_ConvertSurface(shot, SDL_PIXELFORMAT_ARGB8888) : nullptr;
+    if (shot) SDL_DestroySurface(shot);
+    if (!conv) {
         SDL_Log("ui-test: read pixels failed: %s", SDL_GetError());
         return;
     }
+    const int w = conv->w, h = conv->h;
+    std::vector<std::uint32_t> px(static_cast<size_t>(w) * h);
+    for (int y = 0; y < h; ++y)
+        std::memcpy(px.data() + static_cast<size_t>(y) * w, static_cast<const std::uint8_t*>(conv->pixels) + y * conv->pitch,
+                    static_cast<size_t>(w) * 4);
+    SDL_DestroySurface(conv);
     // Classic 24-bit BMP: readable by every image viewer / converter.
     fs::path out = platform::utf8_to_path(ui_test_dir_) / (name + ".bmp");
     std::ofstream f(out, std::ios::binary);
@@ -76,13 +83,13 @@ void App::ui_test_tick() {
     // mouse/keyboard events, so hit-testing and popups are exercised too.
     auto click = [this](float x, float y, int button) {
         ImGuiIO& io = ImGui::GetIO();
-        SDL_WarpMouseInWindow(window_, static_cast<int>(x), static_cast<int>(y)); // keep the OS cursor in sync
+        SDL_WarpMouseInWindow(window_, x, y); // keep the OS cursor in sync
         io.AddMousePosEvent(x, y);
         io.AddMouseButtonEvent(button, true);
         io.AddMouseButtonEvent(button, false);
     };
     auto hover = [this](float x, float y) {
-        SDL_WarpMouseInWindow(window_, static_cast<int>(x), static_cast<int>(y));
+        SDL_WarpMouseInWindow(window_, x, y);
         ImGui::GetIO().AddMousePosEvent(x, y);
     };
     auto escape = []() {

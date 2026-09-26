@@ -644,7 +644,7 @@ void App::output_resolution(int& w, int& h) const {
 void App::update_scaled_texture() {
     int w = 0, h = 0;
     output_resolution(w, h);
-    bool native = !game_tex_ || !has_frame_ || (w == game_tex_w_ && h == game_tex_h_) || !SDL_RenderTargetSupported(renderer_);
+    bool native = !game_tex_ || !has_frame_ || (w == game_tex_w_ && h == game_tex_h_);
     if (native) {
         if (scaled_tex_) {
             SDL_DestroyTexture(scaled_tex_);
@@ -664,12 +664,12 @@ void App::update_scaled_texture() {
     // sizes are resampled bilinearly. The output texture then uses the
     // user's filter when drawn to the window.
     bool integer = settings_.render_scale != 0;
-    SDL_SetTextureScaleMode(game_tex_, integer ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+    SDL_SetTextureScaleMode(game_tex_, integer ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
     game_tex_filter_ = -1;
-    SDL_SetTextureScaleMode(scaled_tex_, settings_.filter == 0 ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
-    SDL_RenderSetScale(renderer_, 1.0f, 1.0f);
+    SDL_SetTextureScaleMode(scaled_tex_, settings_.filter == 0 ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
+    SDL_SetRenderScale(renderer_, 1.0f, 1.0f);
     SDL_SetRenderTarget(renderer_, scaled_tex_);
-    SDL_RenderCopy(renderer_, game_tex_, nullptr, nullptr);
+    SDL_RenderTexture(renderer_, game_tex_, nullptr, nullptr);
     SDL_SetRenderTarget(renderer_, nullptr);
 }
 

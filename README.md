@@ -1,6 +1,7 @@
 # Orbit64: Nintendo 64 emulator
 
-A desktop frontend built on SDL2 and Dear ImGui for the N64 emulation core in `src/`.
+A desktop frontend built on SDL3 and Dear ImGui for the N64 emulation core in `src/`. Graphics go through SDL_GPU:
+Metal on macOS, Vulkan on Linux and Windows (Direct3D 12 on Windows machines without Vulkan).
 It runs on **Windows, macOS and Linux** from a single codebase.
 
 ## Folders
@@ -18,21 +19,25 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 
 ## Building
 
-The only external dependency is **SDL2 ≥ 2.0.18**. Dear ImGui (`third_party/imgui`), stb_image (`third_party/stb`) and the fonts
-(`src/ui/fonts_embedded.cpp`) are included in the repository.
+The only external dependency is **SDL3 ≥ 3.4**. Dear ImGui (`third_party/imgui`), stb_image (`third_party/stb`), the fonts
+(`src/ui/fonts_embedded.cpp`) and the prebuilt GPU shaders (`src/gpu/shaders_gen.cpp`) are included in the repository.
 
-| Platform | Install SDL2 | Build |
+| Platform | Install SDL3 (optional with CMake) | Build |
 |---|---|---|
-| Windows (MSVC) | `vcpkg install sdl2` | `cmake -S . -B out -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake` then `cmake --build out --config Release` |
-| Windows (MSYS2/MinGW) | `pacman -S mingw-w64-x86_64-SDL2` | `cmake -S . -B out -G Ninja && cmake --build out` |
-| macOS | `brew install sdl2` | `cmake -S . -B out && cmake --build out` or `make` |
-| Linux | `apt install libsdl2-dev`, `dnf install SDL2-devel` or `pacman -S sdl2` | `cmake -S . -B out && cmake --build out` or `make` |
+| Windows (MSVC) | `vcpkg install sdl3` | `cmake -S . -B out -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake` then `cmake --build out --config Release` |
+| Windows (MSYS2/MinGW) | `pacman -S mingw-w64-x86_64-SDL3` | `cmake -S . -B out -G Ninja && cmake --build out` |
+| macOS | `brew install sdl3` | `cmake -S . -B out && cmake --build out` or `make` |
+| Linux | `apt install libsdl3-dev`, `dnf install SDL3-devel` or `pacman -S sdl3` | `cmake -S . -B out && cmake --build out` or `make` |
 
-CMake produces `orbit64` (`orbit64.exe`). The Makefile produces `bin/n64`.
+When CMake finds no SDL3 3.4 (or with `-DORBIT64_VENDOR_SDL3=ON`) it downloads and builds SDL3 itself. CMake produces
+`orbit64` (`orbit64.exe`, with `SDL3.dll` next to it). The Makefile produces `bin/n64` and uses `pkg-config sdl3`; on
+Windows with a MinGW toolchain such as [w64devkit](https://github.com/skeeto/w64devkit), `SDL3_DIR` points at the
+`x86_64-w64-mingw32` folder of the `SDL3-devel-*-mingw` package.
 
-On Windows the Makefile also works with [w64devkit](https://github.com/skeeto/w64devkit) and the
-`SDL2-devel-*-mingw` package: `build.bat` puts `tools\w64devkit` (or `%W64DEVKIT%`) on `PATH` and runs `make`, and
-`SDL2_DIR` points at the package's `x86_64-w64-mingw32` folder (default `tools/SDL2-2.30.12/x86_64-w64-mingw32`).
+The GPU shaders are GLSL (`src/gpu/shaders/*.comp`). After editing one, `make shaders` (or
+`python3 tools/gen_shaders.py`) rebuilds `src/gpu/shaders_gen.cpp` for every format SDL_GPU takes; it needs
+`glslangValidator` and `spirv-cross` (`brew install glslang spirv-cross`, `apt install glslang-tools spirv-cross` or the
+Vulkan SDK).
 
 ## Dynamic recompiler
 
@@ -133,8 +138,18 @@ RDP draws every triangle, texture rectangle and fill a second time at the higher
 and 8 bits per colour channel, and the displayed frame is built from that copy.
 
 The game itself still gets its normal frame buffer in RDRAM, so frame buffer effects and CPU reads keep working.
-Pixels that the CPU or a DMA changed after the RDP drew them are shown from RDRAM, at native resolution. The
-high-resolution pass (`src/raster.*`, `src/hires.*`) runs on all CPU cores in horizontal bands, while emulation carries on.
+Pixels that the CPU or a DMA changed after the RDP drew them are shown from RDRAM, at native resolution.
+
+The high-resolution pass runs on the GPU (`src/gpu/`): compute shaders run the same pixel pipeline as the CPU renderer
+(combiner, blender, depth, TMEM decoding), one invocation per output pixel over the primitives binned to its 8x8 tile,
+and the finished frame stays in video memory for the window to show. Without a usable GPU driver (or with Settings ›
+Graphics › Video backend › Compatibility, or `ORBIT64_HIRES=cpu`) it runs on all CPU cores in horizontal bands instead
+(`src/raster.*`, `src/hires.*`).
+
+`make gpu_check` builds a checker that runs a ROM once per renderer and compares every K-th frame:
+`bin/gpu_check rom.z64 --scale 4 --frames 1200 --every 40 --mash start [--shots dir]`, or `--bench` to time the GPU
+renderer alone. `ORBIT64_GPU_DRIVER=vulkan` picks the driver (on macOS through MoltenVK, with
+`SDL_VULKAN_LIBRARY=/opt/homebrew/lib/libvulkan.1.dylib`); `ORBIT64_GPU_STATS=1` prints per-second figures.
 
 ## Debug and memory tools
 

@@ -41,9 +41,12 @@ public:
     double prof_cpu_seconds() const { return prof_cpu_seconds_; }
     double prof_other_seconds() const { return prof_other_seconds_; }
 
-    // The displayed image, ARGB8888. With an internal resolution above 1
-    // (RDP::set_hires_scale) it is that many times the frame buffer size;
-    // `out_scale` receives the factor.
+    // The displayed image. With an internal resolution above 1
+    // (RDP::set_hires_scale) it is usually that many times the frame buffer
+    // size (VideoFrame::scale), and with the GPU renderer it stays in video
+    // memory (VideoFrame::gpu).
+    void render_frame(VideoFrame& out);
+    // The same as ARGB8888 in memory; `out_scale` receives the factor.
     void render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h, int* out_scale = nullptr);
 
     // Save states (savestate.hpp): the whole machine between two frames,
@@ -89,5 +92,4 @@ private:
     bool profiling_ = false;
     double prof_cpu_seconds_ = 0.0;
     double prof_other_seconds_ = 0.0;
-    std::vector<u32> native_frame_; // VI output before upscaling (internal resolution > 1)
 };

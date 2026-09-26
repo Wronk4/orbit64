@@ -129,7 +129,7 @@ void App::ui_audit_tick() {
         ImGui::ClosePopupsExceptModals();
     };
     auto click_at = [this, &io](float x, float y, int button) {
-        SDL_WarpMouseInWindow(window_, static_cast<int>(x), static_cast<int>(y));
+        SDL_WarpMouseInWindow(window_, x, y);
         io.AddMousePosEvent(x, y);
         io.AddMouseButtonEvent(button, true);
         io.AddMouseButtonEvent(button, false);
@@ -148,7 +148,7 @@ void App::ui_audit_tick() {
              settings_.pause_on_focus_loss = false;
              // The window must fit on screen or the OS cursor can't reach its edges.
              SDL_Rect r{0, 0, 1440, 900};
-             SDL_GetDisplayUsableBounds(std::max(0, SDL_GetWindowDisplayIndex(window_)), &r);
+             SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(window_), &r);
              SDL_SetWindowSize(window_, std::min(1440, r.w - 40), std::min(900, r.h - 60));
              SDL_SetWindowPosition(window_, r.x + 20, r.y + 40);
              close_all();
@@ -228,7 +228,7 @@ void App::ui_audit_tick() {
         {"click: toolbar Settings opens Settings", [=, this] {
              close_all();
              SDL_Rect r{0, 0, 1440, 900};
-             SDL_GetDisplayUsableBounds(std::max(0, SDL_GetWindowDisplayIndex(window_)), &r);
+             SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(window_), &r);
              SDL_SetWindowSize(window_, std::min(1440, r.w - 40), std::min(900, r.h - 60));
              view_ = View::Library;
          }, 40, "##root", false, "settings", [this] { return settings_open_; }, "settings_open_ == true"},
@@ -384,7 +384,7 @@ void App::ui_audit_tick() {
             if (!A.items.empty()) {
                 A.probe_pos = A.items[0].clip.GetCenter();
                 // The SDL backend feeds the OS cursor position every frame, so move the real cursor too.
-                SDL_WarpMouseInWindow(window_, static_cast<int>(A.probe_pos.x), static_cast<int>(A.probe_pos.y));
+                SDL_WarpMouseInWindow(window_, A.probe_pos.x, A.probe_pos.y);
                 io.AddMousePosEvent(A.probe_pos.x, A.probe_pos.y);
             }
             return;
@@ -404,7 +404,7 @@ void App::ui_audit_tick() {
             // Give the OS cursor warp one extra frame to land before judging hover.
             static const int probe_wait = std::getenv("ORBIT64_AUDIT_WAIT") ? std::atoi(std::getenv("ORBIT64_AUDIT_WAIT")) : 1;
             if (A.wait++ < probe_wait) {
-                SDL_WarpMouseInWindow(window_, static_cast<int>(A.probe_pos.x), static_cast<int>(A.probe_pos.y));
+                SDL_WarpMouseInWindow(window_, A.probe_pos.x, A.probe_pos.y);
                 io.AddMousePosEvent(A.probe_pos.x, A.probe_pos.y);
                 return;
             }
@@ -422,7 +422,7 @@ void App::ui_audit_tick() {
                     A.retried = true;
                     A.total--;
                     A.probe_pos = ImVec2(a.clip.Min.x + 3, a.clip.Min.y + 3);
-                    SDL_WarpMouseInWindow(window_, static_cast<int>(A.probe_pos.x), static_cast<int>(A.probe_pos.y));
+                    SDL_WarpMouseInWindow(window_, A.probe_pos.x, A.probe_pos.y);
                     io.AddMousePosEvent(A.probe_pos.x, A.probe_pos.y);
                     return;
                 } else if (g.HoveredId != a.id) {
@@ -446,7 +446,7 @@ void App::ui_audit_tick() {
             }
             if (A.probe < A.items.size()) {
                 A.probe_pos = A.items[A.probe].clip.GetCenter();
-                SDL_WarpMouseInWindow(window_, static_cast<int>(A.probe_pos.x), static_cast<int>(A.probe_pos.y));
+                SDL_WarpMouseInWindow(window_, A.probe_pos.x, A.probe_pos.y);
                 io.AddMousePosEvent(A.probe_pos.x, A.probe_pos.y);
                 return;
             }

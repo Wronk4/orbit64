@@ -79,7 +79,7 @@ std::optional<fs::path> native_pick_folder(const std::string& title);
 //  - Windows: per-monitor DPI / 96 (process is per-monitor DPI aware)
 //  - macOS:   1.0 (Retina is handled through the framebuffer scale instead)
 //  - Linux:   GDK_SCALE / QT_SCALE_FACTOR / Xft-style DPI hints, else 1.0
-float system_ui_scale(int display_index);
+float system_ui_scale(unsigned display_id); // an SDL_DisplayID
 
 // ---- Keyboard conventions --------------------------------------------------
 // Primary shortcut modifier: Cmd on macOS, Ctrl elsewhere.

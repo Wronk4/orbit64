@@ -20,7 +20,7 @@ constexpr int kN64InputCount = static_cast<int>(N64Input::Count);
 const char* n64_input_name(N64Input in);
 const char* n64_input_id(N64Input in);
 
-// Gamepad binding encoding: -1 = unbound, 0..(SDL_CONTROLLER_BUTTON_MAX-1) = button,
+// Gamepad binding encoding: -1 = unbound, 0..(SDL_GAMEPAD_BUTTON_COUNT-1) = button,
 // kPadAxisBase + axis*2 + (0 = negative, 1 = positive) = analog axis direction.
 constexpr int kPadAxisBase = 100;
 
@@ -59,6 +59,10 @@ struct Settings {
     int scanlines = 0;   // 0..100 intensity
     bool show_fps_overlay = false;
     int fullscreen_mode = 0; // 0 = borderless desktop, 1 = exclusive
+    // 0 = GPU (SDL_GPU: Metal / Vulkan / Direct3D 12; high resolutions render
+    // on the graphics card), 1 = compatibility (any SDL renderer, CPU only).
+    // Takes effect at the next start.
+    int video_backend = 0;
 
     // Audio
     bool audio_enabled = true;

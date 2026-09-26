@@ -208,37 +208,33 @@ u32 Emulator::skip_idle_loop(u32 budget) {
     return cycles;
 }
 
-void Emulator::render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h, int* out_scale) {
+void Emulator::render_frame(VideoFrame& out) {
     const u8* rdram = bus.get_rdram();
     const size_t rdram_size = bus.get_rdram_size();
     HiResRenderer* hr = rdp.hires();
     const VIScanout so = vi.scanout(rdram_size);
-    int cw = 0, ch = 0;
-    if (!hr) {
-        vi.render_frame(rdram, rdram_size, out_pixels, out_w, out_h);
-    } else if (!so.blank && so.lines <= kFbLines && hr->compose(so, rdram, rdram_size, native_frame_, cw, ch)) {
-        // compose() gives the first 240 lines at S times the resolution;
-        // put the part on screen where it belongs.
-        so.place(native_frame_.data(), static_cast<u32>(cw), hr->scale(), out_pixels, out_w, out_h);
-    } else {
-        // The VI shows memory the RDP never drew into (a screen the CPU
-        // drew, or a 480-line screen, which the high-resolution buffers - 240
-        // lines tall - do not hold): enlarge the native image instead.
-        int w = 0, h = 0;
-        vi.render_frame(rdram, rdram_size, native_frame_, w, h);
-        const int s = static_cast<int>(hr->scale());
-        out_w = w * s;
-        out_h = h * s;
-        out_pixels.resize(static_cast<size_t>(out_w) * out_h);
-        for (int y = 0; y < out_h; ++y) {
-            const u32* src = native_frame_.data() + static_cast<size_t>(y / s) * w;
-            u32* dst = out_pixels.data() + static_cast<size_t>(y) * out_w;
-            for (int x = 0; x < out_w; ++x) dst[x] = src[x / s];
-        }
+    if (!hr || so.blank || so.lines > kFbLines || !hr->present(so, rdram, rdram_size, out)) {
+        // Native resolution, or the VI shows memory the RDP never drew into
+        // (a screen the CPU drew, or a 480-line screen, which the
+        // high-resolution buffers - 240 lines tall - do not hold): the
+        // native image.
+        out.gpu.reset();
+        vi.render_frame(rdram, rdram_size, out.pixels, out.w, out.h);
+        out.scale = 1;
     }
     if (hr) hr->end_frame();
-    if (out_scale) *out_scale = static_cast<int>(rdp.hires_scale());
     rdp.clear_zbuffer();
+}
+
+void Emulator::render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h, int* out_scale) {
+    VideoFrame f;
+    f.pixels.swap(out_pixels);
+    render_frame(f);
+    if (f.gpu) f.gpu->read(f.pixels);
+    out_pixels.swap(f.pixels);
+    out_w = f.w;
+    out_h = f.h;
+    if (out_scale) *out_scale = f.scale;
 }
 
 template <class S> void Emulator::serialize(S& s) {
