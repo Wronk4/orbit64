@@ -254,6 +254,7 @@ public:
     void pop(int r) { rex(false, 0, r); db(0x58 | (r & 7)); }
     void ret() { db(0xC3); }
     void call_reg(int r) { rex(false, 0, r); db(0xFF); modrm_reg(2, r); }
+    void jmp_reg(int r) { rex(false, 0, r); db(0xFF); modrm_reg(4, r); }
 
     // ---- branches with rel32, backpatched later ----
     size_t jmp_rel32() {

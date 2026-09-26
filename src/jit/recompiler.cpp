@@ -72,6 +72,7 @@ void Recompiler::request_invalidate(u32 paddr, u32 len) {
             return;
 #else
             dirty_pages_.push_back(p);
+            if (active_ctx_) active_ctx_->exit_req = 1; // the chain may not run a dropped block
 #endif
         }
     }
@@ -111,6 +112,7 @@ void Recompiler::drop_dirty_pages() {
         map->last_paddr = 0xFFFFFFFFu;
         map->last_block = nullptr;
     }
+    clear_jcache(); // it may point into dropped blocks
 }
 
 #if defined(ORBIT64_JIT_A64)
@@ -209,9 +211,9 @@ u32 Recompiler::run(CPU& cpu, Bus& bus, u32 budget) {
     return consumed;
 }
 #else
-u32 Recompiler::run(CPU& cpu, Bus& bus, u32) { return run_step(cpu, bus); }
+u32 Recompiler::run_step(CPU& cpu, Bus& bus) { return run(cpu, bus, 1); }
 
-u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
+u32 Recompiler::run(CPU& cpu, Bus& bus, u32 budget) {
     // Always reached from plain C++ (never from inside a compiled block), so
     // it's the one safe place to actually drop the cache - see
     // request_invalidate() for why this can't happen synchronously.
@@ -221,6 +223,13 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
         if (stats_on_) stats_.invalidations++;
     }
     if (!dirty_pages_.empty()) drop_dirty_pages();
+    // The chain's pc -> block table holds TLB-mapped code under its virtual
+    // pc, which is only right for the TLB contents and ASID it was made under.
+    if (bus.tlb_generation() != tlb_gen_seen_ || cpu.jit_asid() != asid_seen_) {
+        tlb_gen_seen_ = bus.tlb_generation();
+        asid_seen_ = cpu.jit_asid();
+        clear_jcache();
+    }
 
     u64 pc = cpu.get_pc();
     // KSEG0/KSEG1 (the fixed, TLB-free window most game code runs from) is
@@ -261,14 +270,44 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
         return cpu.step();
     }
 
+    // Other blocks' exits may jump straight into this one from now on - not
+    // into a lone delay slot (where it continues is fixed by its branch) nor
+    // an idle loop, which has to come back here to be skipped (see
+    // Emulator::skip_idle_loop()).
+    if (!delay_slot && blk->chain_entry && !is_idle_loop_at(bus.get_rdram(), bus.get_rdram_size(), paddr))
+        jcache_[(pc >> 2) & ((1u << kJCacheBits) - 1)] = {pc, blk->chain_entry};
+
+    // Blocks run on, each exit looking the next pc up in jcache_, until the
+    // budget is used up or the COUNT == COMPARE timer is due (so the timer
+    // interrupt comes after exactly the block it would with one block per
+    // call; COUNT ticks once every 2 cycles, 0 ticks away = 2^32), or an
+    // exception, an MMIO store or a write to compiled code ends the chain
+    // (JitCtx::faulted / exit_req). Nothing else in a chain can raise an
+    // interrupt: COP0 instructions end a block and run on the interpreter.
+    const u32 ticks = static_cast<u32>(cpu.get_cp0(CP0Reg::COMPARE)) - static_cast<u32>(cpu.get_cp0(CP0Reg::COUNT));
+    const u64 to_timer = ticks ? 2ULL * ticks : (2ULL << 32);
+    // A lone delay slot runs by itself: the CPU's pending-delay-slot state is
+    // only cleared once it's done (below), and the interpreter, which the
+    // blocks call into, must not see it while other blocks run.
+    const s64 limit = (chain_ && !delay_slot) ? static_cast<s64>(std::min<u64>(std::max<u32>(budget, 1), to_timer)) : 1;
+
     JitCtx ctx{&cpu, &bus, cpu.jit_gpr_ptr(), cpu.jit_hi_ptr(), cpu.jit_lo_ptr(),
                /*start_pc*/ pc,
                /*next_pc*/ delay_slot ? cpu.jit_branch_target() : pc + 4ULL * blk->length,
                /*branch_taken*/ delay_slot ? 1u : 0u,
                /*faulted*/ 0,
                bus.get_rdram(),
-               code_pages_.data()};
-    const u32 executed = blk->fn(&ctx);
+               code_pages_.data(),
+               /*cycles*/ limit,
+               /*jcache*/ jcache_.data(),
+               /*exit_req*/ 0,
+               /*fr_mismatch*/ 0,
+               /*synced*/ 0};
+    active_ctx_ = &ctx;
+    blk->fn(&ctx);
+    active_ctx_ = nullptr;
+    const u32 consumed = static_cast<u32>(limit - ctx.cycles);
+    const u32 executed = consumed / 2;
     if (stats_on_) {
         stats_.jit_entries++;
         stats_.jit_instrs += executed;
@@ -287,19 +326,19 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     // delay slot - see CPU::trigger_exception).
 
     // Batched COUNT/compare-timer update + a single interrupt check for the
-    // whole block. This is coarser than the interpreter (which re-checks
+    // whole chain. This is coarser than the interpreter (which re-checks
     // after every instruction): an interrupt that becomes pending mid-block
-    // is taken at the block's end instead, i.e. a few instructions late -
+    // is taken at the chain's end instead, i.e. a few instructions late -
     // never between a branch and its delay slot, since a block always
     // contains both. CP0 RANDOM (TLB-replacement index) is caught up the
     // same way: nothing inside a block reads it.
     if (executed > 0) {
         cpu.jit_advance_random(executed);
-        cpu.step_timer(2 * executed);
+        cpu.step_timer(consumed);
         cpu.check_interrupts();
     }
 
-    return executed * 2;
+    return consumed;
 }
 #endif
 
@@ -1377,6 +1416,10 @@ bool compile_or_call(Assembler& x, const Decoded& d, u32 site, std::vector<size_
 constexpr s32 kCtxStartPc = 40;
 constexpr s32 kCtxNextPc = 48;
 constexpr s32 kCtxBranchTaken = 56;
+constexpr s32 kCtxFaulted = 60;
+constexpr s32 kCtxCycles = 80;
+constexpr s32 kCtxJcache = 88;
+constexpr s32 kCtxExitReq = 96;
 
 // RAX = start_pc + offset: the pc of guest instruction offset/4 (or, past the
 // end, the pc it falls through to) in whichever virtual alias the block was
@@ -1474,7 +1517,47 @@ void emit_branch(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& exi
 
 } // namespace
 
-static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot, bool mapped) {
+// A block's exit, with EAX = guest instructions it executed: takes their
+// cycles off JitCtx::cycles and, unless that ran out or the chain has to end
+// (faulted / exit_req), looks next_pc up in the jcache (Recompiler::JCacheEntry
+// {pc, entry}, 16 bytes, indexed by bits of pc >> 2) and jumps straight into
+// that block - which runs on in this very stack frame, with the same context
+// registers. Otherwise it returns to Recompiler::run(); the offset of that
+// return is what this gives back.
+static size_t emit_block_exit(Assembler& x, u32 jcache_bits) {
+    size_t to_ret[3];
+    x.add_rr(false, RAX, RAX);                    // cycles (zero-extends)
+    x.load_mem64(RCX, R_CTX, kCtxCycles);
+    x.sub_rr(true, RCX, RAX);
+    x.store_mem64(R_CTX, kCtxCycles, RCX);
+    to_ret[0] = x.jcc_rel32(Cc::LE);
+    x.load_mem32(RCX, R_CTX, kCtxExitReq);
+    x.load_mem32(RDX, R_CTX, kCtxFaulted);
+    x.or_rr(false, RCX, RDX);
+    to_ret[1] = x.jcc_rel32(Cc::NE);
+    x.load_mem64(RCX, R_CTX, kCtxNextPc);
+    x.mov_reg_reg64(RDX, RCX);
+    x.shr_ri(true, RDX, 2);
+    x.and_ri(false, RDX, (1u << jcache_bits) - 1);
+    x.shl_ri(false, RDX, 4);
+    x.load_mem64(RAX, R_CTX, kCtxJcache);
+    x.add_rr(true, RDX, RAX);
+    x.load_mem64(RAX, RDX, 0);
+    x.cmp_rr(true, RAX, RCX);
+    to_ret[2] = x.jcc_rel32(Cc::NE);
+    x.store_mem64(R_CTX, kCtxStartPc, RCX);       // the next block starts here
+    x.mov_reg_imm32(RAX, 0);
+    x.store_mem32(R_CTX, kCtxBranchTaken, RAX);
+    x.load_mem64(RAX, RDX, 8);
+    x.jmp_reg(RAX);
+    const size_t ret_pos = x.pos();
+    for (int i = 0; i < 3; ++i) x.patch_rel32(to_ret[i], ret_pos);
+    emit_epilogue(x);
+    return ret_pos;
+}
+
+static Recompiler::Block compile_block_x64(CPU& cpu, Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot,
+                                           bool mapped, u32 jcache_bits) {
     Recompiler::Block blk{};
     // Code reached through the TLB stops at the end of its 4 KB page: the
     // next virtual page may map anywhere.
@@ -1486,12 +1569,14 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
 
     Assembler x;
     emit_prologue(x);
-    // Jumps to the epilogue with EAX already holding the executed count:
+    const size_t body_pos = x.pos(); // where a chain enters (see emit_block_exit())
+    // Jumps to the exit with EAX already holding the executed count:
     // load/store faults, and a likely branch's not-taken exit.
     std::vector<size_t> fault_patches;
     std::vector<OverflowSite> overflow_sites;
 
     u32 len = 0;
+    bool branch_end = false;
     while (len < max_len) {
         const u32 paddr = start_paddr + len * 4;
         if (static_cast<size_t>(paddr) + 4 > rdram_size) break;
@@ -1515,13 +1600,21 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
         emit_branch(x, d, len, fault_patches);
         compile_or_call(x, ds, (len + 1) | kSiteDelaySlot, fault_patches, overflow_sites);
         len += 2;
+        branch_end = true;
         break;
     }
     if (len == 0) return blk;
 
+    // Falling off the end continues right after the block. (A lone delay slot
+    // continues at its branch's target, which the driver put in next_pc.)
+    if (!branch_end && !delay_slot) {
+        x.load_mem64(RAX, R_CTX, kCtxStartPc);
+        x.add_ri(true, RAX, 4 * len);
+        x.store_mem64(R_CTX, kCtxNextPc, RAX);
+    }
     x.mov_reg_imm32(RAX, len);
     size_t epilogue_pos = x.pos();
-    emit_epilogue(x);
+    const size_t ret_pos = emit_block_exit(x, jcache_bits);
     for (size_t site : fault_patches) x.patch_rel32(site, epilogue_pos);
     // Out-of-line stubs for trapping arithmetic that overflowed: raise EXC_OV
     // via the interpreter's own trigger_exception() (through jit_overflow),
@@ -1537,6 +1630,26 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
         x.patch_rel32(x.jmp_rel32(), epilogue_pos);
     }
 
+    // A block with COP1 code may only be chained into while STATUS.CU1 is
+    // set; otherwise the chain ends before it, with next_pc still pointing
+    // at it, and Recompiler::run() leaves it to the interpreter, which raises
+    // Coprocessor Unusable.
+    bool fpu = false;
+    for (u32 i = 0; i < len && !fpu; ++i) {
+        const u32 op = fetch_instr(rdram, start_paddr + i * 4) >> 26;
+        fpu = op == 0x11 || op == 0x31 || op == 0x35 || op == 0x39 || op == 0x3D;
+    }
+    size_t chain_pos = body_pos;
+    if (fpu) {
+        chain_pos = x.pos();
+        x.mov_reg_imm64(RAX, reinterpret_cast<u64>(cpu.jit_cp0_ptr() + CP0Reg::STATUS));
+        x.load_mem32(RAX, RAX, 0);
+        x.and_ri(false, RAX, 1u << 29);
+        const size_t to_body = x.jcc_rel32(Cc::NE);
+        x.patch_rel32(to_body, body_pos);
+        x.patch_rel32(x.jmp_rel32(), ret_pos); // straight back: nothing ran
+    }
+
     // lookup_or_compile() starts the arena over (dropping every cached block)
     // long before it gets this full, so this only triggers if a block ever
     // outgrows kArenaHeadroom. Resetting the arena here instead would leave
@@ -1549,6 +1662,7 @@ static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer
     code.make_executable();
 
     blk.fn = reinterpret_cast<JitBlockFn>(code.exec_ptr(dst));
+    blk.chain_entry = code.exec_ptr(dst + chain_pos);
     blk.length = len;
     return blk;
 }
@@ -1574,7 +1688,7 @@ Recompiler::Block Recompiler::compile_block_linked(CPU& cpu, Bus& bus, u32 start
 Recompiler::Block Recompiler::compile_block([[maybe_unused]] CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot,
                                             [[maybe_unused]] bool mapped) {
 #if defined(ORBIT64_JIT_X64)
-    return compile_block_x64(bus, start_paddr, code_, delay_slot, mapped);
+    return compile_block_x64(cpu, bus, start_paddr, code_, delay_slot, mapped, kJCacheBits);
 #elif defined(ORBIT64_JIT_A64)
     std::vector<PendingLink> links; // dropped: nothing will patch them
     A64BlockEnv env;

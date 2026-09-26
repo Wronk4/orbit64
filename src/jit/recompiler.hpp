@@ -4,7 +4,8 @@
 // A compiled block is a straight-line run of whitelisted instructions
 // starting at some PC, optionally ended by a branch or jump together with
 // its delay slot (the branch hands its outcome back through
-// JitCtx::next_pc - blocks never jump to each other directly). The moment
+// JitCtx::next_pc, where the block's exit looks up the next one - see run()).
+// The moment
 // a non-whitelisted instruction is reached the block ends without including
 // it, and that instruction runs on the existing, already-correct
 // interpreter. Compiled to native code: integer ALU/shift/immediate
@@ -49,6 +50,9 @@ public:
         bool valid = false;      // false = not compiled yet
         bool link_ok = false;    // AArch64: other blocks may jump straight here
         bool fpu = false;        // contains COP1 code: only run while STATUS.CU1 is set
+        // x64: where another block's exit jumps in (past the prologue; for a
+        // COP1 block, a STATUS.CU1 check first). Null = never chained into.
+        const void* chain_entry = nullptr;
     };
 
     // AArch64 chaining runtime, emitted at the start of the code arena (see
@@ -78,15 +82,16 @@ public:
     u32 run_step(CPU& cpu, Bus& bus);
 
     // Like run_step(), but may run up to `budget` cycles' worth of compiled
-    // code in one go: on AArch64, blocks chain directly into each other until
-    // the budget is used up, the COUNT/COMPARE timer is about to fire, a store
-    // hits MMIO or compiled code, or execution reaches code that has to be
-    // interpreted. Interrupts are then checked exactly as after a single block
-    // (nothing that could raise one happens mid-chain). Returns the cycles
-    // consumed. Elsewhere this is run_step().
+    // code in one go: blocks chain directly into each other (AArch64: patched
+    // branches and a dispatcher; x64: every block's exit looks next_pc up in
+    // jcache_) until the budget is used up, the COUNT/COMPARE timer is about
+    // to fire, a store hits MMIO or compiled code, an exception is raised, or
+    // execution reaches code that has to be interpreted. Interrupts are then
+    // checked exactly as after a single block (nothing that could raise one
+    // happens mid-chain). Returns the cycles consumed.
     u32 run(CPU& cpu, Bus& bus, u32 budget);
 
-    // Chaining on/off (AArch64). Off, every block returns to the driver - the
+    // Chaining on/off. Off, every block returns to the driver - the
     // same code and state, just slower, which makes it the reference to check
     // chaining against.
     void set_chaining(bool on) { chain_ = on; }

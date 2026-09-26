@@ -7,7 +7,9 @@
 // the scanline budget). Where execution continues is reported separately:
 //   - normal exit: ctx->next_pc. The driver presets it to the fall-through
 //     pc (start_pc + 4 * length); a block that ends in a branch/jump
-//     overwrites it with wherever that branch went.
+//     overwrites it with wherever that branch went. (x64 blocks also store
+//     the fall-through pc themselves: a chained block isn't entered by the
+//     driver.)
 //   - an instruction raised an exception (TLB fault, integer overflow):
 //     the jit_helpers thunk that raised it set ctx->faulted, and cpu->pc is
 //     already the exception vector - the driver must not touch pc itself.
@@ -35,7 +37,7 @@ struct JitCtx {
     u32 faulted;      // set by jit_helpers when an instruction raised an exception
     u8* rdram;        // RDRAM_SIZE bytes, for inline KSEG0/KSEG1 loads/stores
     const u8* code_pages; // Recompiler::code_pages_: nonzero = a compiled block was read from this 64-byte page
-    // Block chaining (AArch64 backend only - see Recompiler::run): blocks
+    // Block chaining (see Recompiler::run): blocks
     // jump straight to each other while the cycle budget lasts.
     s64 cycles;       // in: cycles the chain may run; out: what is left (<= 0 once used up)
     const void* jcache; // Recompiler::jcache_, the dispatcher's pc -> block lookup table
