@@ -4,84 +4,358 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="google-site-verification" content="XyOgMt2RnPr4olfh6aDEzRr7eiY19QZoFmRbJwXGKPo" />
-<title>Orbit64 – Nintendo 64 emulator for Windows, macOS and Linux</title>
-<meta name="description" content="Orbit64 is a free, open-source Nintendo 64 emulator for Windows, macOS and Linux with a dynamic recompiler, GPU-accelerated 2x-8x internal resolution, save states and accurate audio HLE.">
+<title>Orbit64 – Free Nintendo 64 (N64) Emulator for Windows, macOS &amp; Linux</title>
+<meta name="description" content="Orbit64 is a free N64 emulator for Windows, macOS (Apple Silicon and Intel) and Linux. It has a JIT recompiler, GPU-rendered 2x–8x internal resolution, save states, gamepad support and accurate audio.">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#14131f">
 <link rel="canonical" href="https://wronk4.github.io/orbit64/">
+
+<link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+
 <meta property="og:type" content="website">
-<meta property="og:title" content="Orbit64 – Nintendo 64 emulator">
-<meta property="og:description" content="Free, open-source N64 emulator for Windows, macOS and Linux: JIT recompiler, GPU-accelerated internal resolution, save states.">
+<meta property="og:site_name" content="Orbit64">
+<meta property="og:title" content="Orbit64 – Nintendo 64 emulator for Windows, macOS and Linux">
+<meta property="og:description" content="Free N64 emulator with a JIT recompiler, GPU-rendered internal resolution up to 8x, save states and gamepad support.">
 <meta property="og:url" content="https://wronk4.github.io/orbit64/">
+<meta property="og:image" content="https://wronk4.github.io/orbit64/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Orbit64 logo: a violet planet with an orbit ring">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Orbit64 – Nintendo 64 emulator">
+<meta name="twitter:description" content="Free N64 emulator for Windows, macOS and Linux with GPU-rendered internal resolution up to 8x.">
+<meta name="twitter:image" content="https://wronk4.github.io/orbit64/og-image.png">
+
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "Orbit64",
-  "applicationCategory": "GameApplication",
-  "operatingSystem": "Windows, macOS, Linux",
-  "description": "Free, open-source Nintendo 64 emulator with a dynamic recompiler and GPU-accelerated internal resolution.",
-  "url": "https://wronk4.github.io/orbit64/",
-  "downloadUrl": "https://github.com/Wronk4/orbit64/releases/latest",
-  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://wronk4.github.io/orbit64/#app",
+      "name": "Orbit64",
+      "alternateName": "Orbit64 N64 emulator",
+      "applicationCategory": "GameApplication",
+      "applicationSubCategory": "Emulator",
+      "operatingSystem": "Windows 10, Windows 11, macOS 11+, Linux",
+      "description": "Free Nintendo 64 emulator with a dynamic recompiler, GPU-rendered 2x-8x internal resolution, save states and gamepad support.",
+      "url": "https://wronk4.github.io/orbit64/",
+      "downloadUrl": "https://github.com/Wronk4/orbit64/releases/latest",
+      "image": "https://wronk4.github.io/orbit64/icon-512.png",
+      "screenshot": "https://wronk4.github.io/orbit64/og-image.png",
+      "isAccessibleForFree": true,
+      "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+      "featureList": [
+        "Dynamic recompiler (JIT) for AArch64 and x86-64",
+        "2x to 8x internal resolution rendered on the GPU (Metal, Vulkan, Direct3D 12)",
+        "Save states with nine slots per game",
+        "Gamepad and keyboard input with rebinding",
+        "High-level emulation of N64 audio microcodes including Factor 5 MusyX",
+        "Game library with box art"
+      ]
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://wronk4.github.io/orbit64/#site",
+      "name": "Orbit64",
+      "url": "https://wronk4.github.io/orbit64/"
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {"@type": "Question", "name": "Is Orbit64 free?",
+         "acceptedAnswer": {"@type": "Answer", "text": "Yes. Orbit64 is free to download and use, and its source code is on GitHub."}},
+        {"@type": "Question", "name": "Does Orbit64 run on Apple Silicon Macs?",
+         "acceptedAnswer": {"@type": "Answer", "text": "Yes. The macOS build is a universal binary. On M1, M2, M3 and newer Macs the recompiler generates native ARM64 code, and the GPU renderer uses Metal."}},
+        {"@type": "Question", "name": "Do I need an N64 BIOS or PIF ROM?",
+         "acceptedAnswer": {"@type": "Answer", "text": "No. Orbit64 emulates the boot process itself, so a ROM file (.z64, .n64 or .v64) is all you need."}},
+        {"@type": "Question", "name": "Does Orbit64 include games?",
+         "acceptedAnswer": {"@type": "Answer", "text": "No. Orbit64 ships without any games. Use ROMs that you dumped from cartridges you own."}},
+        {"@type": "Question", "name": "Can I play with a controller?",
+         "acceptedAnswer": {"@type": "Answer", "text": "Yes. Xbox, PlayStation, Switch Pro and other controllers that SDL3 supports work out of the box, and every button can be rebound. You can also play on the keyboard."}},
+        {"@type": "Question", "name": "What does internal resolution do?",
+         "acceptedAnswer": {"@type": "Answer", "text": "It renders every triangle and texture at 2x to 8x the game's original resolution on the GPU, so 3D graphics look sharp on modern displays. It is not an upscale of the finished 320x240 image."}}
+      ]
+    }
+  ]
 }
 </script>
 <style>
   :root {
-    --bg: #f7f7f9; --fg: #16171d; --muted: #5a5d6b; --card: #ffffff; --line: #e2e3ea; --accent: #3b5bdb; --accent-fg: #ffffff;
+    --bg: #f6f5fb; --bg2: #eeecf8; --fg: #16151f; --muted: #575468; --card: #ffffff; --line: #e1dff0;
+    --accent: #5b47e0; --accent-fg: #ffffff; --accent-soft: rgba(91, 71, 224, 0.10); --code: #efedf9;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #0f1016; --fg: #ecedf3; --muted: #a0a3b3; --card: #181a23; --line: #2a2d3a; --accent: #7c95ff; --accent-fg: #0f1016; }
+    :root:not([data-theme="light"]) {
+      --bg: #0e0d15; --bg2: #15131f; --fg: #eceaf6; --muted: #a09db4; --card: #17151f; --line: #2a2738;
+      --accent: #8b7bff; --accent-fg: #0e0d15; --accent-soft: rgba(139, 123, 255, 0.14); --code: #1f1c2b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e0d15; --bg2: #15131f; --fg: #eceaf6; --muted: #a09db4; --card: #17151f; --line: #2a2738;
+    --accent: #8b7bff; --accent-fg: #0e0d15; --accent-soft: rgba(139, 123, 255, 0.14); --code: #1f1c2b;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 880px; margin: 0 auto; padding: 56px 16px 64px; }
-  h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 12px; }
-  h2 { font-size: 1.25rem; margin: 48px 0 16px; }
-  p.lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 28px; max-width: 640px; }
-  .buttons { display: flex; flex-wrap: wrap; gap: 12px; }
-  .btn { display: inline-block; padding: 10px 18px; border-radius: 8px; text-decoration: none; font-weight: 600; border: 1px solid var(--line); color: var(--fg); background: var(--card); }
-  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
-  .card h3 { margin: 0 0 6px; font-size: 1rem; }
-  .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
-  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; }
-  footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   a { color: var(--accent); }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+
+  header.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  header.top .wrap { display: flex; align-items: center; gap: 16px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; color: var(--fg); text-decoration: none; }
+  .brand img { width: 32px; height: 32px; }
+  nav { margin-left: auto; display: flex; gap: 18px; font-size: 0.95rem; }
+  nav a { color: var(--muted); text-decoration: none; }
+  nav a:hover { color: var(--fg); }
+  @media (max-width: 640px) { nav a.opt { display: none; } }
+
+  .hero { padding: 64px 0 40px; display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; }
+  .hero img.logo { width: 220px; height: 220px; }
+  @media (max-width: 720px) { .hero { grid-template-columns: 1fr; padding-top: 40px; } .hero img.logo { width: 140px; height: 140px; order: -1; } }
+  h1 { font-size: clamp(2rem, 5.5vw, 3.1rem); line-height: 1.1; margin: 0 0 16px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 28px; max-width: 600px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 12px; }
+  .btn { display: inline-block; padding: 11px 20px; border-radius: 10px; text-decoration: none; font-weight: 600;
+    border: 1px solid var(--line); color: var(--fg); background: var(--card); }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+  .pill { font-size: 0.85rem; padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--fg); }
+
+  section { padding: 36px 0; }
+  section + section { border-top: 1px solid var(--line); }
+  h2 { font-size: 1.6rem; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 24px; max-width: 680px; }
+  h3 { font-size: 1.05rem; margin: 0 0 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  .card .ico { width: 36px; height: 36px; border-radius: 9px; background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center; margin-bottom: 12px; }
+  .card .ico svg { width: 20px; height: 20px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  @media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+  ul.checks { padding-left: 1.1em; margin: 0; }
+  ul.checks li { margin: 6px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  td, th { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { background: var(--bg2); font-weight: 600; }
+  .table-scroll { overflow-x: auto; }
+  code, kbd { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.88em; background: var(--code); padding: 1px 6px; border-radius: 5px; }
+  pre { background: var(--code); padding: 14px 16px; border-radius: 10px; overflow-x: auto; font-size: 0.88rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  ol.steps { padding-left: 1.2em; margin: 0; }
+  ol.steps li { margin: 8px 0; }
+  details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { margin: 10px 0 0; color: var(--muted); }
+  footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 0.9rem; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; }
+  footer img { width: 22px; height: 22px; vertical-align: middle; margin-right: 6px; }
 </style>
 </head>
 <body>
-<main>
-  <h1>Orbit64</h1>
-  <p class="lead">A free, open-source Nintendo 64 emulator for Windows, macOS and Linux. It has a dynamic recompiler,
-    renders at up to 8× the original resolution on the GPU, and supports save states.</p>
-  <div class="buttons">
-    <a class="btn primary" href="https://github.com/Wronk4/orbit64/releases/latest">Download the latest release</a>
-    <a class="btn" href="https://github.com/Wronk4/orbit64">Source code on GitHub</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="logo.svg" alt="" width="32" height="32">Orbit64</a>
+    <nav aria-label="Sections">
+      <a href="#features">Features</a>
+      <a class="opt" href="#download">Download</a>
+      <a class="opt" href="#faq">FAQ</a>
+      <a href="https://github.com/Wronk4/orbit64">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top" class="wrap">
+  <div class="hero">
+    <div>
+      <h1>Orbit64: a <span>Nintendo 64 emulator</span> for Windows, macOS and Linux</h1>
+      <p class="lead">Play your N64 games in sharp HD. Orbit64 recompiles N64 code to native code, renders 3D at up to
+        8× the original resolution on your GPU, and saves your progress at any moment with save states.</p>
+      <div class="buttons">
+        <a class="btn primary" href="https://github.com/Wronk4/orbit64/releases/latest">Download Orbit64</a>
+        <a class="btn" href="https://github.com/Wronk4/orbit64">View the source on GitHub</a>
+      </div>
+      <div class="pills" aria-label="Supported platforms">
+        <span class="pill">Windows 10 / 11</span><span class="pill">macOS – Apple Silicon &amp; Intel</span>
+        <span class="pill">Linux x64</span><span class="pill">Free</span>
+      </div>
+    </div>
+    <img class="logo" src="logo.svg" alt="Orbit64 logo" width="220" height="220">
   </div>
 
-  <h2>Features</h2>
-  <div class="grid">
-    <div class="card"><h3>Dynamic recompiler</h3><p>Translates MIPS code to native AArch64 or x86-64 code and falls back to the interpreter for anything it doesn't handle.</p></div>
-    <div class="card"><h3>Internal resolution 2×–8×</h3><p>Draws every triangle again at a higher resolution in SDL_GPU compute shaders (Metal, Vulkan, Direct3D 12). This is not an upscaled image.</p></div>
-    <div class="card"><h3>Save states</h3><p>Nine slots per game with screenshots, plus undo for the last load. States follow the game when you rename or move the ROM.</p></div>
-    <div class="card"><h3>Audio HLE</h3><p>Emulates the libultra, n_audio, Nintendo EAD and Factor 5 MusyX audio microcodes and resamples with a windowed-sinc filter.</p></div>
-    <div class="card"><h3>Game library</h3><p>Scans your ROM folders, shows box art, and keeps favorites, recently played games and play time.</p></div>
-    <div class="card"><h3>Debug tools</h3><p>Includes an object viewer, memory search, RAM watch, a memory editor, freeze lists and frame stepping.</p></div>
-  </div>
+  <section id="features">
+    <h2>Features</h2>
+    <p class="sub">Orbit64 is a desktop app. It emulates the N64's CPU, RSP and RDP, with a modern game library and
+      tools on top.</p>
+    <div class="grid">
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
+        <h3>Fast JIT recompiler</h3>
+        <p>Translates the N64's MIPS code to native ARM64 or x86-64 code and chains blocks together. It falls back to the
+          interpreter for anything it doesn't handle.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+        <h3>HD internal resolution</h3>
+        <p>Renders 3D at 2× to 8× the original resolution in GPU compute shaders on Metal, Vulkan or Direct3D 12. Every
+          triangle is drawn again at the higher resolution; the image is not upscaled.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h7V3M8 21v-7h8v7"/></svg></div>
+        <h3>Save states</h3>
+        <p>Nine slots per game, each with a screenshot and a timestamp, plus undo for the last load. Saving takes about a
+          millisecond, and states stay with the game when you rename or move the ROM.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+        <h3>Accurate audio</h3>
+        <p>Emulates the libultra, n_audio, Nintendo EAD and Factor 5 MusyX audio microcodes, then resamples the sound
+          with a 32-tap windowed-sinc filter so the pitch is never bent.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><path d="M17.3 5H6.7a4 4 0 0 0-4 3.6L2 15a3 3 0 0 0 5.2 2.1L9 15h6l1.8 2.1A3 3 0 0 0 22 15l-.7-6.4A4 4 0 0 0 17.3 5z"/></svg></div>
+        <h3>Controllers and keyboard</h3>
+        <p>Xbox, PlayStation, Switch Pro and other SDL3-supported gamepads work out of the box. You can rebind every
+          button and stick direction.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="9" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/></svg></div>
+        <h3>Game library</h3>
+        <p>Scans your ROM folders and shows box art from No-Intro / RetroArch packs. It keeps favorites, recently
+          played games and play time.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+        <h3>Debug and memory tools</h3>
+        <p>Includes a 3D object inspector, memory search, RAM watch, a memory editor, freeze lists, frame stepping and
+          turbo, for curious players and ROM hackers.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></div>
+        <h3>Frame buffer effects</h3>
+        <p>The game still gets its normal frame buffer in memory. Effects that read it back, like motion blur, pause
+          screens and CPU-drawn images, keep working in HD.</p>
+      </div>
+    </div>
+  </section>
 
-  <h2>Downloads</h2>
-  <table>
-    <tr><th>Platform</th><th>File</th></tr>
-    <tr><td>Windows 10/11 x64</td><td><code>orbit64-windows-x64.zip</code></td></tr>
-    <tr><td>macOS 11+ (Apple Silicon and Intel)</td><td><code>orbit64-macos-universal.zip</code></td></tr>
-    <tr><td>Linux x64 (glibc 2.35+)</td><td><code>orbit64-linux-x64.tar.gz</code></td></tr>
-  </table>
-  <p>The macOS build is not notarized. After unpacking it, run <code>xattr -dr com.apple.quarantine orbit64</code> once.
-    Orbit64 does not include any games. Use ROMs dumped from cartridges you own.</p>
+  <section id="hd">
+    <div class="two">
+      <div>
+        <h2>Real HD rendering, not an upscale</h2>
+        <p class="sub">Most N64 games render at 320×240. Stretching that image to a 4K screen only makes it blurry.
+          Orbit64 records every triangle, texture rectangle and fill the game draws and draws them a second time at
+          the resolution you choose, with its own depth buffer and 8 bits per colour channel.</p>
+      </div>
+      <div>
+        <ul class="checks">
+          <li>2×, 3×, 4× up to 8× internal resolution (up to 2560×1920)</li>
+          <li>Rendered in GPU compute shaders; the frame stays in video memory</li>
+          <li>The same colour combiner, blender and texture decoding as the software renderer</li>
+          <li>Falls back to a multi-threaded CPU renderer on machines without a usable GPU driver</li>
+          <li>Change it in Settings › Graphics or in the View menu while you play</li>
+        </ul>
+      </div>
+    </div>
+  </section>
 
-  <footer>Orbit64 · <a href="https://github.com/Wronk4/orbit64">github.com/Wronk4/orbit64</a> · Not affiliated with Nintendo.</footer>
+  <section id="download">
+    <h2>Download</h2>
+    <p class="sub">Every release is built automatically for all three platforms. Each download is a single
+      self-contained program: there is no installer and nothing else to install.</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Platform</th><th>File</th><th>Requirements</th></tr>
+        <tr><td>Windows</td><td><code>orbit64-windows-x64.zip</code></td><td>Windows 10 or 11, 64-bit; Vulkan or Direct3D 12 for GPU rendering</td></tr>
+        <tr><td>macOS</td><td><code>orbit64-macos-universal.zip</code></td><td>macOS 11 Big Sur or newer, Apple Silicon (M1 and newer) or Intel</td></tr>
+        <tr><td>Linux</td><td><code>orbit64-linux-x64.tar.gz</code></td><td>x86-64 with glibc 2.35+ (e.g. Ubuntu 22.04+, Fedora 36+); Vulkan for GPU rendering</td></tr>
+      </table>
+    </div>
+    <p><a class="btn primary" href="https://github.com/Wronk4/orbit64/releases/latest">Get the latest release</a></p>
+
+    <div class="two">
+      <div>
+        <h3>Getting started</h3>
+        <ol class="steps">
+          <li>Download the file for your system and unpack it.</li>
+          <li>Start <code>orbit64</code> (<code>orbit64.exe</code> on Windows).</li>
+          <li>Add the folder with your ROMs (<code>.z64</code>, <code>.n64</code>, <code>.v64</code>) to the library.</li>
+          <li>Double-click a game. Plug in a controller or use the keyboard.</li>
+        </ol>
+      </div>
+      <div>
+        <h3>macOS: first launch</h3>
+        <p class="sub" style="margin-bottom:10px">The app is not notarized yet, so macOS blocks it the first time. Run this
+          once in Terminal, in the folder where you unpacked it:</p>
+        <pre><code>xattr -dr com.apple.quarantine orbit64</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="shortcuts">
+    <h2>Save state shortcuts</h2>
+    <p class="sub">These are also in the Emulation menu and in the game screen's right-click menu.</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Action</th><th>Windows / Linux</th><th>macOS</th></tr>
+        <tr><td>Save state</td><td><kbd>Ctrl</kbd>+<kbd>S</kbd> or <kbd>F2</kbd></td><td><kbd>⌘</kbd>+<kbd>S</kbd> or <kbd>F2</kbd></td></tr>
+        <tr><td>Load state</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> or <kbd>F4</kbd></td><td><kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> or <kbd>F4</kbd></td></tr>
+        <tr><td>Choose slot 1–9</td><td><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></td><td><kbd>⌘</kbd>+<kbd>1</kbd>…<kbd>9</kbd></td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section id="faq">
+    <h2>Frequently asked questions</h2>
+    <p class="sub">Answers to common questions about Orbit64.</p>
+    <details open><summary>Is Orbit64 free?</summary>
+      <p>Yes. Orbit64 is free to download and use, and its source code is on GitHub.</p></details>
+    <details><summary>Does Orbit64 run on Apple Silicon Macs?</summary>
+      <p>Yes. The macOS build is a universal binary. On M1, M2, M3 and newer Macs the recompiler generates native ARM64
+        code, and the GPU renderer uses Metal.</p></details>
+    <details><summary>Do I need an N64 BIOS or PIF ROM?</summary>
+      <p>No. Orbit64 emulates the boot process itself, so a ROM file (<code>.z64</code>, <code>.n64</code> or
+        <code>.v64</code>) is all you need.</p></details>
+    <details><summary>Does Orbit64 include games?</summary>
+      <p>No. Orbit64 ships without any games. Use ROMs that you dumped from cartridges you own.</p></details>
+    <details><summary>Can I play with a controller?</summary>
+      <p>Yes. Xbox, PlayStation, Switch Pro and other controllers that SDL3 supports work out of the box, and every
+        button can be rebound in Settings. You can also play on the keyboard.</p></details>
+    <details><summary>What does internal resolution do?</summary>
+      <p>It renders every triangle and texture at 2× to 8× the game's original resolution on the GPU, so 3D graphics
+        look sharp on modern displays. It is not an upscale of the finished 320×240 image.</p></details>
+    <details><summary>Where are my saves and settings stored?</summary>
+      <p>In your user config folder: <code>%APPDATA%\Orbit64</code> on Windows,
+        <code>~/Library/Application Support/Orbit64</code> on macOS and <code>~/.local/share/Orbit64</code> on Linux.
+        Set <code>ORBIT64_CONFIG_DIR</code> to keep everything in a portable folder instead.</p></details>
+  </section>
+
+  <section id="build">
+    <h2>Build from source</h2>
+    <p class="sub">The only dependency is SDL3 3.4 or newer, and CMake downloads it for you when it isn't installed.
+      See the <a href="https://github.com/Wronk4/orbit64#building">README</a> for every platform.</p>
+<pre><code>git clone https://github.com/Wronk4/orbit64.git
+cd orbit64
+cmake -S . -B out -DCMAKE_BUILD_TYPE=Release
+cmake --build out</code></pre>
+  </section>
 </main>
+
+<footer>
+  <div class="wrap">
+    <span><img src="logo.svg" alt="" width="22" height="22">Orbit64</span>
+    <a href="https://github.com/Wronk4/orbit64">Source code</a>
+    <a href="https://github.com/Wronk4/orbit64/releases">Releases</a>
+    <a href="https://github.com/Wronk4/orbit64/issues">Report a bug</a>
+    <span>Not affiliated with or endorsed by Nintendo. Nintendo 64 is a trademark of Nintendo.</span>
+  </div>
+</footer>
 </body>
 </html>
