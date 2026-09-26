@@ -14,6 +14,8 @@ on:
   push:
     branches: ['**']
     tags: ['v*']
+    # The project page (pages.yml) doesn't need a build or a release.
+    paths-ignore: ['site/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 concurrency:

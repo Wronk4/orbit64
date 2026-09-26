@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="google-site-verification" content="GInZETymTtTU13djwu_FgVnDw0gMx2_o_ofB1I0HDKE" />
+<title>Orbit64 – Nintendo 64 emulator for Windows, macOS and Linux</title>
+<meta name="description" content="Orbit64 is a free, open-source Nintendo 64 emulator for Windows, macOS and Linux with a dynamic recompiler, GPU-accelerated 2x-8x internal resolution, save states and accurate audio HLE.">
+<link rel="canonical" href="https://wronk4.github.io/orbit64/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Orbit64 – Nintendo 64 emulator">
+<meta property="og:description" content="Free, open-source N64 emulator for Windows, macOS and Linux: JIT recompiler, GPU-accelerated internal resolution, save states.">
+<meta property="og:url" content="https://wronk4.github.io/orbit64/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Orbit64",
+  "applicationCategory": "GameApplication",
+  "operatingSystem": "Windows, macOS, Linux",
+  "description": "Free, open-source Nintendo 64 emulator with a dynamic recompiler and GPU-accelerated internal resolution.",
+  "url": "https://wronk4.github.io/orbit64/",
+  "downloadUrl": "https://github.com/Wronk4/orbit64/releases/latest",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+}
+</script>
+<style>
+  :root {
+    --bg: #f7f7f9; --fg: #16171d; --muted: #5a5d6b; --card: #ffffff; --line: #e2e3ea; --accent: #3b5bdb; --accent-fg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1016; --fg: #ecedf3; --muted: #a0a3b3; --card: #181a23; --line: #2a2d3a; --accent: #7c95ff; --accent-fg: #0f1016; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 56px 16px 64px; }
+  h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 12px; }
+  h2 { font-size: 1.25rem; margin: 48px 0 16px; }
+  p.lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 28px; max-width: 640px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 12px; }
+  .btn { display: inline-block; padding: 10px 18px; border-radius: 8px; text-decoration: none; font-weight: 600; border: 1px solid var(--line); color: var(--fg); background: var(--card); }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .card h3 { margin: 0 0 6px; font-size: 1rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; }
+  footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Orbit64</h1>
+  <p class="lead">A free, open-source Nintendo 64 emulator for Windows, macOS and Linux. It has a dynamic recompiler,
+    renders at up to 8× the original resolution on the GPU, and supports save states.</p>
+  <div class="buttons">
+    <a class="btn primary" href="https://github.com/Wronk4/orbit64/releases/latest">Download the latest release</a>
+    <a class="btn" href="https://github.com/Wronk4/orbit64">Source code on GitHub</a>
+  </div>
+
+  <h2>Features</h2>
+  <div class="grid">
+    <div class="card"><h3>Dynamic recompiler</h3><p>Translates MIPS code to native AArch64 or x86-64 code and falls back to the interpreter for anything it doesn't handle.</p></div>
+    <div class="card"><h3>Internal resolution 2×–8×</h3><p>Draws every triangle again at a higher resolution in SDL_GPU compute shaders (Metal, Vulkan, Direct3D 12). This is not an upscaled image.</p></div>
+    <div class="card"><h3>Save states</h3><p>Nine slots per game with screenshots, plus undo for the last load. States follow the game when you rename or move the ROM.</p></div>
+    <div class="card"><h3>Audio HLE</h3><p>Emulates the libultra, n_audio, Nintendo EAD and Factor 5 MusyX audio microcodes and resamples with a windowed-sinc filter.</p></div>
+    <div class="card"><h3>Game library</h3><p>Scans your ROM folders, shows box art, and keeps favorites, recently played games and play time.</p></div>
+    <div class="card"><h3>Debug tools</h3><p>Includes an object viewer, memory search, RAM watch, a memory editor, freeze lists and frame stepping.</p></div>
+  </div>
+
+  <h2>Downloads</h2>
+  <table>
+    <tr><th>Platform</th><th>File</th></tr>
+    <tr><td>Windows 10/11 x64</td><td><code>orbit64-windows-x64.zip</code></td></tr>
+    <tr><td>macOS 11+ (Apple Silicon and Intel)</td><td><code>orbit64-macos-universal.zip</code></td></tr>
+    <tr><td>Linux x64 (glibc 2.35+)</td><td><code>orbit64-linux-x64.tar.gz</code></td></tr>
+  </table>
+  <p>The macOS build is not notarized. After unpacking it, run <code>xattr -dr com.apple.quarantine orbit64</code> once.
+    Orbit64 does not include any games. Use ROMs dumped from cartridges you own.</p>
+
+  <footer>Orbit64 · <a href="https://github.com/Wronk4/orbit64">github.com/Wronk4/orbit64</a> · Not affiliated with Nintendo.</footer>
+</main>
+</body>
+</html>
