@@ -50,7 +50,8 @@ public:
         NeadSF,     // Nintendo EAD: Star Fox 64, Wave Race 64 (J rev B)
         NeadFZ,     // Nintendo EAD: F-Zero X
         NeadZelda,  // Nintendo EAD: Zelda OoT/MM, Yoshi's Story, 1080, Animal Crossing, Pokemon Stadium 2
-        MusyX,      // Factor 5 MusyX: a different synthesizer altogether, not emulated
+        MusyX,      // Factor 5 MusyX v1 (Star Wars: Rogue Squadron)
+        MusyX2,     // Factor 5 MusyX v2 (Resident Evil 2, Indiana Jones, Battle for Naboo)
     };
 
 private:
@@ -118,6 +119,8 @@ private:
         set_dram_s16(addr + 2, static_cast<s16>(v));
     }
     u32 dram_u32(u32 addr) const { return static_cast<u32>(dram_s32(addr)); }
+    u16 dram_u16(u32 addr) const { return static_cast<u16>(dram_s16(addr)); }
+    void set_dram_u16(u32 addr, u16 v) { set_dram_s16(addr, static_cast<s16>(v)); }
 
     u32 segment_address(u32 so) const;
     void load_table(u32 address, u32 entries);
@@ -149,4 +152,24 @@ private:
     void run_audio(u32 acmd, u32 w1, u32 w2);
     void run_naudio(u32 acmd, u32 w1, u32 w2);
     void run_nead(u32 acmd, u32 w1, u32 w2);
+
+    // Factor 5 MusyX synthesizer (v1 and v2)
+    struct MusyXState;
+    void run_musyx_v1(u32 sfd_ptr, u32 sfd_count);
+    void run_musyx_v2(u32 sfd_ptr, u32 sfd_count);
+    void musyx_dma_cat8(u8* dst, u32 catsrc_ptr);
+    void musyx_dma_cat16(s16* dst, u32 catsrc_ptr);
+    void musyx_load_samples_pcm16(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset);
+    void musyx_load_samples_adpcm(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset);
+    void musyx_mix_voice_samples(MusyXState& musyx, u32 voice_ptr, const s16* samples,
+                                unsigned segbase, unsigned offset, u32 last_sample_ptr);
+    u32  musyx_voice_stage(MusyXState& musyx, u32 voice_ptr, u32 last_sample_ptr);
+    void musyx_sfx_stage(MusyXState& musyx, u32 sfx_ptr, u16 idx, bool is_v2);
+    void musyx_load_base_vol(s32* base_vol, u32 address);
+    void musyx_save_base_vol(const s32* base_vol, u32 address);
+    void musyx_update_base_vol(s32* base_vol, u32 voice_mask, u32 last_sample_ptr, u8 mask_15, u32 ptr_24);
+    void musyx_init_subframes_v1(MusyXState& musyx);
+    void musyx_init_subframes_v2(MusyXState& musyx);
+    void musyx_interleave_stage_v1(MusyXState& musyx, u32 output_ptr);
+    void musyx_interleave_stage_v2(MusyXState& musyx, u16 mask_16, u32 ptr_18, u32 ptr_1c, u32 output_ptr);
 };

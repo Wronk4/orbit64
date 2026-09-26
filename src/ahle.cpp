@@ -154,7 +154,8 @@ int AudioHLE::get_abi_index() const {
         case Abi::NeadSF:
         case Abi::NeadFZ: return 3;
         case Abi::NeadZelda: return 4;
-        case Abi::MusyX: return 5;
+        case Abi::MusyX:
+        case Abi::MusyX2: return 5;
     }
     return 0;
 }
@@ -183,7 +184,7 @@ AudioHLE::Abi AudioHLE::detect(const u8* rdram, size_t rdram_size, u32 p) {
             case 0x1CD01250: // F-Zero X
             case 0x1F4C1230: // F-Zero X Expansion Kit
                 return Abi::NeadFZ;
-            case 0x00010010: return Abi::MusyX; // MusyX v2
+            case 0x00010010: return Abi::MusyX2; // MusyX v2
             default: return Abi::NeadZelda; // OoT/MM, Yoshi's Story, 1080, Animal Crossing, ...
         }
     }
@@ -203,7 +204,14 @@ void AudioHLE::process(u8* rdram, size_t rdram_size, u32 addr, u32 size, u32 uco
     rdram_ptr = rdram;
     rdram_sz = rdram_size;
     abi = detect(rdram, rdram_size, ucode_data_ptr);
-    if (abi == Abi::MusyX) return;
+    if (abi == Abi::MusyX) {
+        run_musyx_v1(addr, size);
+        return;
+    }
+    if (abi == Abi::MusyX2) {
+        run_musyx_v2(addr, size);
+        return;
+    }
     segments.fill(0);
 
     const u32 n_commands = size >> 3; // each command is 8 bytes: w1, w2
@@ -225,7 +233,8 @@ void AudioHLE::dispatch(u32 acmd, u32 w1, u32 w2) {
         case Abi::NeadSF:
         case Abi::NeadFZ:
         case Abi::NeadZelda: run_nead(acmd, w1, w2); break;
-        case Abi::MusyX: break;
+        case Abi::MusyX:
+        case Abi::MusyX2: break;
     }
 }
 
@@ -965,5 +974,622 @@ void AudioHLE::run_nead(u32 acmd, u32 w1, u32 w2) {
             }
             break;
         default: break;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Factor 5 MusyX synthesizer (v1 and v2)
+// -----------------------------------------------------------------------------
+
+namespace {
+    constexpr size_t MUSYX_SUBFRAME_SIZE = 192;
+    constexpr size_t MUSYX_MAX_VOICES = 32;
+    constexpr size_t MUSYX_SAMPLE_BUFFER_SIZE = 0x200;
+
+    // SFD offsets (shared across v1 and v2)
+    constexpr u32 SFD_VOICE_COUNT     = 0x00;
+    constexpr u32 SFD_SFX_INDEX       = 0x02;
+    constexpr u32 SFD_VOICE_BITMASK   = 0x04;
+    constexpr u32 SFD_STATE_PTR       = 0x08;
+    constexpr u32 SFD_SFX_PTR         = 0x0C;
+    constexpr u32 SFD_VOICES          = 0x10;
+
+    // MusyX v2 SFD offsets
+    constexpr u32 SFD2_10_PTR         = 0x10;
+    constexpr u32 SFD2_14_BITMASK     = 0x14;
+    constexpr u32 SFD2_15_BITMASK     = 0x15;
+    constexpr u32 SFD2_16_BITMASK     = 0x16;
+    constexpr u32 SFD2_18_PTR         = 0x18;
+    constexpr u32 SFD2_1C_PTR         = 0x1C;
+    constexpr u32 SFD2_20_PTR         = 0x20;
+    constexpr u32 SFD2_24_PTR         = 0x24;
+    constexpr u32 SFD2_VOICES         = 0x28;
+
+    // Per-voice parameter block (80 bytes)
+    constexpr u32 VOICE_ENV_BEGIN         = 0x00;
+    constexpr u32 VOICE_ENV_STEP          = 0x10;
+    constexpr u32 VOICE_PITCH_Q16         = 0x20;
+    constexpr u32 VOICE_PITCH_SHIFT       = 0x22;
+    constexpr u32 VOICE_CATSRC_0          = 0x24;
+    constexpr u32 VOICE_CATSRC_1          = 0x30;
+    constexpr u32 VOICE_ADPCM_FRAMES      = 0x3C;
+    constexpr u32 VOICE_SKIP_SAMPLES      = 0x3E;
+    constexpr u32 VOICE_U16_40            = 0x40;
+    constexpr u32 VOICE_U16_42            = 0x42;
+    constexpr u32 VOICE_ADPCM_TABLE_PTR   = 0x40;
+    constexpr u32 VOICE_INTERLEAVED_PTR   = 0x44;
+    constexpr u32 VOICE_END_POINT         = 0x48;
+    constexpr u32 VOICE_RESTART_POINT     = 0x4A;
+    constexpr u32 VOICE_U16_4C            = 0x4C;
+    constexpr u32 VOICE_U16_4E            = 0x4E;
+    constexpr u32 VOICE_SIZE              = 0x50;
+
+    // Concatenated sample source descriptor
+    constexpr u32 CATSRC_PTR1  = 0x00;
+    constexpr u32 CATSRC_PTR2  = 0x04;
+    constexpr u32 CATSRC_SIZE1 = 0x08;
+    constexpr u32 CATSRC_SIZE2 = 0x0A;
+
+    // State buffer layout
+    constexpr u32 STATE_LAST_SAMPLE  = 0x000;
+    constexpr u32 STATE_BASE_VOL     = 0x100;
+    constexpr u32 STATE_CC0          = 0x110;
+    constexpr u32 STATE_740_LAST4_V1 = 0x290;
+    constexpr u32 STATE_740_LAST4_V2 = 0x110;
+
+    // Sound effects delay/reverb processor block
+    constexpr u32 SFX_CBUFFER_PTR    = 0x00;
+    constexpr u32 SFX_CBUFFER_LENGTH = 0x04;
+    constexpr u32 SFX_TAP_COUNT      = 0x08;
+    constexpr u32 SFX_FIR4_HGAIN     = 0x0A;
+    constexpr u32 SFX_TAP_DELAYS     = 0x0C;
+    constexpr u32 SFX_TAP_GAINS      = 0x2C;
+    constexpr u32 SFX_U16_3C         = 0x3C;
+    constexpr u32 SFX_U16_3E         = 0x3E;
+    constexpr u32 SFX_FIR4_HCOEFFS   = 0x40;
+
+    inline s32 musyx_dot4(const s16* x, const s16* y) {
+        s32 accu = 0;
+        for (size_t i = 0; i < 4; ++i) {
+            accu = clamp_s16(accu + (((s32)x[i] * (s32)y[i]) >> 15));
+        }
+        return accu;
+    }
+
+    inline s16 musyx_predict_sample(u8 byte, u8 mask, unsigned lshift, unsigned rshift) {
+        s16 sample = static_cast<u16>(byte & mask) << lshift;
+        sample >>= rshift;
+        return sample;
+    }
+
+    inline void musyx_predict_frame(s16* dst, const u8* src, const u8* nibbles, unsigned int rshift) {
+        *(dst++) = static_cast<s16>((src[0] << 8) | src[1]);
+        *(dst++) = static_cast<s16>((src[2] << 8) | src[3]);
+        for (unsigned int i = 1; i < 16; ++i) {
+            const u8 byte = nibbles[i];
+            *(dst++) = musyx_predict_sample(byte, 0xF0, 8, rshift);
+            *(dst++) = musyx_predict_sample(byte, 0x0F, 12, rshift);
+        }
+    }
+
+    inline void musyx_compute_residuals(s16* dst, const s16* src, const s16* cb_entry,
+                                       const s16* last_samples, size_t count) {
+        const s16* const book1 = cb_entry;
+        const s16* const book2 = cb_entry + 8;
+        const s16 l1 = last_samples[0];
+        const s16 l2 = last_samples[1];
+        for (size_t i = 0; i < count; ++i) {
+            s32 accu = static_cast<s32>(src[i]) << 11;
+            accu += static_cast<s32>(book1[i]) * l1 + static_cast<s32>(book2[i]) * l2 + rdot(i, book2, src);
+            dst[i] = clamp_s16(accu >> 11);
+        }
+    }
+
+    void musyx_decode_frames(s16* dst, const u8* src, const s16* table, u8 count, u8 skip_samples) {
+        s16 frame[32];
+        const u8* nibbles = src + 8;
+        bool jump_gap = false;
+        if (skip_samples >= 32) {
+            jump_gap = true;
+            nibbles += 16;
+            src += 4;
+        }
+        for (unsigned int i = 0; i < count; ++i) {
+            const u8 c2 = nibbles[0];
+            const s16* book = (c2 & 0xF0) + table;
+            const unsigned int rshift = (c2 & 0x0F);
+
+            musyx_predict_frame(frame, src, nibbles, rshift);
+
+            std::memcpy(dst, frame, 2 * sizeof(s16));
+            musyx_compute_residuals(dst + 2, frame + 2, book, dst, 6);
+            musyx_compute_residuals(dst + 8, frame + 8, book, dst + 6, 8);
+            musyx_compute_residuals(dst + 16, frame + 16, book, dst + 14, 8);
+            musyx_compute_residuals(dst + 24, frame + 24, book, dst + 22, 8);
+
+            if (jump_gap) {
+                nibbles += 8;
+                src += 32;
+            }
+            jump_gap = !jump_gap;
+            nibbles += 16;
+            src += 4;
+            dst += 32;
+        }
+    }
+
+    inline void musyx_mix_samples(s16* y, s16 x, s16 hgain) {
+        *y = clamp_s16(*y + ((static_cast<s32>(x) * hgain + 0x4000) >> 15));
+    }
+
+    inline void musyx_mix_subframes(s16* y, const s16* x, s16 hgain) {
+        for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+            musyx_mix_samples(&y[i], x[i], hgain);
+        }
+    }
+
+    inline void musyx_mix_fir4(s16* y, const s16* x, s16 hgain, const s16* hcoeffs) {
+        s32 h[4];
+        for (int k = 0; k < 4; ++k) {
+            h[k] = (static_cast<s32>(hgain) * hcoeffs[k]) >> 15;
+        }
+        for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+            s32 v = (h[0] * x[i] + h[1] * x[i + 1] + h[2] * x[i + 2] + h[3] * x[i + 3]) >> 15;
+            y[i] = clamp_s16(y[i] + v);
+        }
+    }
+}
+
+struct AudioHLE::MusyXState {
+    s16 left[MUSYX_SUBFRAME_SIZE]{};
+    s16 right[MUSYX_SUBFRAME_SIZE]{};
+    s16 cc0[MUSYX_SUBFRAME_SIZE]{};
+    s16 e50[MUSYX_SUBFRAME_SIZE]{};
+    s32 base_vol[4]{0, 0, 0, 0};
+    s16 subframe_740_last4[4]{0, 0, 0, 0};
+};
+
+void AudioHLE::musyx_dma_cat8(u8* dst, u32 catsrc_ptr) {
+    const u32 ptr1  = dram_u32(catsrc_ptr + CATSRC_PTR1);
+    const u32 ptr2  = dram_u32(catsrc_ptr + CATSRC_PTR2);
+    const u16 size1 = dram_u16(catsrc_ptr + CATSRC_SIZE1);
+    const u16 size2 = dram_u16(catsrc_ptr + CATSRC_SIZE2);
+
+    for (size_t i = 0; i < size1; ++i) dst[i] = dram_u8(ptr1 + i);
+    if (size2 != 0) {
+        for (size_t i = 0; i < size2; ++i) dst[size1 + i] = dram_u8(ptr2 + i);
+    }
+}
+
+void AudioHLE::musyx_dma_cat16(s16* dst, u32 catsrc_ptr) {
+    const u32 ptr1  = dram_u32(catsrc_ptr + CATSRC_PTR1);
+    const u32 ptr2  = dram_u32(catsrc_ptr + CATSRC_PTR2);
+    const u16 size1 = dram_u16(catsrc_ptr + CATSRC_SIZE1);
+    const u16 size2 = dram_u16(catsrc_ptr + CATSRC_SIZE2);
+
+    const size_t count1 = size1 >> 1;
+    const size_t count2 = size2 >> 1;
+
+    for (size_t i = 0; i < count1; ++i) dst[i] = dram_s16(ptr1 + i * 2);
+    if (size2 != 0) {
+        for (size_t i = 0; i < count2; ++i) dst[count1 + i] = dram_s16(ptr2 + i * 2);
+    }
+}
+
+void AudioHLE::musyx_load_samples_pcm16(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset) {
+    const u8  u8_3e  = dram_u8(voice_ptr + VOICE_SKIP_SAMPLES);
+    const u16 u16_40 = dram_u16(voice_ptr + VOICE_U16_40);
+    const u16 u16_42 = dram_u16(voice_ptr + VOICE_U16_42);
+
+    const unsigned count = align_up(u16_40 + u8_3e, 4);
+    segbase = MUSYX_SAMPLE_BUFFER_SIZE - count;
+    offset  = u8_3e;
+
+    musyx_dma_cat16(samples + segbase, voice_ptr + VOICE_CATSRC_0);
+    if (u16_42 != 0) {
+        musyx_dma_cat16(samples, voice_ptr + VOICE_CATSRC_1);
+    }
+}
+
+void AudioHLE::musyx_load_samples_adpcm(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset) {
+    u8 buffer[MUSYX_SAMPLE_BUFFER_SIZE * 2 * 5 / 16];
+    s16 adpcm_table[128];
+
+    const u8  u8_3c = dram_u8(voice_ptr + VOICE_ADPCM_FRAMES);
+    const u8  u8_3d = dram_u8(voice_ptr + VOICE_ADPCM_FRAMES + 1);
+    const u8  u8_3e = dram_u8(voice_ptr + VOICE_SKIP_SAMPLES);
+    const u8  u8_3f = dram_u8(voice_ptr + VOICE_SKIP_SAMPLES + 1);
+    const u32 adpcm_table_ptr = dram_u32(voice_ptr + VOICE_ADPCM_TABLE_PTR);
+
+    for (size_t i = 0; i < 128; ++i) {
+        adpcm_table[i] = dram_s16(adpcm_table_ptr + i * 2);
+    }
+
+    const unsigned count = static_cast<unsigned>(u8_3c) << 5;
+    segbase = MUSYX_SAMPLE_BUFFER_SIZE - count;
+    offset  = u8_3e & 0x1F;
+
+    musyx_dma_cat8(buffer, voice_ptr + VOICE_CATSRC_0);
+    musyx_decode_frames(samples + segbase, buffer, adpcm_table, u8_3c, u8_3e);
+
+    if (u8_3d != 0) {
+        musyx_dma_cat8(buffer, voice_ptr + VOICE_CATSRC_1);
+        musyx_decode_frames(samples, buffer, adpcm_table, u8_3d, u8_3f);
+    }
+}
+
+void AudioHLE::musyx_mix_voice_samples(MusyXState& musyx, u32 voice_ptr, const s16* samples,
+                                      unsigned segbase, unsigned offset, u32 last_sample_ptr) {
+    const u16 pitch_q16   = dram_u16(voice_ptr + VOICE_PITCH_Q16);
+    const u16 pitch_shift = dram_u16(voice_ptr + VOICE_PITCH_SHIFT);
+
+    const u16 end_point     = dram_u16(voice_ptr + VOICE_END_POINT);
+    const u16 restart_point = dram_u16(voice_ptr + VOICE_RESTART_POINT);
+
+    const u16 u16_4e = dram_u16(voice_ptr + VOICE_U16_4E);
+
+    const s16* sample = samples + segbase + offset + u16_4e;
+    const s16* const sample_end = samples + segbase + end_point;
+    const s16* const sample_restart = samples + (restart_point & 0x7FFF) +
+                                      (((restart_point & 0x8000) != 0) ? 0 : segbase);
+
+    u32 pitch_accu = pitch_q16;
+    const u32 pitch_step = static_cast<u32>(pitch_shift) << 4;
+
+    s32 v4_env[4];
+    s32 v4_env_step[4];
+    for (int k = 0; k < 4; ++k) {
+        v4_env[k]      = dram_s32(voice_ptr + VOICE_ENV_BEGIN + k * 4);
+        v4_env_step[k] = dram_s32(voice_ptr + VOICE_ENV_STEP  + k * 4);
+    }
+
+    s16* v4_dst[4] = { musyx.left, musyx.right, musyx.cc0, musyx.e50 };
+    s16 v4[4]{0, 0, 0, 0};
+
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        const s16* lut = RESAMPLE_LUT + ((pitch_accu & 0xFC00) >> 8);
+
+        sample += (pitch_accu >> 16);
+        pitch_accu &= 0xFFFF;
+        pitch_accu += pitch_step;
+
+        const std::ptrdiff_t dist = sample - sample_end;
+        if (dist >= 0) {
+            sample = sample_restart + dist;
+        }
+
+        const s16 v = clamp_s16(musyx_dot4(sample, lut));
+
+        for (int k = 0; k < 4; ++k) {
+            const s32 accu = (static_cast<s32>(v) * (v4_env[k] >> 16)) >> 15;
+            v4[k] = clamp_s16(accu);
+            *(v4_dst[k]) = clamp_s16(accu + *(v4_dst[k]));
+
+            ++(v4_dst[k]);
+            v4_env[k] += v4_env_step[k];
+        }
+    }
+
+    for (int k = 0; k < 4; ++k) {
+        set_dram_s16(last_sample_ptr + k * 2, v4[k]);
+    }
+}
+
+u32 AudioHLE::musyx_voice_stage(MusyXState& musyx, u32 voice_ptr, u32 last_sample_ptr) {
+    u32 output_ptr = 0;
+    if (dram_u16(voice_ptr + VOICE_CATSRC_0 + CATSRC_SIZE1) == 0) {
+        output_ptr = dram_u32(voice_ptr + VOICE_INTERLEAVED_PTR);
+    } else {
+        for (int i = 0; i < static_cast<int>(MUSYX_MAX_VOICES); ++i) {
+            s16 samples[MUSYX_SAMPLE_BUFFER_SIZE];
+            unsigned segbase = 0;
+            unsigned offset = 0;
+
+            if (dram_u8(voice_ptr + VOICE_ADPCM_FRAMES) == 0) {
+                musyx_load_samples_pcm16(voice_ptr, samples, segbase, offset);
+            } else {
+                musyx_load_samples_adpcm(voice_ptr, samples, segbase, offset);
+            }
+
+            musyx_mix_voice_samples(musyx, voice_ptr, samples, segbase, offset, last_sample_ptr + i * 8);
+
+            output_ptr = dram_u32(voice_ptr + VOICE_INTERLEAVED_PTR);
+            if (output_ptr != 0) {
+                break;
+            }
+
+            voice_ptr += VOICE_SIZE;
+        }
+    }
+    return output_ptr;
+}
+
+void AudioHLE::musyx_sfx_stage(MusyXState& musyx, u32 sfx_ptr, u16 idx, bool is_v2) {
+    if (sfx_ptr == 0) return;
+
+    s16 buffer[MUSYX_SUBFRAME_SIZE + 4];
+    s16* subframe = buffer + 4;
+
+    const u32 pos = static_cast<u32>(idx) * MUSYX_SUBFRAME_SIZE;
+
+    const u32 cbuffer_ptr    = dram_u32(sfx_ptr + SFX_CBUFFER_PTR);
+    const u32 cbuffer_length = dram_u32(sfx_ptr + SFX_CBUFFER_LENGTH);
+    if (cbuffer_ptr == 0 || cbuffer_length == 0) return;
+
+    const u16 tap_count = dram_u16(sfx_ptr + SFX_TAP_COUNT);
+
+    u32 tap_delays[8];
+    s16 tap_gains[8];
+    for (int k = 0; k < 8; ++k) {
+        tap_delays[k] = dram_u32(sfx_ptr + SFX_TAP_DELAYS + k * 4);
+        tap_gains[k]  = dram_s16(sfx_ptr + SFX_TAP_GAINS  + k * 2);
+    }
+
+    const s16 fir4_hgain = dram_s16(sfx_ptr + SFX_FIR4_HGAIN);
+    s16 fir4_hcoeffs[4];
+    for (int k = 0; k < 4; ++k) {
+        fir4_hcoeffs[k] = dram_s16(sfx_ptr + SFX_FIR4_HCOEFFS + k * 2);
+    }
+
+    const u16 sfx_gains[2] = {
+        dram_u16(sfx_ptr + SFX_U16_3C),
+        dram_u16(sfx_ptr + SFX_U16_3E)
+    };
+
+    std::memset(subframe, 0, MUSYX_SUBFRAME_SIZE * sizeof(s16));
+    s16 delayed[MUSYX_SUBFRAME_SIZE];
+
+    for (size_t i = 0; i < tap_count && i < 8; ++i) {
+        int dpos = static_cast<int>(pos) - static_cast<int>(tap_delays[i]);
+        while (dpos <= 0) {
+            dpos += static_cast<int>(cbuffer_length);
+        }
+        int dlength = static_cast<int>(MUSYX_SUBFRAME_SIZE);
+
+        if (static_cast<u32>(dpos + MUSYX_SUBFRAME_SIZE) > cbuffer_length) {
+            dlength = static_cast<int>(cbuffer_length) - dpos;
+            for (int s = 0; s < static_cast<int>(MUSYX_SUBFRAME_SIZE) - dlength; ++s) {
+                delayed[dlength + s] = dram_s16(cbuffer_ptr + s * 2);
+            }
+        }
+
+        for (int s = 0; s < dlength; ++s) {
+            delayed[s] = dram_s16(cbuffer_ptr + (dpos + s) * 2);
+        }
+
+        musyx_mix_subframes(subframe, delayed, tap_gains[i]);
+    }
+
+    if (!is_v2) {
+        for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+            const s16 v = subframe[i];
+            musyx.left[i]  = clamp_s16(musyx.left[i]  + v);
+            musyx.right[i] = clamp_s16(musyx.right[i] + v);
+        }
+    } else {
+        for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+            const s16 v = subframe[i];
+            const s16 v1 = static_cast<s16>((static_cast<s32>(v) * sfx_gains[0]) >> 16);
+            const s16 v2 = static_cast<s16>((static_cast<s32>(v) * sfx_gains[1]) >> 16);
+
+            musyx.left[i]  = clamp_s16(musyx.left[i]  + v1);
+            musyx.right[i] = clamp_s16(musyx.right[i] + v1);
+            musyx.cc0[i]   = clamp_s16(musyx.cc0[i]   + v2);
+        }
+    }
+
+    std::memcpy(buffer, musyx.subframe_740_last4, 4 * sizeof(s16));
+    std::memcpy(musyx.subframe_740_last4, subframe + MUSYX_SUBFRAME_SIZE - 4, 4 * sizeof(s16));
+    musyx_mix_fir4(musyx.e50, buffer + 1, fir4_hgain, fir4_hcoeffs);
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        set_dram_s16(cbuffer_ptr + (pos + i) * 2, musyx.e50[i]);
+    }
+}
+
+void AudioHLE::musyx_load_base_vol(s32* base_vol, u32 address) {
+    base_vol[0] = (static_cast<s32>(dram_u16(address))     << 16) | dram_u16(address + 8);
+    base_vol[1] = (static_cast<s32>(dram_u16(address + 2)) << 16) | dram_u16(address + 10);
+    base_vol[2] = (static_cast<s32>(dram_u16(address + 4)) << 16) | dram_u16(address + 12);
+    base_vol[3] = (static_cast<s32>(dram_u16(address + 6)) << 16) | dram_u16(address + 14);
+}
+
+void AudioHLE::musyx_save_base_vol(const s32* base_vol, u32 address) {
+    for (int k = 0; k < 4; ++k) {
+        set_dram_s16(address + k * 2, static_cast<s16>(base_vol[k] >> 16));
+    }
+    for (int k = 0; k < 4; ++k) {
+        set_dram_s16(address + 8 + k * 2, static_cast<s16>(base_vol[k]));
+    }
+}
+
+void AudioHLE::musyx_update_base_vol(s32* base_vol, u32 voice_mask, u32 last_sample_ptr, u8 mask_15, u32 ptr_24) {
+    if (voice_mask != 0) {
+        u32 mask = 1;
+        for (size_t i = 0; i < MUSYX_MAX_VOICES; ++i, mask <<= 1, last_sample_ptr += 8) {
+            if ((voice_mask & mask) == 0) continue;
+            for (int k = 0; k < 4; ++k) {
+                base_vol[k] += dram_s16(last_sample_ptr + k * 2);
+            }
+        }
+    }
+    if (mask_15 != 0) {
+        u32 mask = 1;
+        for (size_t i = 0; i < 4; ++i, mask <<= 1, ptr_24 += 8) {
+            if ((mask_15 & mask) == 0) continue;
+            for (int k = 0; k < 4; ++k) {
+                base_vol[k] += dram_s16(ptr_24 + k * 2);
+            }
+        }
+    }
+    for (int k = 0; k < 4; ++k) {
+        base_vol[k] = static_cast<s32>((static_cast<s64>(base_vol[k]) * 0x0000F850) >> 16);
+    }
+}
+
+void AudioHLE::musyx_init_subframes_v1(MusyXState& musyx) {
+    const s16 base_cc0 = clamp_s16(musyx.base_vol[2]);
+    const s16 base_e50 = clamp_s16(musyx.base_vol[3]);
+
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        musyx.e50[i]   = base_e50;
+        musyx.left[i]  = clamp_s16(musyx.cc0[i] + base_cc0);
+        musyx.right[i] = clamp_s16(-musyx.cc0[i] - base_cc0);
+        musyx.cc0[i]   = 0;
+    }
+}
+
+void AudioHLE::musyx_init_subframes_v2(MusyXState& musyx) {
+    s16 values[4];
+    for (int k = 0; k < 4; ++k) {
+        values[k] = clamp_s16(musyx.base_vol[k]);
+    }
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        musyx.left[i]  = values[0];
+        musyx.right[i] = values[1];
+        musyx.cc0[i]   = values[2];
+        musyx.e50[i]   = values[3];
+    }
+}
+
+void AudioHLE::musyx_interleave_stage_v1(MusyXState& musyx, u32 output_ptr) {
+    const s16 base_left  = clamp_s16(musyx.base_vol[0]);
+    const s16 base_right = clamp_s16(musyx.base_vol[1]);
+
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        const s16 l = clamp_s16(musyx.left[i]  + base_left);
+        const s16 r = clamp_s16(musyx.right[i] + base_right);
+        set_dram_s16(output_ptr + i * 4,     l);
+        set_dram_s16(output_ptr + i * 4 + 2, r);
+    }
+}
+
+void AudioHLE::musyx_interleave_stage_v2(MusyXState& musyx, u16 mask_16, u32 ptr_18, u32 ptr_1c, u32 output_ptr) {
+    s16 subframe[MUSYX_SUBFRAME_SIZE];
+
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        const s16 v = dram_s16(ptr_1c + i * 2);
+        musyx.left[i]  = v;
+        musyx.right[i] = clamp_s16(-v);
+        subframe[i]    = 0;
+    }
+
+    u16 mask = 1;
+    for (size_t k = 0; k < 8; ++k, mask <<= 1, ptr_18 += 8) {
+        if ((mask_16 & mask) == 0) continue;
+
+        u32 address = dram_u32(ptr_18);
+        const s16 hgain = dram_s16(ptr_18 + 4);
+
+        for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i, address += 2) {
+            musyx_mix_samples(&musyx.left[i],  dram_s16(address), hgain);
+            musyx_mix_samples(&musyx.right[i], dram_s16(address + 2 * MUSYX_SUBFRAME_SIZE), hgain);
+            musyx_mix_samples(&subframe[i],    dram_s16(address + 4 * MUSYX_SUBFRAME_SIZE), hgain);
+        }
+    }
+
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        set_dram_s16(output_ptr + i * 4,     musyx.left[i]);
+        set_dram_s16(output_ptr + i * 4 + 2, musyx.right[i]);
+    }
+
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        set_dram_s16(ptr_1c + i * 2, subframe[i]);
+    }
+}
+
+void AudioHLE::run_musyx_v1(u32 sfd_ptr, u32 sfd_count) {
+    MusyXState musyx;
+    u32 state_ptr = dram_u32(sfd_ptr + SFD_STATE_PTR);
+
+    musyx_load_base_vol(musyx.base_vol, state_ptr + STATE_BASE_VOL);
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        musyx.cc0[i] = dram_s16(state_ptr + STATE_CC0 + i * 2);
+    }
+    for (size_t i = 0; i < 4; ++i) {
+        musyx.subframe_740_last4[i] = dram_s16(state_ptr + STATE_740_LAST4_V1 + i * 2);
+    }
+
+    while (sfd_count > 0) {
+        const u16 sfx_index       = dram_u16(sfd_ptr + SFD_SFX_INDEX);
+        const u32 voice_mask      = dram_u32(sfd_ptr + SFD_VOICE_BITMASK);
+        const u32 sfx_ptr         = dram_u32(sfd_ptr + SFD_SFX_PTR);
+        const u32 voice_ptr       = sfd_ptr + SFD_VOICES;
+        const u32 last_sample_ptr = state_ptr + STATE_LAST_SAMPLE;
+
+        musyx_update_base_vol(musyx.base_vol, voice_mask, last_sample_ptr, 0, 0);
+        musyx_init_subframes_v1(musyx);
+
+        const u32 output_ptr = musyx_voice_stage(musyx, voice_ptr, last_sample_ptr);
+
+        musyx_sfx_stage(musyx, sfx_ptr, sfx_index, false);
+
+        musyx_interleave_stage_v1(musyx, output_ptr);
+
+        --sfd_count;
+        if (sfd_count == 0) break;
+
+        sfd_ptr += SFD_VOICES + MUSYX_MAX_VOICES * VOICE_SIZE;
+        state_ptr = dram_u32(sfd_ptr + SFD_STATE_PTR);
+    }
+
+    musyx_save_base_vol(musyx.base_vol, state_ptr + STATE_BASE_VOL);
+    for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+        set_dram_s16(state_ptr + STATE_CC0 + i * 2, musyx.cc0[i]);
+    }
+    for (size_t i = 0; i < 4; ++i) {
+        set_dram_s16(state_ptr + STATE_740_LAST4_V1 + i * 2, musyx.subframe_740_last4[i]);
+    }
+}
+
+void AudioHLE::run_musyx_v2(u32 sfd_ptr, u32 sfd_count) {
+    MusyXState musyx;
+
+    while (sfd_count > 0) {
+        const u16 sfx_index  = dram_u16(sfd_ptr + SFD_SFX_INDEX);
+        const u32 voice_mask = dram_u32(sfd_ptr + SFD_VOICE_BITMASK);
+        const u32 state_ptr  = dram_u32(sfd_ptr + SFD_STATE_PTR);
+        const u32 sfx_ptr    = dram_u32(sfd_ptr + SFD_SFX_PTR);
+        const u32 voice_ptr  = sfd_ptr + SFD2_VOICES;
+
+        const u8  mask_15    = dram_u8(sfd_ptr + SFD2_15_BITMASK);
+        const u16 mask_16    = dram_u16(sfd_ptr + SFD2_16_BITMASK);
+        const u32 ptr_18     = dram_u32(sfd_ptr + SFD2_18_PTR);
+        const u32 ptr_1c     = dram_u32(sfd_ptr + SFD2_1C_PTR);
+        const u32 ptr_20     = dram_u32(sfd_ptr + SFD2_20_PTR);
+        const u32 ptr_24     = dram_u32(sfd_ptr + SFD2_24_PTR);
+
+        const u32 last_sample_ptr = state_ptr + STATE_LAST_SAMPLE;
+
+        musyx_load_base_vol(musyx.base_vol, state_ptr + STATE_BASE_VOL);
+        for (size_t i = 0; i < 4; ++i) {
+            musyx.subframe_740_last4[i] = dram_s16(state_ptr + STATE_740_LAST4_V2 + i * 2);
+        }
+
+        musyx_update_base_vol(musyx.base_vol, voice_mask, last_sample_ptr, mask_15, ptr_24);
+        musyx_init_subframes_v2(musyx);
+
+        const u32 output_ptr = musyx_voice_stage(musyx, voice_ptr, last_sample_ptr);
+
+        musyx_sfx_stage(musyx, sfx_ptr, sfx_index, true);
+
+        for (size_t i = 0; i < MUSYX_SUBFRAME_SIZE; ++i) {
+            set_dram_s16(output_ptr + i * 2,                            musyx.left[i]);
+            set_dram_s16(output_ptr + 2 * MUSYX_SUBFRAME_SIZE + i * 2, musyx.right[i]);
+            set_dram_s16(output_ptr + 4 * MUSYX_SUBFRAME_SIZE + i * 2, musyx.cc0[i]);
+        }
+
+        musyx_save_base_vol(musyx.base_vol, state_ptr + STATE_BASE_VOL);
+        for (size_t i = 0; i < 4; ++i) {
+            set_dram_s16(state_ptr + STATE_740_LAST4_V2 + i * 2, musyx.subframe_740_last4[i]);
+        }
+
+        if (mask_16 != 0) {
+            musyx_interleave_stage_v2(musyx, mask_16, ptr_18, ptr_1c, ptr_20);
+        }
+
+        --sfd_count;
+        if (sfd_count == 0) break;
+
+        sfd_ptr += SFD2_VOICES + MUSYX_MAX_VOICES * VOICE_SIZE;
     }
 }
