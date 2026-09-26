@@ -1,10 +1,11 @@
 # Publishes site/ (the project page, with the Google Search Console
 # verification tag) to GitHub Pages: https://wronk4.github.io/orbit64/
+# from main or nightly (both are allowed by the github-pages environment).
 name: Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, nightly]
     paths: ['site/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 

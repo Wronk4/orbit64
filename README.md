@@ -12,7 +12,7 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 | `tools/` | Test and analysis tools (`jit_bench.sh`, `audio_report.py`, `*_check.cpp`, profiler report) |
 | `third_party/`, `assets/` | Dear ImGui, stb; icons and other bundled files |
 | `docs/` | Notes on the emulator's internals |
-| `site/` | The project page on GitHub Pages (https://wronk4.github.io/orbit64/, published by `.github/workflows/pages.yml` from `main`) |
+| `site/` | The project page on GitHub Pages (https://wronk4.github.io/orbit64/, published by `.github/workflows/pages.yml` from `main` or `nightly`) |
 | `roms/` | **Your ROMs** (subfolders are fine). Ignored by git except its README |
 | `bin/`, `build/` | Build output (Makefile); `out/` for CMake |
 | `test_output/` | What the test tools write (screenshots, `--wav` captures, reports). Safe to delete |
