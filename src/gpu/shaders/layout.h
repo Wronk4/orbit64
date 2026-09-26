@@ -35,7 +35,8 @@
 // word 31: word offset of its draw state (FILL and UPLOAD have none)
 #define GPU_PRIM_STATE 31u
 #define GPU_PRIM_TRI 1u    // 3..23: per vertex sx, sy, sz, 1/w, u/w, v/w, rgba (r in bits 0-7); 24: 1/area
-#define GPU_PRIM_RECT 2u   // 3: tile, 4: s, 5: t, 6: ds per pixel, 7: dt per row (both at scale S), 8: flip
+#define GPU_PRIM_RECT 2u   // 3: tile, 4: s, 5: t, 6: ds per pixel, 7: dt per row (both at scale S), 8: flip,
+                           // 9..12: S min/max, T min/max (the native rectangle's range)
 #define GPU_PRIM_FILL 3u   // 3: ARGB (written as it is)
 #define GPU_PRIM_BLOCK 4u  // 3: ARGB, 4: z   (one native pixel through the pixel pipeline)
 #define GPU_PRIM_BLIT 5u   // 3: data offset, 4: width, 5: x0, 6: y0 (native): ARGB per native pixel, depth 0

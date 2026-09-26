@@ -760,6 +760,17 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
     return true;
 }
 
+// The S/T range a native texture rectangle w x h pixels samples.
+struct TexRectClamp {
+    f32 s_min, s_max, t_min, t_max;
+};
+
+inline TexRectClamp tex_rect_clamp(f32 s, f32 t, f32 dsdx, f32 dtdy, u32 w, u32 h) {
+    const f32 s_end = s + static_cast<f32>(w - 1) * dsdx;
+    const f32 t_end = t + static_cast<f32>(h - 1) * dtdy;
+    return {std::min(s, s_end), std::max(s, s_end), std::min(t, t_end), std::max(t, t_end)};
+}
+
 // Texture rectangle (G_TEXRECT / G_TEXRECTFLIP / S2DEX objects) at `scale`
 // times the frame buffer resolution, rows [row_begin, row_end) only. The
 // rectangle and texture coordinates are in frame buffer units; each output
@@ -808,16 +819,21 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
         return;
     }
 
+    if (ulx >= max_x || uly >= max_y) return;
     const f32 dsdx_hr = dsdx / static_cast<f32>(scale);
     const f32 dtdy_hr = dtdy / static_cast<f32>(scale);
     const s32 x0 = static_cast<s32>(ulx * scale), x1 = static_cast<s32>(max_x * scale);
     const s32 y0 = static_cast<s32>(uly * scale);
     const s32 y_first = std::max(y0, row_begin);
     const s32 y_last = std::min(static_cast<s32>(max_y * scale), row_end);
+    // Keep S/T within the texels the native rectangle samples. Past its last
+    // pixel centre the hi-res pixels would otherwise filter in texels beyond
+    // the loaded tile, which draws seams between rectangles drawn in strips.
+    const TexRectClamp cl = tex_rect_clamp(s, t, dsdx, dtdy, max_x - ulx, max_y - uly);
     for (s32 y = y_first; y < y_last; ++y) {
-        const f32 cur_t = t + static_cast<f32>(y - y0) * dtdy_hr;
+        const f32 cur_t = std::clamp(t + static_cast<f32>(y - y0) * dtdy_hr, cl.t_min, cl.t_max);
         for (s32 x = x0; x < x1; ++x) {
-            const f32 cur_s = s + static_cast<f32>(x - x0) * dsdx_hr;
+            const f32 cur_s = std::clamp(s + static_cast<f32>(x - x0) * dsdx_hr, cl.s_min, cl.s_max);
             sink.write(static_cast<u32>(x), static_cast<u32>(y), shade(cur_s, cur_t), 0.0f);
         }
     }

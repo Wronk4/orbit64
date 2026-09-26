@@ -8,7 +8,7 @@
 //
 //   make gpu_check -> bin/gpu_check
 //   bin/gpu_check rom.z64 [--scale S] [--frames N] [--every K] [--mash btn]
-//                 [--tolerance T] [--shots dir] [--bench] [--int]
+//                 [--tolerance T] [--shots dir] [--all] [--bench] [--int]
 //
 // --every K compares every K-th frame (reading GPU frames back is slow).
 // --shots writes cpu/gpu/diff PNGs of the worst frame. ORBIT64_GPU_DRIVER
@@ -35,6 +35,7 @@ namespace {
 
 struct Options {
     std::string rom, mash, shots;
+    bool all = false;
     int frames = 900, every = 10, scale = 4, tolerance = 2;
     bool bench = false, interp = false;
 };
@@ -99,6 +100,7 @@ int main(int argc, char** argv) {
         else if (a == "--shots") o.shots = next();
         else if (a == "--bench") o.bench = true;
         else if (a == "--int") o.interp = true;
+        else if (a == "--all") o.all = true;
         else o.rom = a;
     }
     if (o.rom.empty()) {
@@ -171,6 +173,11 @@ int main(int argc, char** argv) {
             save_png(base + "_gpu.png", g.pixels, g.w, g.h);
             save_png(base + "_diff.png", diff, c.w, c.h);
         }
+        if (!o.shots.empty() && o.all)
+            for (const auto& [n, g] : gpu) {
+                save_png(o.shots + "/all" + std::to_string(n) + "_gpu.png", g.pixels, g.w, g.h);
+                save_png(o.shots + "/all" + std::to_string(n) + "_cpu.png", cpu[n].pixels, cpu[n].w, cpu[n].h);
+            }
         status = differ > total / 1000 || size_mismatch ? 2 : 0;
     }
     gpu_factory = nullptr;

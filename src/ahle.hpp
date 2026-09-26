@@ -29,7 +29,7 @@ public:
 
     // Frontend status queries (read-only). ABI index follows AudioABI order:
     // 0=ABI1, 1=n_audio, 2=NEAD (Mario Kart), 3=NEAD (Star Fox / F-Zero X),
-    // 4=NEAD (Zelda / Yoshi / 1080), 5=MusyX (not emulated: silent).
+    // 4=NEAD (Zelda / Yoshi / 1080), 5=MusyX.
     int get_abi_index() const;
     u64 get_task_count() const { return task_count; }
 

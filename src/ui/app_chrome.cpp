@@ -23,7 +23,7 @@ static const char* kAbiLong[] = {
     "Nintendo EAD audio (Mario Kart 64 family)",
     "Nintendo EAD audio (Star Fox 64 / F-Zero X family)",
     "Nintendo EAD audio (Zelda family)",
-    "Factor 5 MusyX \xE2\x80\x94 not emulated yet, no sound",
+    "Factor 5 MusyX synthesizer",
 };
 
 // ---------------------------------------------------------------------------

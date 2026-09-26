@@ -85,7 +85,8 @@ screenshots and the captured sound per game, plus `sheet.png` with all screensho
   Diddy Kong Racing variant), n_audio (Rare and many third-party games) and the Nintendo EAD microcodes (Mario Kart 64,
   Star Fox 64 / F-Zero X, Zelda / Yoshi / 1080) are run with the microcode's own DMEM layouts, rounding and saturation.
   Per-voice state (ADPCM history, resampler phase, envelopes, filters) lives in RDRAM where the game points it, as on
-  hardware. MusyX games are recognised but not emulated yet (silent).
+  hardware. Factor 5's MusyX synthesizer (v1: Rogue Squadron; v2: Resident Evil 2, Indiana Jones, Battle for Naboo)
+  is emulated too: PCM16/ADPCM voices, envelopes, resampling, delay/reverb.
 - **Output** (`src/audio_stream.*`): the samples the game hands to the DAC go through a lock-free queue to the audio
   callback, which resamples them to the device rate with a 32-tap windowed-sinc filter. The pitch is never bent to
   absorb clock drift: at normal speed the emulator runs up to 3% faster or slower to keep the queue on target
@@ -157,8 +158,12 @@ Graphics › Video backend › Compatibility, or `ORBIT64_HIRES=cpu`) it runs on
 (`src/raster.*`, `src/hires.*`).
 
 `make gpu_check` builds a checker that runs a ROM once per renderer and compares every K-th frame:
-`bin/gpu_check rom.z64 --scale 4 --frames 1200 --every 40 --mash start [--shots dir]`, or `--bench` to time the GPU
-renderer alone. `ORBIT64_GPU_DRIVER=vulkan` picks the driver (on macOS through MoltenVK, with
+`bin/gpu_check rom.z64 --scale 4 --frames 1200 --every 40 --mash start [--shots dir [--all]]`, or `--bench` to time the
+GPU renderer alone. `--shots` saves the worst frame of each renderer and a diff, `--all` every compared frame.
+
+Texture rectangles at 2× and up keep their S/T coordinates inside the range the native rectangle samples. Games that
+draw 2D art in strips, each with its own texture load (Mario Kart 64's menus), would otherwise show seams between the
+strips, because bilinear filtering at sub-pixel positions reaches texels that were never loaded. `ORBIT64_GPU_DRIVER=vulkan` picks the driver (on macOS through MoltenVK, with
 `SDL_VULKAN_LIBRARY=/opt/homebrew/lib/libvulkan.1.dylib`); `ORBIT64_GPU_STATS=1` prints per-second figures.
 
 ## Debug and memory tools
@@ -180,7 +185,7 @@ Open the **Debug** menu (or the bug button in the toolbar). Every tool works wit
 |---|---|
 | `platform.*` | Everything OS-specific: config/user folders, drives and volumes, native file dialogs (Win32 / AppleScript / zenity or kdialog), "Show in Explorer/Finder", Ctrl vs Cmd, DPI scale |
 | `emu_core.*` | Runs the emulator on its own thread and exposes the frame buffer, input, audio, save states and live stats (FPS, microcode, RSP/RDP activity, VI/AI rates) |
-| `input.*` | Keyboard and SDL GameController mapping with rebinding |
+| `input.*` | Keyboard and SDL gamepad mapping with rebinding |
 | `boxart.*` | Box art matching (No-Intro / RetroArch `Named_Boxarts` folders) and asynchronous PNG/JPEG loading (stb_image) |
 | `library.*`, `rom_info.*` | Background ROM scanning, header parsing, favorites, recently played list, play time |
 | `settings.*` | INI-based persistent settings |
@@ -189,5 +194,7 @@ Open the **Debug** menu (or the bug button in the toolbar). Every tool works wit
 | `app*.cpp` | Window and main loop, menu/toolbar/status bar, library, game screen, settings, dialogs, save state slots (`app_states.cpp`) |
 | `app_debug*.cpp`, `debug_state.hpp` | DEBUG / MEMORY tools |
 
-Rendering goes through `SDL_Renderer`, so SDL picks Direct3D on Windows, Metal on macOS and OpenGL on Linux.
-The frontend has no platform-specific rendering code.
+The UI is drawn with SDL's GPU `SDL_Renderer` on the same `SDL_GPUDevice` as the RDP renderer (`gpu::create_device()`
+in `src/gpu/device.cpp`: Metal, Vulkan or Direct3D 12), so frames rendered on the GPU are shown without a copy back to
+the CPU. When no GPU device can be created, SDL's default renderer is used. The frontend has no platform-specific
+rendering code.

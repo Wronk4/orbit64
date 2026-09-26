@@ -424,6 +424,11 @@ void RdpRenderer::tex_rect(HiResTarget* ht, const DrawState& st, u64 serial, u64
     q[6] = fbits(dsdx / static_cast<f32>(S));
     q[7] = fbits(dtdy / static_cast<f32>(S));
     q[8] = flip ? 1u : 0u;
+    const raster::TexRectClamp cl = raster::tex_rect_clamp(s, tc, dsdx, dtdy, max_x - ulx, max_y - uly);
+    q[9] = fbits(cl.s_min);
+    q[10] = fbits(cl.s_max);
+    q[11] = fbits(cl.t_min);
+    q[12] = fbits(cl.t_max);
 }
 
 void RdpRenderer::fill_rect(HiResTarget* ht, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb) {

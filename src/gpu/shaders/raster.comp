@@ -303,8 +303,8 @@ void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint 
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
     if ((D[sb] & GPU_ST_Z_COMPARE) != 0u && 0.0 > z) return;
     uint tile = D[pb + 3u];
-    float cur_s = fword(pb + 4u) + float(int(x) - int(rx0)) * fword(pb + 6u);
-    float cur_t = fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u);
+    float cur_s = clamp(fword(pb + 4u) + float(int(x) - int(rx0)) * fword(pb + 6u), fword(pb + 9u), fword(pb + 10u));
+    float cur_t = clamp(fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u), fword(pb + 11u), fword(pb + 12u));
     bool flip = D[pb + 8u] != 0u;
     float ss = flip ? cur_t : cur_s;
     float st = flip ? cur_s : cur_t;
