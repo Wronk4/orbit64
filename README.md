@@ -202,3 +202,11 @@ The UI is drawn with SDL's GPU `SDL_Renderer` on the same `SDL_GPUDevice` as the
 in `src/gpu/device.cpp`: Metal, Vulkan or Direct3D 12), so frames rendered on the GPU are shown without a copy back to
 the CPU. When no GPU device can be created, SDL's default renderer is used. The frontend has no platform-specific
 rendering code.
+
+## Thanks
+
+Thank you to [Mupen64Plus](https://mupen64plus.org/) and everyone who has worked on it since Hacktarux's original
+Mupen64. For well over a decade they have built a free, portable N64 emulator in the open and shared what they learned
+about the console. That work taught a generation of emulator authors and homebrew developers how the Nintendo 64
+works, and every N64 emulator written since, this one included, benefits from it. Thanks as well to the wider N64
+emulation and homebrew community.

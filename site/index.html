@@ -163,6 +163,14 @@
   details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 10px; }
   summary { cursor: pointer; font-weight: 600; }
   details p { margin: 10px 0 0; color: var(--muted); }
+  .thanks { position: relative; overflow: hidden; border-radius: 16px; padding: 28px 28px 26px; border: 1px solid var(--line);
+    background: radial-gradient(120% 140% at 0% 0%, var(--accent-soft), transparent 60%), var(--card); }
+  .thanks .heart { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 14px;
+    background: var(--accent); color: var(--accent-fg); }
+  .thanks .heart svg { width: 22px; height: 22px; }
+  .thanks h2 { margin-bottom: 12px; }
+  .thanks p { color: var(--muted); margin: 0 0 12px; max-width: 720px; }
+  .thanks p.sign { color: var(--fg); font-style: italic; margin: 18px 0 0; }
   footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 0.9rem; }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; }
   footer img { width: 22px; height: 22px; vertical-align: middle; margin-right: 6px; }
@@ -354,6 +362,25 @@
       <p>In your user config folder: <code>%APPDATA%\Orbit64</code> on Windows,
         <code>~/Library/Application Support/Orbit64</code> on macOS and <code>~/.local/share/Orbit64</code> on Linux.
         Set <code>ORBIT64_CONFIG_DIR</code> to keep everything in a portable folder instead.</p></details>
+  </section>
+
+  <section id="thanks">
+    <div class="thanks">
+      <div class="heart"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 3 4.5 6.8 4.5c2.1 0 3.8 1.2 5.2 3 1.4-1.8 3.1-3 5.2-3 3.8 0 5.9 3.9 4.4 7.3C19.5 16.4 12 21 12 21z"/></svg></div>
+      <h2>Thank you, Mupen64Plus</h2>
+      <p>Orbit64 stands on the shoulders of the emulators that came before it, and few have done more for N64 emulation
+        than <a href="https://mupen64plus.org/">Mupen64Plus</a>. The project started from Hacktarux's original Mupen64.
+        For well over a decade its developers have built a free, portable emulator in the open and shared what they
+        learned about the console along the way: how the CPU, the RSP microcodes, the RDP and the audio pipeline
+        really behave.</p>
+      <p>That openly shared work taught a whole generation of emulator authors, homebrew developers and curious players
+        how the Nintendo 64 works, and it keeps many games playable on almost every platform. Anyone who writes an N64
+        emulator today benefits from it.</p>
+      <p>Thank you to everyone who has written code, reverse-engineered hardware, tested games or answered questions
+        for <a href="https://github.com/mupen64plus">Mupen64Plus</a>, and to the wider N64 emulation and homebrew
+        community.</p>
+      <p class="sign">With gratitude, from the Orbit64 team.</p>
+    </div>
   </section>
 
   <section id="build">
