@@ -26,6 +26,7 @@ endif()
 
 option(ORBIT64_WIN_CONSOLE "Windows: keep a console window (useful for --headless and logs)" OFF)
 option(ORBIT64_VENDOR_SDL3 "Always build SDL3 from source instead of using an installed copy" OFF)
+option(ORBIT64_SDL3_STATIC "Link SDL3 statically when it is built from source (self-contained release binaries)" OFF)
 set(ORBIT64_SDL3_VERSION "3.4.16" CACHE STRING "SDL3 release built when no installed SDL3 is used")
 
 if(NOT ORBIT64_VENDOR_SDL3)
@@ -34,8 +35,13 @@ endif()
 if(NOT SDL3_FOUND)
     message(STATUS "Orbit64: building SDL3 ${ORBIT64_SDL3_VERSION} from source")
     include(FetchContent)
-    set(SDL_SHARED ON CACHE BOOL "" FORCE)
-    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    if(ORBIT64_SDL3_STATIC)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    else()
+        set(SDL_SHARED ON CACHE BOOL "" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    endif()
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
     set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(SDL3
@@ -72,7 +78,7 @@ target_include_directories(n64 PRIVATE src ${IMGUI_DIR} ${IMGUI_DIR}/backends th
 target_compile_definitions(n64 PRIVATE IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_ENABLE_TEST_ENGINE)
 
 target_link_libraries(n64 PRIVATE SDL3::SDL3)
-if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21 AND NOT (ORBIT64_SDL3_STATIC AND NOT SDL3_FOUND))
     # SDL3.dll next to orbit64.exe, wherever it came from.
     add_custom_command(TARGET n64 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:n64> $<TARGET_FILE_DIR:n64>

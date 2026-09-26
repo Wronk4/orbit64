@@ -17,6 +17,14 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 | `test_output/` | What the test tools write (screenshots, `--wav` captures, reports). Safe to delete |
 | `reference/` | Local reference material such as the N64 SDK. Never committed |
 
+## Downloads
+
+Every push to GitHub is built for Windows, macOS and Linux by `.github/workflows/build.yml`. Pushes to `main` update the
+**nightly** pre-release on the Releases page (`orbit64-windows-x64.zip`, `orbit64-macos-universal.zip`,
+`orbit64-linux-x64.tar.gz`); pushing a tag such as `v1.1.0` publishes a versioned release. Builds of other branches are
+downloadable as artifacts of their run in the Actions tab. The macOS binary is not notarized: run
+`xattr -dr com.apple.quarantine orbit64` once after unpacking.
+
 ## Building
 
 The only external dependency is **SDL3 ≥ 3.4**. Dear ImGui (`third_party/imgui`), stb_image (`third_party/stb`), the fonts
@@ -29,7 +37,8 @@ The only external dependency is **SDL3 ≥ 3.4**. Dear ImGui (`third_party/imgui
 | macOS | `brew install sdl3` | `cmake -S . -B out && cmake --build out` or `make` |
 | Linux | `apt install libsdl3-dev`, `dnf install SDL3-devel` or `pacman -S sdl3` | `cmake -S . -B out && cmake --build out` or `make` |
 
-When CMake finds no SDL3 3.4 (or with `-DORBIT64_VENDOR_SDL3=ON`) it downloads and builds SDL3 itself. CMake produces
+When CMake finds no SDL3 3.4 (or with `-DORBIT64_VENDOR_SDL3=ON`) it downloads and builds SDL3 itself. `-DORBIT64_SDL3_STATIC=ON`
+links that copy statically (a single self-contained executable, as the release builds do). CMake produces
 `orbit64` (`orbit64.exe`, with `SDL3.dll` next to it). The Makefile produces `bin/n64` and uses `pkg-config sdl3`; on
 Windows with a MinGW toolchain such as [w64devkit](https://github.com/skeeto/w64devkit), `SDL3_DIR` points at the
 `x86_64-w64-mingw32` folder of the `SDL3-devel-*-mingw` package.

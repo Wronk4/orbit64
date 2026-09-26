@@ -1,0 +1,149 @@
+# Builds Orbit64 for macOS, Linux and Windows on every push.
+#
+#   push to main     -> binaries replace the assets of the rolling "nightly" pre-release
+#   push of a v* tag -> a versioned release (e.g. v1.1.0) with the binaries
+#   any other push   -> binaries only as workflow artifacts (Actions tab, kept 14 days)
+#
+# SDL3 is built from source and linked statically, so every archive holds a
+# single self-contained executable.
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-14
+            configure: >-
+              -G Ninja
+              "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+            exe: out/orbit64
+          - name: linux-x64
+            os: ubuntu-22.04
+            configure: >-
+              -G Ninja
+              -DCMAKE_C_COMPILER=gcc-12
+              -DCMAKE_CXX_COMPILER=g++-12
+              "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+            exe: out/orbit64
+          - name: windows-x64
+            os: windows-2022
+            configure: >-
+              -A x64
+              -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+            exe: out/Release/orbit64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja || true
+
+      - name: Install SDL3 build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build gcc-12 g++-12 \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
+            libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev
+
+      - name: Configure
+        shell: bash
+        run: >-
+          cmake -S . -B out
+          -DCMAKE_BUILD_TYPE=Release
+          -DORBIT64_VENDOR_SDL3=ON
+          -DORBIT64_SDL3_STATIC=ON
+          ${{ matrix.configure }}
+
+      - name: Build
+        run: cmake --build out --config Release --parallel
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/orbit64
+          cp "${{ matrix.exe }}" README.md dist/orbit64/
+          mkdir -p dist/orbit64/roms && cp roms/README.md dist/orbit64/roms/
+          cd dist
+          case "${{ runner.os }}" in
+            Linux)   tar -czf orbit64-${{ matrix.name }}.tar.gz orbit64 ;;
+            macOS)   ditto -c -k --keepParent orbit64 orbit64-${{ matrix.name }}.zip ;;
+            Windows) 7z a -tzip orbit64-${{ matrix.name }}.zip orbit64 > /dev/null ;;
+          esac
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-${{ matrix.name }}
+          path: dist/orbit64-${{ matrix.name }}.*
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Orbit64 $GITHUB_REF_NAME" --generate-notes --verify-tag
+
+      - name: Update nightly pre-release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git tag -f nightly "$GITHUB_SHA"
+          git push -f origin refs/tags/nightly
+          short=$(git rev-parse --short "$GITHUB_SHA")
+          cat > notes.md <<EOF
+          Automatic build of \`main\` at ${short} ($(date -u '+%Y-%m-%d %H:%M UTC')).
+
+          $(git log -1 --format='> %s' "$GITHUB_SHA")
+
+          | Platform | File |
+          |---|---|
+          | Windows 10/11 x64 | \`orbit64-windows-x64.zip\` |
+          | macOS 11+ (Apple Silicon and Intel) | \`orbit64-macos-universal.zip\` |
+          | Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | \`orbit64-linux-x64.tar.gz\` |
+
+          macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`
+          (or right-click the executable, Open) before starting it the first time.
+          EOF
+          if gh release view nightly > /dev/null 2>&1; then
+            gh release edit nightly --title "Orbit64 nightly ($short)" --notes-file notes.md --prerelease
+          else
+            gh release create nightly --title "Orbit64 nightly ($short)" --notes-file notes.md --prerelease --verify-tag
+          fi
+          gh release upload nightly dist/* --clobber
