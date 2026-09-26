@@ -1830,7 +1830,14 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 u32 lry = (w0 & 0xFFF) / 4;
                 u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
                 u32 uly = (w1 & 0xFFF) / 4;
-                rasterize_fill_rect(ulx, uly, lrx, lry, rdram, rdram_size);
+                // Only in FILL (and COPY) mode is this a plain fill with the
+                // fill colour. In 1- and 2-cycle mode the rectangle goes
+                // through the combiner and blender like a texture rectangle -
+                // e.g. OoT's fade overlays (PRIM colour, alpha 0 = no change),
+                // which cleared the whole screen to black when taken as fills.
+                const u32 cycle_type = (other_mode_h >> 20) & 0x3;
+                if (cycle_type < 2) rasterize_tex_rect(ulx, uly, lrx, lry, 0, 0.0f, 0.0f, 1.0f, 1.0f, false, rdram, rdram_size);
+                else rasterize_fill_rect(ulx, uly, lrx, lry, rdram, rdram_size);
                 break;
             }
 
