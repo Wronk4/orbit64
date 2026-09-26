@@ -97,6 +97,8 @@ public:
     // MMIO register access for DPC (0x04100000) and DPS (0x04200000)
     u32 read_dpc_reg(u32 addr) const;
     void write_dpc_reg(u32 addr, u32 val, MI& mi, u8* rdram, size_t rdram_size);
+    // End of a graphics task: SP interrupt, and DP unless the RDP is frozen.
+    void finish_task(MI& mi);
 
     u32 read_dps_reg(u32 addr) const;
     void write_dps_reg(u32 addr, u32 val);
@@ -119,7 +121,7 @@ public:
     // flushed at the end of every list); state_loaded() then drops what was
     // derived from the replaced state.
     template <class S> void serialize(S& s) {
-        s(dpc_start, dpc_end, dpc_current, dpc_status, dpc_clock, dpc_bufbusy, dpc_pipebusy, dpc_tmem);
+        s(dpc_start, dpc_end, dpc_current, dpc_status, dpc_clock, dpc_bufbusy, dpc_pipebusy, dpc_tmem, dp_pending_);
         s(dps_tbist, dps_test_mode, dps_buftest_addr, dps_buftest_data);
         s(segments, modelview_stack, projection_matrix, combined_matrix, combined_matrix_dirty, vertex_cache);
         s(vp_scale_x, vp_scale_y, vp_scale_z, vp_trans_x, vp_trans_y, vp_trans_z);
@@ -145,6 +147,7 @@ private:
     u32 dpc_end{0};
     u32 dpc_current{0};
     u32 dpc_status{0};
+    bool dp_pending_{false}; // task finished while frozen: DP interrupt on unfreeze
     u32 dpc_clock{0};
     u32 dpc_bufbusy{0};
     u32 dpc_pipebusy{0};
@@ -349,6 +352,10 @@ private:
     const DrawState& draw_state();
     DrawState draw_state_{};
     bool draw_state_dirty_{true};
+    // ORBIT64_DL_TRACE=<frame>[,<count>]: print every display list command
+    // of those frames to stderr (debugging).
+    int dl_trace_frame_ = -1;
+    int dl_trace_count_ = 1;
     u64 draw_state_serial_{0};
     u64 tmem_gen_{0}; // bumped by every TMEM load
 

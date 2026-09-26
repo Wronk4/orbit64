@@ -4,10 +4,14 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <thread>
 #include <unordered_set>
+
+extern int g_current_frame; // emulator.cpp
 
 static u32 stat_tri_called = 0;
 static u32 stat_incount[4] = {0, 0, 0, 0};
@@ -71,6 +75,10 @@ void Matrix4x4::transform_point(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz, 
 
 RDP::RDP() {
     reset();
+    if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
+        dl_trace_frame_ = std::atoi(e);
+        if (const char* comma = std::strchr(e, ',')) dl_trace_count_ = std::max(1, std::atoi(comma + 1));
+    }
 }
 
 RDP::~RDP() = default;
@@ -81,6 +89,7 @@ void RDP::reset() {
     dpc_end = 0;
     dpc_current = 0;
     dpc_status = 0;
+    dp_pending_ = false;
     dpc_clock = 0;
     dpc_bufbusy = 0;
     dpc_pipebusy = 0;
@@ -303,13 +312,29 @@ void RDP::write_dpc_reg(u32 addr, u32 val, MI& mi, u8* rdram, size_t rdram_size)
         case 3: { // DPC_STATUS_REG
             if (val & (1 << 0)) dpc_status &= ~(1 << 0); // Clr xbus
             if (val & (1 << 1)) dpc_status |= (1 << 0);  // Set xbus
-            if (val & (1 << 2)) dpc_status &= ~(1 << 1); // Clr freeze
+            if ((val & (1 << 2)) && (dpc_status & (1 << 1))) {  // Clr freeze
+                dpc_status &= ~(1 << 1);
+                // What the RDP held back while frozen is done now.
+                if (dp_pending_) {
+                    dp_pending_ = false;
+                    mi.raise_interrupt(MIInterrupt::DP);
+                }
+            }
             if (val & (1 << 3)) dpc_status |= (1 << 1);  // Set freeze
             if (val & (1 << 4)) dpc_status &= ~(1 << 2); // Clr flush
             if (val & (1 << 5)) dpc_status |= (1 << 2);  // Set flush
             break;
         }
     }
+}
+
+void RDP::finish_task(MI& mi) {
+    mi.raise_interrupt(MIInterrupt::SP);
+    // A frozen RDP (DPC_STATUS freeze, set by e.g. Rare's scheduler while it
+    // queues the next frame) doesn't run the commands yet, so "RDP done"
+    // only comes once it is unfrozen; Banjo-Kazooie waits for it there.
+    if (dpc_status & (1 << 1)) dp_pending_ = true;
+    else mi.raise_interrupt(MIInterrupt::DP);
 }
 
 u32 RDP::read_dps_reg(u32 addr) const {
@@ -1030,6 +1055,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
         pc += 8;
         u8 opcode = (w0 >> 24) & 0xFF;
+        if (dl_trace_frame_ >= 0 && g_current_frame >= dl_trace_frame_ && g_current_frame < dl_trace_frame_ + dl_trace_count_)
+            std::fprintf(stderr, "DL %d %08x: %08x %08x\n", g_current_frame, phys_pc, w0, w1);
 
         if (is_s2dex_ucode(current_ucode) &&
             execute_s2dex_command(opcode, w0, w1, current_ucode, pc, dl_stack, rdram, rdram_size)) {
@@ -1137,7 +1164,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                                 pc = dl_stack.back();
                                 dl_stack.pop_back();
                             } else {
-                                mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+                                finish_task(mi);
                                 return;
                             }
                         }
@@ -1415,7 +1442,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                             pc = dl_stack.back();
                             dl_stack.pop_back();
                         } else {
-                            mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+                            finish_task(mi);
                             return;
                         }
                     }
@@ -1551,7 +1578,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                               << " | scissor_rej: " << stat_scissor_reject
                               << " | pixels: drawn=" << stat_pixels.drawn << " z_fail=" << stat_pixels.z_fail
                               << " a_fail=" << stat_pixels.a_fail << "\n";
-                    mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+                    finish_task(mi);
                     return;
                 }
                 break;
@@ -1990,7 +2017,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
               << " | pixels: drawn=" << stat_pixels.drawn << " z_fail=" << stat_pixels.z_fail
               << " a_fail=" << stat_pixels.a_fail << "\n";
 
-    mi.raise_interrupt(MIInterrupt::DP | MIInterrupt::SP);
+    finish_task(mi);
 }
 
 void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size) {
