@@ -16,11 +16,12 @@
 // loads/stores, LL/SC, CFC1/CTC1 and the remaining COP1 arithmetic. COP0/TLB,
 // ERET, SYSCALL/BREAK/traps and BC1T/BC1F end a block.
 //
-// Blocks are only compiled for code living in KSEG0/KSEG1 (0x80000000-
-// 0xBFFFFFFF, or its sign-extended 64-bit form), i.e. the fixed, TLB-free
-// direct mapping to physical RDRAM that virtually all N64 game code runs
-// from. Anything else always falls back to the interpreter. A block is keyed
-// by physical address only and never bakes in its own virtual pc - branch
+// Blocks are compiled for code in RDRAM: through KSEG0/KSEG1 (0x80000000-
+// 0xBFFFFFFF, or its sign-extended 64-bit form), the fixed, TLB-free direct
+// mapping most N64 game code runs from, or through the TLB (GoldenEye and
+// Perfect Dark run from 0x7Fxxxxxx); such a block never runs past its 4 KB
+// page. Anything else falls back to the interpreter. A block is keyed by
+// physical address only and never bakes in its own virtual pc - branch
 // targets and link values are computed from JitCtx::start_pc at run time -
 // so the KSEG0 and KSEG1 aliases of the same code share one block.
 
@@ -164,10 +165,10 @@ private:
     // ordinary visit to the same address, their own map.
     BlockMap blocks_;
     BlockMap ds_blocks_;
-    // AArch64: code reached through the TLB (e.g. GoldenEye runs at
-    // 0x7000xxxx), keyed by the physical address it translated to. Such a
-    // block never runs past its 4 KB page - the next virtual page may map
-    // anywhere - and only links to blocks in the same page.
+    // Code reached through the TLB (e.g. GoldenEye runs at 0x7000xxxx),
+    // keyed by the physical address it translated to. Such a block never runs
+    // past its 4 KB page - the next virtual page may map anywhere - and on
+    // AArch64 only links to blocks in the same page.
     BlockMap map_blocks_;
 
     CodeBuffer code_;
@@ -176,8 +177,8 @@ private:
     // x64: a write to code drops only the blocks on the pages it hit (blocks
     // never jump to each other there, so nothing else refers to them).
     // page_blocks_ lists, per 64-byte page, the blocks covering it as
-    // start paddr | 1 for ds_blocks_; dirty_pages_ waits for the next
-    // run_step() like pending_invalidate_ does.
+    // start paddr | 1 for ds_blocks_, | 2 for map_blocks_; dirty_pages_
+    // waits for the next run_step() like pending_invalidate_ does.
     std::unordered_map<u32, std::vector<u32>> page_blocks_;
     std::vector<u32> dirty_pages_;
     void drop_dirty_pages();
@@ -205,12 +206,12 @@ private:
     JitCtx* active_ctx_ = nullptr; // the running chain's context, for request_invalidate()
 
     const Block* lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot, bool mapped = false);
-    Block compile_block(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot);
+    Block compile_block(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot, bool mapped);
     // AArch64: compile_block() with linking; branches to blocks not compiled
     // yet are returned in `links`.
     Block compile_block_linked(CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot, bool mapped,
                                std::vector<PendingLink>& links);
-    void mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot);
+    void mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot, bool mapped);
     // Entry of the compiled, linkable block at `paddr` (in map_blocks_ if
     // `mapped`), or null.
     const void* link_target(u32 paddr, bool mapped) const;
@@ -219,5 +220,14 @@ private:
     bool stats_on_ = false;
     Stats stats_;
     std::vector<u64> fallback_counts_; // indexed by fallback_key(), sized lazily
-    void count_fallback(Bus& bus, u64 pc);
+    void count_fallback(Bus& bus, u32 paddr);
+
+    // x64: the physical address of TLB-mapped code at `pc`, false when the
+    // fetch would fault or isn't RDRAM. The last page's translation is kept
+    // while the TLB and ASID stay the same.
+    bool translate_pc(CPU& cpu, Bus& bus, u64 pc, u32& paddr);
+    u64 tpc_vpage_ = ~0ULL;
+    u32 tpc_ppage_ = 0;
+    u32 tpc_gen_ = 0;
+    u8 tpc_asid_ = 0;
 };

@@ -77,13 +77,13 @@ void Recompiler::request_invalidate(u32 paddr, u32 len) {
     }
 }
 
-void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot) {
+void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot, [[maybe_unused]] bool mapped) {
     u32 first_page = start_paddr >> kPageShift;
     u32 last_page = (end_paddr == start_paddr) ? first_page : (end_paddr - 1) >> kPageShift;
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
         code_pages_[p] = 1;
 #if !defined(ORBIT64_JIT_A64)
-        const u32 entry = start_paddr | (delay_slot ? 1u : 0u);
+        const u32 entry = start_paddr | (delay_slot ? 1u : mapped ? 2u : 0u);
         std::vector<u32>& list = page_blocks_[p];
         if (list.empty() || list.back() != entry) list.push_back(entry);
 #endif
@@ -99,7 +99,7 @@ void Recompiler::drop_dirty_pages() {
         // A block that also covers other pages stays listed there; dropping
         // whatever sits at its address again later only costs a recompile.
         for (u32 entry : it->second) {
-            BlockMap& map = (entry & 1) ? ds_blocks_ : blocks_;
+            BlockMap& map = (entry & 1) ? ds_blocks_ : (entry & 2) ? map_blocks_ : blocks_;
             const u32 paddr = entry & ~3u;
             if (auto& table = map.tables[paddr >> kTableShift]) (*table)[(paddr >> 2) & (kSlotsPerTable - 1)] = Block{};
         }
@@ -107,7 +107,7 @@ void Recompiler::drop_dirty_pages() {
         if (stats_on_) stats_.page_drops++;
     }
     dirty_pages_.clear();
-    for (BlockMap* map : {&blocks_, &ds_blocks_}) {
+    for (BlockMap* map : {&blocks_, &ds_blocks_, &map_blocks_}) {
         map->last_paddr = 0xFFFFFFFFu;
         map->last_block = nullptr;
     }
@@ -157,7 +157,7 @@ u32 Recompiler::run(CPU& cpu, Bus& bus, u32 budget) {
     // TODO: a chain can still jump straight into such a block.
     if (blk && blk->fpu && !(cpu.get_cp0(CP0Reg::STATUS) & (1u << 29))) blk = nullptr;
     if (!blk || !blk->fn || !rt_ready_) {
-        if (stats_on_) count_fallback(bus, pc);
+        if (stats_on_) count_fallback(bus, paddr);
         return cpu.step();
     }
     if (blk->link_ok) jcache_[(pc >> 2) & ((1u << kJCacheBits) - 1)] = {pc, reinterpret_cast<const void*>(blk->fn)};
@@ -223,35 +223,41 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
     if (!dirty_pages_.empty()) drop_dirty_pages();
 
     u64 pc = cpu.get_pc();
-    // Only KSEG0/KSEG1 (the fixed, TLB-free window almost all game code runs
-    // from) is ever JIT-compiled; everything else - mapped segments, boot ROM
-    // shenanigans, etc. - just uses the interpreter. In 32-bit mode addresses
-    // are sign-extended to 64 bits, so the same window just as often shows up
-    // as 0xFFFFFFFF80000000-0xFFFFFFFFBFFFFFFF (any JR through a register
-    // loaded with LW, ERET to an EPC saved from such a pc, ...) - in some
-    // games that is half of everything executed, so both forms count.
+    // KSEG0/KSEG1 (the fixed, TLB-free window most game code runs from) is
+    // RDRAM directly. In 32-bit mode addresses are sign-extended to 64 bits,
+    // so the same window just as often shows up as 0xFFFFFFFF80000000-
+    // 0xFFFFFFFFBFFFFFFF (any JR through a register loaded with LW, ERET to an
+    // EPC saved from such a pc, ...) - in some games that is half of
+    // everything executed, so both forms count. Anything else goes through the
+    // TLB as an instruction fetch would (GoldenEye and Perfect Dark run almost
+    // entirely from 0x7Fxxxxxx); code outside RDRAM, or a fetch that faults,
+    // is left to the interpreter.
     const u64 pc_hi = pc >> 32;
     const u32 pc32 = static_cast<u32>(pc);
+    u32 paddr = pc32 & 0x1FFFFFFFu;
+    bool mapped = false;
     if ((pc_hi != 0 && pc_hi != 0xFFFFFFFFull) || pc32 < 0x80000000u || pc32 > 0xBFFFFFFFu) {
-        if (stats_on_) {
-            stats_.interp_instrs++;
-            stats_.interp_unmapped++;
+        mapped = (pc & 3) == 0 && translate_pc(cpu, bus, pc, paddr);
+        if (!mapped) {
+            if (stats_on_) {
+                stats_.interp_instrs++;
+                stats_.interp_unmapped++;
+            }
+            return cpu.step();
         }
-        return cpu.step();
     }
-    const u32 paddr = pc32 & 0x1FFFFFFFu;
 
     // A taken branch's delay slot whose branch ran on the interpreter: pc
     // after this one instruction is fixed (jit_branch_target(), not pc+4),
     // so it gets its own capped-at-1-instruction compile instead of the
     // normal multi-instruction one - see ds_blocks_.
     const bool delay_slot = cpu.jit_pending_delay_slot();
-    const Block* blk = lookup_or_compile(cpu, bus, paddr, delay_slot);
+    const Block* blk = lookup_or_compile(cpu, bus, paddr, delay_slot, mapped);
     // COP1 code with the FPU disabled: the interpreter raises Coprocessor
     // Unusable at the right instruction (compiled COP1 code doesn't check).
     if (blk && blk->fpu && !(cpu.get_cp0(CP0Reg::STATUS) & (1u << 29))) blk = nullptr;
     if (!blk || !blk->fn) {
-        if (stats_on_) count_fallback(bus, pc);
+        if (stats_on_) count_fallback(bus, paddr);
         return cpu.step();
     }
 
@@ -297,6 +303,20 @@ u32 Recompiler::run_step(CPU& cpu, Bus& bus) {
 }
 #endif
 
+bool Recompiler::translate_pc(CPU& cpu, Bus& bus, u64 pc, u32& paddr) {
+    const u8 asid = cpu.jit_asid();
+    if ((pc >> 12) == tpc_vpage_ && bus.tlb_generation() == tpc_gen_ && asid == tpc_asid_) {
+        paddr = tpc_ppage_ | static_cast<u32>(pc & 0xFFF);
+        return true;
+    }
+    if (bus.translate_vaddr(pc, paddr, false, asid) != TLBResult::SUCCESS || paddr >= RDRAM_SIZE) return false;
+    tpc_vpage_ = pc >> 12;
+    tpc_ppage_ = paddr & ~0xFFFu;
+    tpc_gen_ = bus.tlb_generation();
+    tpc_asid_ = asid;
+    return true;
+}
+
 const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 paddr, bool delay_slot, bool mapped) {
     // A delay slot block is a single instruction, so it doesn't matter how it
     // was reached.
@@ -314,7 +334,7 @@ const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 p
         std::vector<PendingLink> links;
         *slot = compile_block_linked(cpu, bus, paddr, delay_slot, mapped && !delay_slot, links);
 #else
-        *slot = compile_block(cpu, bus, paddr, delay_slot);
+        *slot = compile_block(cpu, bus, paddr, delay_slot, mapped);
 #endif
         slot->valid = true;
         if (slot->fn) {
@@ -324,7 +344,7 @@ const Recompiler::Block* Recompiler::lookup_or_compile(CPU& cpu, Bus& bus, u32 p
             }
         }
         if (stats_on_) stats_.compiles++;
-        if (slot->fn) mark_code_pages(paddr, paddr + slot->length * 4, delay_slot);
+        if (slot->fn) mark_code_pages(paddr, paddr + slot->length * 4, delay_slot, mapped);
 #if defined(ORBIT64_JIT_A64)
         if (slot->fn) {
             u8* code = reinterpret_cast<u8*>(slot->fn);
@@ -447,9 +467,8 @@ std::string fallback_key_name(u32 key) {
 
 } // namespace
 
-void Recompiler::count_fallback(Bus& bus, u64 pc) {
+void Recompiler::count_fallback(Bus& bus, u32 paddr) {
     stats_.interp_instrs++;
-    const u32 paddr = static_cast<u32>(pc) & 0x1FFFFFFFu;
     if (static_cast<size_t>(paddr) + 4 > bus.get_rdram_size()) return;
     const u8* p = bus.get_rdram() + paddr;
     const u32 raw = (static_cast<u32>(p[0]) << 24) | (static_cast<u32>(p[1]) << 16) |
@@ -1452,9 +1471,12 @@ void emit_branch(Assembler& x, const Decoded& d, u32 n, std::vector<size_t>& exi
 
 } // namespace
 
-static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot) {
+static Recompiler::Block compile_block_x64(Bus& bus, u32 start_paddr, CodeBuffer& code, bool delay_slot, bool mapped) {
     Recompiler::Block blk{};
-    const size_t rdram_size = bus.get_rdram_size();
+    // Code reached through the TLB stops at the end of its 4 KB page: the
+    // next virtual page may map anywhere.
+    const size_t rdram_size = mapped ? std::min<size_t>((start_paddr & ~0xFFFu) + 0x1000, bus.get_rdram_size())
+                                     : bus.get_rdram_size();
     const u8* rdram = bus.get_rdram();
     const u32 max_len = delay_slot ? 1 : kMaxBlockLen;
 
@@ -1545,9 +1567,10 @@ Recompiler::Block Recompiler::compile_block_linked(CPU& cpu, Bus& bus, u32 start
 }
 #endif
 
-Recompiler::Block Recompiler::compile_block([[maybe_unused]] CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot) {
+Recompiler::Block Recompiler::compile_block([[maybe_unused]] CPU& cpu, Bus& bus, u32 start_paddr, bool delay_slot,
+                                            [[maybe_unused]] bool mapped) {
 #if defined(ORBIT64_JIT_X64)
-    return compile_block_x64(bus, start_paddr, code_, delay_slot);
+    return compile_block_x64(bus, start_paddr, code_, delay_slot, mapped);
 #elif defined(ORBIT64_JIT_A64)
     std::vector<PendingLink> links; // dropped: nothing will patch them
     A64BlockEnv env;
