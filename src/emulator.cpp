@@ -62,6 +62,23 @@ void Emulator::reset() {
         // parameters written below land on top of it, as they do on hardware.
         if (cart.get_cic_type() == CICType::CIC_6105)
             std::memcpy(rdram + 0x4, rom.data() + 0x554, 0x888 - 0x554);
+
+        // Just before jumping to the game, the 6101/6102 IPL3 clears SP DMEM
+        // and IMEM, and the 6103 one fills them with 0xFF and stores its CIC
+        // number (6103 = 0x17D7) in the first IMEM word. Diddy Kong Racing
+        // checks that the first DMEM word is -1 and, if not, burns ~10
+        // million cycles every frame (a new picture only every 11 VIs).
+        // (6105/6106 are left as they were: not checked.)
+        const CICType cic = cart.get_cic_type();
+        if (cic == CICType::CIC_6101 || cic == CICType::CIC_6102) {
+            std::memset(rsp.get_dmem(), 0x00, 0x1000);
+            std::memset(rsp.get_imem(), 0x00, 0x1000);
+        } else if (cic == CICType::CIC_6103) {
+            std::memset(rsp.get_dmem(), 0xFF, 0x1000);
+            std::memset(rsp.get_imem(), 0xFF, 0x1000);
+            static const u8 cic_number[4] = {0x00, 0x00, 0x17, 0xD7};
+            std::memcpy(rsp.get_imem(), cic_number, 4);
+        }
     }
 
     // Set up standard IPL3 / OS parameters in RDRAM (0x80000300 - 0x80000320)
