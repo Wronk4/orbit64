@@ -158,6 +158,7 @@ void RDP::reset() {
     scissor_lry = 240;
     rdp_half1 = 0;
     rdp_half2 = 0;
+    vtx_color_base = 0;
     ucode_type = MicrocodeType::Auto;
 
     std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
@@ -467,11 +468,20 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
     }
 
     u32 vtx_addr = segment_to_physical(w1);
+    // Perfect Dark's vertices are 12 bytes: x, y, z, a color index, s, t. The
+    // index is a byte offset into the table set by opcode 0x07, whose 4-byte
+    // entries hold the RGBA color (or the normal, when lit) that the other
+    // microcodes keep in bytes 12-15 of the vertex itself.
+    const bool pd = ucode == MicrocodeType::F3DPD;
+    const u32 stride = pd ? 12 : 16;
 
     for (u32 i = 0; i < count; ++i) {
-        u32 cur_vtx = vtx_addr + i * 16;
-        if (cur_vtx + 16 > rdram_size) break;
+        u32 cur_vtx = vtx_addr + i * stride;
+        if (cur_vtx + stride > rdram_size) break;
         u32 dest_idx = (dest + i) % vertex_cache.size();
+        // The 4 color/normal bytes.
+        const u8* col = rdram + cur_vtx + 12;
+        if (pd) col = rdram + ((vtx_color_base + rdram[cur_vtx + 7]) & (static_cast<u32>(rdram_size) - 4));
 
         s16 vx = static_cast<s16>((rdram[cur_vtx + 0] << 8) | rdram[cur_vtx + 1]);
         s16 vy = static_cast<s16>((rdram[cur_vtx + 2] << 8) | rdram[cur_vtx + 3]);
@@ -486,9 +496,9 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
 
         f32 tnx = 0.0f, tny = 0.0f, tnz = 1.0f;
         if ((geometry_mode & 0x00020000) || (geometry_mode & 0x00040000)) {
-            s8 nx_i = static_cast<s8>(rdram[cur_vtx + 12]);
-            s8 ny_i = static_cast<s8>(rdram[cur_vtx + 13]);
-            s8 nz_i = static_cast<s8>(rdram[cur_vtx + 14]);
+            s8 nx_i = static_cast<s8>(col[0]);
+            s8 ny_i = static_cast<s8>(col[1]);
+            s8 nz_i = static_cast<s8>(col[2]);
             f32 nx = nx_i / 127.0f;
             f32 ny = ny_i / 127.0f;
             f32 nz = nz_i / 127.0f;
@@ -504,9 +514,9 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         if (geometry_mode & 0x00040000) { // G_TEXTURE_GEN (spherical mapping)
             f32 dot_x = tnx, dot_y = tny;
             if (lookat_set) {
-                s8 nx_i = static_cast<s8>(rdram[cur_vtx + 12]);
-                s8 ny_i = static_cast<s8>(rdram[cur_vtx + 13]);
-                s8 nz_i = static_cast<s8>(rdram[cur_vtx + 14]);
+                s8 nx_i = static_cast<s8>(col[0]);
+                s8 ny_i = static_cast<s8>(col[1]);
+                s8 nz_i = static_cast<s8>(col[2]);
                 f32 nx = nx_i / 127.0f;
                 f32 ny = ny_i / 127.0f;
                 f32 nz = nz_i / 127.0f;
@@ -521,7 +531,7 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         }
 
         if (geometry_mode & 0x00020000) { // G_LIGHTING
-            u8 ca = rdram[cur_vtx + 15];
+            u8 ca = col[3];
             f32 lit_r = ambient_light.r;
             f32 lit_g = ambient_light.g;
             f32 lit_b = ambient_light.b;
@@ -540,10 +550,10 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
             v.b = static_cast<u8>(std::clamp(lit_b, 0.0f, 255.0f));
             v.a = ca; // Alpha=0 is a valid, common value (fades, transparency) - must not be forced opaque
         } else {
-            u8 cr = rdram[cur_vtx + 12];
-            u8 cg = rdram[cur_vtx + 13];
-            u8 cb = rdram[cur_vtx + 14];
-            u8 ca = rdram[cur_vtx + 15];
+            u8 cr = col[0];
+            u8 cg = col[1];
+            u8 cb = col[2];
+            u8 ca = col[3];
             v.r = cr; v.g = cg; v.b = cb;
             v.a = ca;
         }
@@ -1350,7 +1360,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             }
 
             case 0xBF: { // G_TRI1 (Fast3D or F3DEX)
-                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) ? 10 : 2;
+                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) ? 10 : 2;
                 u32 v0 = ((w1 >> 16) & 0xFF) / div;
                 u32 v1 = ((w1 >> 8) & 0xFF) / div;
                 u32 v2 = (w1 & 0xFF) / div;
@@ -1360,8 +1370,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0xB1: { // G_TRIX (F3DGOLDEN) / G_TRI2 (Fast3D or F3DEX)
-                if (current_ucode == MicrocodeType::F3DGOLDEN) {
+            case 0xB1: { // G_TRI4 (F3DGOLDEN, F3DPD) / G_TRI2 (Fast3D or F3DEX)
+                if (current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) {
                     while (w1 != 0) {
                         u32 v0 = w1 & 0x0F;
                         w1 >>= 4;
@@ -1392,7 +1402,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             }
 
             case 0xB2: { // G_MODIFYVTX (F3DEX) / G_RDPHALF_CONT (Fast3D)
-                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) {
+                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) {
                     rdp_half2 = w1;
                     break;
                 }
@@ -1425,7 +1435,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
             case 0xBE: { // G_CULLDL (Fast3D / F3DEX)
                 u32 vstart = 0, vend = 0;
-                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) {
+                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) {
                     vstart = ((w0 & 0xFFFF) / 40) & 0x0F;
                     vend = (((w1 & 0xFFFF) / 40) > 0) ? (((w1 & 0xFFFF) / 40) - 1) & 0x0F : 0;
                 } else {
@@ -1451,7 +1461,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             }
 
             case 0xB5: { // G_LINE3D (Fast3D / F3DEX)
-                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN) ? 10 : 2;
+                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) ? 10 : 2;
                 u32 v0 = ((w1 >> 16) & 0xFF) / div;
                 u32 v1 = ((w1 >> 8) & 0xFF) / div;
                 if (v0 < vertex_cache.size() && v1 < vertex_cache.size()) {
@@ -1485,7 +1495,11 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0x07: { // G_QUAD (F3DEX2)
+            case 0x07: { // G_QUAD (F3DEX2) / vertex color table (F3DPD)
+                if (current_ucode == MicrocodeType::F3DPD) {
+                    vtx_color_base = segment_to_physical(w1);
+                    break;
+                }
                 u32 v0 = ((w0 >> 16) & 0xFF) / 2;
                 u32 v1 = ((w0 >> 8) & 0xFF) / 2;
                 u32 v2 = (w0 & 0xFF) / 2;
@@ -1674,14 +1688,21 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 tmem_dirty = true;
                 ++tmem_gen_;
                 u32 tile_idx = (w1 >> 24) & 0x7;
-                u32 count = ((w1 >> 14) & 0x3FF) + 1;
-                native_before_read(timg_addr, static_cast<u64>(timg_addr) + count * 2);
+                // Entries uls..lrs of row ult of the image. Games normally load
+                // from 0,0, but Perfect Dark stores each palette right after its
+                // texture and loads it with an offset from the same image address.
+                u32 uls = ((w0 >> 12) & 0xFFF) >> 2;
+                u32 ult = (w0 & 0xFFF) >> 2;
+                u32 lrs = ((w1 >> 12) & 0xFFF) >> 2;
+                u32 count = lrs >= uls ? lrs - uls + 1 : 1;
+                u32 src = timg_addr + (ult * timg_width + uls) * 2;
+                native_before_read(src, static_cast<u64>(src) + count * 2);
                 u32 start_word = tiles[tile_idx].tmem;
                 u32 tmem_dest = start_word * 8;
                 u32 bytes = count * 2;
 
-                for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (timg_addr + b < rdram_size); ++b) {
-                    tmem[tmem_dest + b] = rdram[timg_addr + b];
+                for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src + b < rdram_size); ++b) {
+                    tmem[tmem_dest + b] = rdram[src + b];
                 }
                 u32 num_words = (bytes + 7) / 8;
                 for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
@@ -2029,7 +2050,7 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
 
     u32 fb_w = color_image_width ? color_image_width : 320;
     u32 max_x = std::min({lrx, fb_w, scissor_lrx});
-    u32 max_y = std::min({lry, 240U, scissor_lry});
+    u32 max_y = std::min({lry, kMaxFbLines, scissor_lry});
     u32 start_x = std::max(ulx, scissor_ulx);
     u32 start_y = std::max(uly, scissor_uly);
     // FILL/COPY rectangles include their lower-right pixel (the SDK macros pass
@@ -2037,7 +2058,7 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
     u32 cycle_type = (other_mode_h >> 20) & 0x3;
     if (cycle_type == 2 || cycle_type == 3) {
         max_x = std::min({lrx + 1, fb_w, scissor_lrx});
-        max_y = std::min({lry + 1, 240U, scissor_lry});
+        max_y = std::min({lry + 1, kMaxFbLines, scissor_lry});
     }
 
     if (start_x >= max_x || start_y >= max_y) return;
@@ -2082,9 +2103,9 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
                       u32* shadow, size_t shadow_len, PixelStats& stats) {
     u32 fb_w = st.fb_w;
-    if (x >= fb_w || y >= kFbLines) return;
+    if (x >= fb_w || y >= kMaxFbLines) return;
     u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? st.scissor_lrx : fb_w;
-    u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? st.scissor_lry : kFbLines;
+    u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? st.scissor_lry : kMaxFbLines;
     if (x < st.scissor_ulx || x >= eff_lrx || y < st.scissor_uly || y >= eff_lry) return;
 
     u8 a = (color >> 24) & 0xFF;
@@ -2245,13 +2266,13 @@ void RDP::queue_native(NativeCmd& cmd, u8* rdram, size_t rdram_size) {
 void RDP::flush_native() {
     if (native_queue_.empty()) return;
     constexpr s32 kBandRows = 8;
-    constexpr u32 kBands = (kFbLines + kBandRows - 1) / kBandRows;
+    constexpr u32 kBands = (kMaxFbLines + kBandRows - 1) / kBandRows;
     // Waking the workers costs more than a handful of small draws.
     bool threaded = native_work_ >= 20000;
     if (threaded && !raster_pool_) {
         // Started on first use: one band worker per spare hardware thread
         // (the emulation thread draws bands too), capped - a frame only has
-        // 240 rows to split.
+        // 240 (at most 480) rows to split.
         const unsigned hw = std::thread::hardware_concurrency();
         raster_pool_ = std::make_unique<RasterPool>(std::min(hw > 1 ? hw - 1 : 0u, 15u));
     }
@@ -2304,9 +2325,9 @@ void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f
     NativeCmd cmd{};
     cmd.kind = NativeCmd::Kind::TexRect;
     cmd.st = native_snapshot(tile_idx, !combined || live.need_tex0, combined && live.need_tex1);
-    // raster::tex_rect() draws rows uly .. min(lry (+1 in FILL/COPY), 240) - 1.
-    cmd.y_first = static_cast<s32>(std::min<u32>(uly, kFbLines));
-    cmd.y_last = static_cast<s32>(std::min<u32>(lry, kFbLines - 1));
+    // raster::tex_rect() draws rows uly .. min(lry (+1 in FILL/COPY), 480) - 1.
+    cmd.y_first = static_cast<s32>(std::min<u32>(uly, kMaxFbLines));
+    cmd.y_last = static_cast<s32>(std::min<u32>(lry, kMaxFbLines - 1));
     cmd.shadow = hires_shadow_;
     cmd.shadow_len = hires_shadow_len_;
     cmd.ulx = ulx; cmd.uly = uly; cmd.lrx = lrx; cmd.lry = lry; cmd.tile = tile_idx;

@@ -50,7 +50,8 @@ enum class MicrocodeType {
     F3DEX2,
     S2DEX,
     S2DEX2,
-    F3DGOLDEN
+    F3DGOLDEN,
+    F3DPD // Perfect Dark: Fast3D with 12-byte vertices that index a color table
 };
 
 
@@ -132,7 +133,7 @@ public:
         s(combine_mode_w0, combine_mode_w1, combine_mode_set, other_mode_l, other_mode_h);
         s(ambient_light, lookat_x, lookat_y, lookat_set, dir_lights, num_lights);
         s(scissor_ulx, scissor_uly, scissor_lrx, scissor_lry);
-        s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2);
+        s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2, vtx_color_base);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
         s.fixed(internal_zbuffer);
@@ -272,6 +273,7 @@ private:
     u64 display_list_count{0};
     u32 rdp_half1{0};
     u32 rdp_half2{0};
+    u32 vtx_color_base{0}; // F3DPD: where vertex colors/normals live (set by opcode 0x07)
 
     // S2DEX / S2DEX2 state -------------------------------------------------
     // The four RSP "general status" words used by G_MOVEWORD(G_MW_GENSTAT)

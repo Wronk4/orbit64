@@ -10,6 +10,22 @@ RSP::RSP() {
     reset();
 }
 
+namespace {
+// Perfect Dark's graphics microcode carries no credit string to recognize it
+// by, so it is recognized by a CRC-32 of the start of its code.
+bool is_perfect_dark_ucode(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
+    constexpr u32 kLen = 0x800;
+    const u32 phys = ucode_ptr & static_cast<u32>(rdram_size - 1);
+    if (phys + kLen > rdram_size) return false;
+    u32 c = 0xFFFFFFFFu;
+    for (u32 i = 0; i < kLen; ++i) {
+        c ^= rdram[phys + i];
+        for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return ~c == 0xF295D221u;
+}
+} // namespace
+
 void RSP::reset() {
     std::fill(dmem.begin(), dmem.end(), 0);
     std::fill(imem.begin(), imem.end(), 0);
@@ -259,7 +275,9 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
             };
 
             if (!detect_banner(ucode_data_ptr)) {
-                if (!detect_banner(ucode_ptr)) {
+                if (is_perfect_dark_ucode(ucode_ptr, rdram, rdram_size)) {
+                    rdp.set_ucode_type(MicrocodeType::F3DPD);
+                } else if (!detect_banner(ucode_ptr)) {
                     static int dbg_fail = 0;
                     if (dbg_fail < 5) {
                         dbg_fail++;

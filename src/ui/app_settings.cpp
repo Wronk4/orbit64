@@ -660,8 +660,8 @@ void App::settings_emulation() {
 
     row_begin("Graphics microcode", "Auto-detect works for nearly every game. Override only if a game renders incorrectly.", cw);
     {
-        const char* items[] = {"Auto-detect", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)"};
-        if (combo("ucode", &settings_.ucode_override, items, 7, cw)) {
+        const char* items[] = {"Auto-detect", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)", "F3D (Perfect Dark)"};
+        if (combo("ucode", &settings_.ucode_override, items, 8, cw)) {
             core_.set_ucode_override(settings_.ucode_override);
             if (settings_.ucode_override != 0) toast("Microcode override active", ToastKind::Warning);
         }

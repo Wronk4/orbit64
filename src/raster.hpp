@@ -44,8 +44,11 @@ struct Tile {
     }
 };
 
-// The software RDP draws into, and the VI shows, 240 lines.
+// The high-resolution renderer's buffers are 240 lines tall; the software
+// RDP draws up to 480 (interlaced high-resolution screens, like Perfect
+// Dark's and Rainbow Six's), which the VI then shows at native resolution.
 constexpr u32 kFbLines = 240;
+constexpr u32 kMaxFbLines = 480;
 
 namespace raster {
 
@@ -650,7 +653,7 @@ inline bool triangle_bounds(const DrawState& st, const V& v0, const V& v1, const
                             f32& min_x, f32& max_x, f32& min_y, f32& max_y) {
     const u32 fb_w = st.fb_w;
     const u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? std::min(st.scissor_lrx, fb_w) : fb_w;
-    const u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? std::min(st.scissor_lry, kFbLines) : kFbLines;
+    const u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? std::min(st.scissor_lry, kMaxFbLines) : kMaxFbLines;
     const f32 fs = static_cast<f32>(scale);
     min_x = std::clamp(std::min({v0.sx, v1.sx, v2.sx}) * fs, static_cast<f32>(st.scissor_ulx * scale), static_cast<f32>(eff_lrx > 0 ? eff_lrx * scale - 1 : 0));
     max_x = std::clamp(std::max({v0.sx, v1.sx, v2.sx}) * fs, static_cast<f32>(st.scissor_ulx * scale), static_cast<f32>(eff_lrx > 0 ? eff_lrx * scale - 1 : 0));
@@ -766,14 +769,14 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
                      f32 dsdx, f32 dtdy, bool flip, u32 scale, s32 row_begin, s32 row_end, Sink& sink) {
     const u32 fb_w = st.fb_w;
     u32 max_x = std::min(lrx, fb_w);
-    u32 max_y = std::min(lry, kFbLines);
+    u32 max_y = std::min(lry, kMaxFbLines);
 
     // In COPY (and FILL) cycle type the lower-right rectangle edge is inclusive,
     // and COPY steps four texels per cycle, so the S increment is quartered.
     // Without this 2D sprites lose their last row/column and are stretched 4x.
     if (st.fill_or_copy) {
         max_x = std::min(lrx + 1, fb_w);
-        max_y = std::min(lry + 1, kFbLines);
+        max_y = std::min(lry + 1, kMaxFbLines);
     }
     if (st.copy_mode) {
         dsdx *= 0.25f;

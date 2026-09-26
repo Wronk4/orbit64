@@ -10,6 +10,18 @@ struct VIScanout {
     u32 fb_base = 0;    // physical address of the first displayed pixel
     u32 width = 320;    // pixels per line, which is also the line stride
     u32 bpp = 2;        // bytes per pixel: 2 = RGBA5551, 4 = RGBA8888
+    // The part of the frame buffer on screen (VI_H/V_START scaled by
+    // VI_X/Y_SCALE), and where it sits on the whole screen, which is
+    // canvas_w x canvas_h frame buffer pixels: games with a smaller window
+    // (Banjo-Kazooie) get black borders, 480-line games (Perfect Dark,
+    // Rainbow Six) a canvas twice as tall.
+    u32 lines = 240, shown_w = 320;
+    u32 canvas_w = 320, canvas_h = 240;
+    u32 x0 = 0, y0 = 0;
+
+    // Copies an image of the frame buffer (src_w pixels a row, S times the
+    // frame buffer's resolution) onto the screen canvas, S times as large.
+    void place(const u32* src, u32 src_w, u32 S, std::vector<u32>& out, int& out_w, int& out_h) const;
 };
 
 class VI {
@@ -25,7 +37,8 @@ public:
     bool step_scanline(MI& mi);
 
     VIScanout scanout(size_t rdram_size) const;
-    // Converts the scanned-out frame buffer to ARGB8888, width x 240.
+    // Converts the part of the frame buffer on screen to ARGB8888, placed on
+    // the whole screen (VIScanout::canvas_w x canvas_h).
     void render_frame(const u8* rdram, size_t rdram_size, std::vector<u32>& out_pixels, int& out_w, int& out_h) const;
 
     u32 get_origin() const { return origin; }

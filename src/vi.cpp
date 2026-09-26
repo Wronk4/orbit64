@@ -105,62 +105,69 @@ VIScanout VI::scanout(size_t rdram_size) const {
         so.fb_base -= line_bytes;
     }
     so.blank = false;
+
+    // The window is in VI pixels (640 a line) and half-lines; the scale
+    // registers (2.10 fixed point) say how many frame buffer pixels each covers.
+    const u32 xs = x_scale & 0xFFF, ys = y_scale & 0xFFF;
+    if (xs == 0 || ys == 0) {
+        so.shown_w = so.canvas_w = so.width;
+        return so;
+    }
+    auto scaled = [](u32 n, u32 s) { return (n * s + 512) >> 10; };
+    so.canvas_w = std::max<u32>(1, scaled(640, xs));
+    so.canvas_h = std::max<u32>(1, scaled(240, ys));
+    so.shown_w = std::min(so.width, std::max<u32>(1, scaled(h_end - h_beg, xs)));
+    so.lines = std::max<u32>(1, scaled((v_end - v_beg) / 2, ys));
+    // libultra's standard window is 237 lines of a 240-line buffer: show it
+    // all rather than a sliver of black.
+    if (so.lines < so.canvas_h && so.canvas_h - so.lines <= scaled(4, ys)) so.lines = so.canvas_h;
+    so.canvas_w = std::max(so.canvas_w, so.shown_w);
+    so.canvas_h = std::max(so.canvas_h, so.lines);
+    so.x0 = (so.canvas_w - so.shown_w) / 2;
+    so.y0 = (so.canvas_h - so.lines) / 2;
     return so;
+}
+
+void VIScanout::place(const u32* src, u32 src_w, u32 S, std::vector<u32>& out, int& out_w, int& out_h) const {
+    out_w = static_cast<int>(canvas_w * S);
+    out_h = static_cast<int>(canvas_h * S);
+    out.assign(static_cast<size_t>(out_w) * out_h, 0xFF000000u);
+    const u32 w = std::min(shown_w * S, src_w);
+    for (u32 y = 0; y < lines * S; ++y) {
+        const u32* s = src + static_cast<size_t>(y) * src_w;
+        std::copy(s, s + w, out.data() + (static_cast<size_t>(y0 * S + y) * out_w + x0 * S));
+    }
 }
 
 void VI::render_frame(const u8* rdram, size_t rdram_size, std::vector<u32>& out_pixels, int& out_w, int& out_h) const {
     const VIScanout so = scanout(rdram_size);
-    out_w = static_cast<int>(so.width);
-    out_h = 240;
-
-    out_pixels.resize(out_w * out_h, 0xFF000000); // Default opaque black
+    out_w = static_cast<int>(so.canvas_w);
+    out_h = static_cast<int>(so.canvas_h);
+    out_pixels.assign(static_cast<size_t>(out_w) * out_h, 0xFF000000u); // opaque black borders
 
     if (so.blank) {
         return;
     }
 
-    u32 line_bytes = so.width * so.bpp;
-    u32 fb_base = so.fb_base;
-
-    if (so.bpp == 2) {
-        // 16-bit RGBA 5-5-5-1
-        for (int y = 0; y < out_h; ++y) {
-            u32 line_offset = fb_base + y * line_bytes;
-            if (line_offset + line_bytes > rdram_size) break;
-
-            for (int x = 0; x < out_w; ++x) {
-                u32 byte_idx = line_offset + x * 2;
-                u16 p = (static_cast<u16>(rdram[byte_idx]) << 8) | static_cast<u16>(rdram[byte_idx + 1]);
-
-                u8 r = ((p >> 11) & 0x1F) * 255 / 31;
-                u8 g = ((p >> 6) & 0x1F) * 255 / 31;
-                u8 b = ((p >> 1) & 0x1F) * 255 / 31;
-                u8 a = 255;
-
-                out_pixels[y * out_w + x] = (static_cast<u32>(a) << 24) |
-                                            (static_cast<u32>(r) << 16) |
-                                            (static_cast<u32>(g) << 8)  |
-                                             static_cast<u32>(b);
+    const u32 line_bytes = so.width * so.bpp;
+    for (u32 y = 0; y < so.lines; ++y) {
+        const size_t line_offset = so.fb_base + static_cast<size_t>(y) * line_bytes;
+        if (line_offset + line_bytes > rdram_size) break;
+        const u8* p = rdram + line_offset;
+        u32* dst = out_pixels.data() + static_cast<size_t>(so.y0 + y) * out_w + so.x0;
+        for (u32 x = 0; x < so.shown_w; ++x) {
+            u32 r, g, b;
+            if (so.bpp == 2) { // RGBA 5-5-5-1
+                const u16 px = static_cast<u16>((p[x * 2] << 8) | p[x * 2 + 1]);
+                r = ((px >> 11) & 0x1F) * 255 / 31;
+                g = ((px >> 6) & 0x1F) * 255 / 31;
+                b = ((px >> 1) & 0x1F) * 255 / 31;
+            } else { // RGBA 8-8-8-8
+                r = p[x * 4 + 0];
+                g = p[x * 4 + 1];
+                b = p[x * 4 + 2];
             }
-        }
-    } else {
-        // 32-bit RGBA 8-8-8-8
-        for (int y = 0; y < out_h; ++y) {
-            u32 line_offset = fb_base + y * line_bytes;
-            if (line_offset + line_bytes > rdram_size) break;
-
-            for (int x = 0; x < out_w; ++x) {
-                u32 byte_idx = line_offset + x * 4;
-                u8 r = rdram[byte_idx + 0];
-                u8 g = rdram[byte_idx + 1];
-                u8 b = rdram[byte_idx + 2];
-                u8 a = 255;
-
-                out_pixels[y * out_w + x] = (static_cast<u32>(a) << 24) |
-                                            (static_cast<u32>(r) << 16) |
-                                            (static_cast<u32>(g) << 8)  |
-                                             static_cast<u32>(b);
-            }
+            dst[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
         }
     }
 }

@@ -52,6 +52,13 @@ void Emulator::reset() {
 
         // Copy header and IPL3 into RSP DMEM (0xA4000000)
         std::memcpy(rsp.get_dmem(), rom.data(), 0x1000);
+
+        // 6105's IPL3 copies the tail of itself (DMEM 0x554-0x887) to RDRAM
+        // 0x4 and finishes running from there; Perfect Dark checks one of
+        // those words (0x2E8) and hangs on purpose if it isn't there. The OS
+        // parameters written below land on top of it, as they do on hardware.
+        if (cart.get_cic_type() == CICType::CIC_6105)
+            std::memcpy(rdram + 0x4, rom.data() + 0x554, 0x888 - 0x554);
     }
 
     // Set up standard IPL3 / OS parameters in RDRAM (0x80000300 - 0x80000320)
@@ -205,11 +212,18 @@ void Emulator::render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h
     const u8* rdram = bus.get_rdram();
     const size_t rdram_size = bus.get_rdram_size();
     HiResRenderer* hr = rdp.hires();
+    const VIScanout so = vi.scanout(rdram_size);
+    int cw = 0, ch = 0;
     if (!hr) {
         vi.render_frame(rdram, rdram_size, out_pixels, out_w, out_h);
-    } else if (!hr->compose(vi.scanout(rdram_size), rdram, rdram_size, out_pixels, out_w, out_h)) {
+    } else if (!so.blank && so.lines <= kFbLines && hr->compose(so, rdram, rdram_size, native_frame_, cw, ch)) {
+        // compose() gives the first 240 lines at S times the resolution;
+        // put the part on screen where it belongs.
+        so.place(native_frame_.data(), static_cast<u32>(cw), hr->scale(), out_pixels, out_w, out_h);
+    } else {
         // The VI shows memory the RDP never drew into (a screen the CPU
-        // drew): enlarge the native image so the output size stays the same.
+        // drew, or a 480-line screen, which the high-resolution buffers - 240
+        // lines tall - do not hold): enlarge the native image instead.
         int w = 0, h = 0;
         vi.render_frame(rdram, rdram_size, native_frame_, w, h);
         const int s = static_cast<int>(hr->scale());
