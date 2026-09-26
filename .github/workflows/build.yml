@@ -1,8 +1,10 @@
 # Builds Orbit64 for macOS, Linux and Windows on every push.
 #
-#   push to main     -> binaries replace the assets of the rolling "nightly" pre-release
-#   push of a v* tag -> a versioned release (e.g. v1.1.0) with the binaries
-#   any other push   -> binaries only as workflow artifacts (Actions tab, kept 14 days)
+#   push to main     -> a new release v<major>.<minor>.<commits on main>; major.minor
+#                       come from project(VERSION) in CMakeLists.txt
+#   push of a v* tag -> a release for that tag (e.g. v2.0.0)
+#   any other push   -> (nightly and every other branch) binaries only as workflow
+#                       artifacts in the Actions tab, kept 14 days, no release page
 #
 # SDL3 is built from source and linked statically, so every archive holds a
 # single self-contained executable.
@@ -16,7 +18,8 @@ on:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a main run halfway through publishing its release.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build:
@@ -125,41 +128,46 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Publish versioned release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish release
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "Orbit64 $GITHUB_REF_NAME" --generate-notes --verify-tag
-
-      - name: Update nightly pre-release
-        if: github.ref == 'refs/heads/main'
-        run: |
-          git tag -f nightly "$GITHUB_SHA"
-          git push -f origin refs/tags/nightly
-          short=$(git rev-parse --short "$GITHUB_SHA")
-          cat > notes.md <<EOF
-          Automatic build of \`main\` at ${short} ($(date -u '+%Y-%m-%d %H:%M UTC')).
-
-          $(git log -1 --format='> %s' "$GITHUB_SHA")
-
-          | Platform | File |
-          |---|---|
-          | Windows 10/11 x64 | \`orbit64-windows-x64.zip\` |
-          | macOS 11+ (Apple Silicon and Intel) | \`orbit64-macos-universal.zip\` |
-          | Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | \`orbit64-linux-x64.tar.gz\` |
-
-          macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`
-          (or right-click the executable, Open) before starting it the first time.
-          EOF
-          if gh release view nightly > /dev/null 2>&1; then
-            gh release edit nightly --title "Orbit64 nightly ($short)" --notes-file notes.md --prerelease
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            ver="$GITHUB_REF_NAME"
           else
-            gh release create nightly --title "Orbit64 nightly ($short)" --notes-file notes.md --prerelease --verify-tag
+            base=$(sed -nE 's/^project\(orbit64 VERSION ([0-9]+)\.([0-9]+).*/\1.\2/p' CMakeLists.txt)
+            ver="v${base}.$(git rev-list --count "$GITHUB_SHA")"
           fi
-          gh release upload nightly dist/* --clobber
+          if gh release view "$ver" > /dev/null 2>&1; then
+            # Re-run of the same commit: refresh the binaries only.
+            gh release upload "$ver" dist/* --clobber
+            exit 0
+          fi
+          prev=$(git tag --list 'v*' --sort=-v:refname --merged "$GITHUB_SHA" | grep -vx "$ver" | head -1 || true)
+          {
+            echo "Built from \`$(git rev-parse --short "$GITHUB_SHA")\` on $(date -u '+%Y-%m-%d')."
+            echo
+            echo "### Changes"
+            if [ -n "$prev" ]; then
+              git log --no-merges --max-count=100 --format='- %s (%h)' "$prev..$GITHUB_SHA"
+            else
+              git log -1 --format='- %s (%h)' "$GITHUB_SHA"
+            fi
+            echo
+            echo "### Downloads"
+            echo "| Platform | File |"
+            echo "|---|---|"
+            echo "| Windows 10/11 x64 | \`orbit64-windows-x64.zip\` |"
+            echo "| macOS 11+ (Apple Silicon and Intel) | \`orbit64-macos-universal.zip\` |"
+            echo "| Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | \`orbit64-linux-x64.tar.gz\` |"
+            echo
+            echo "macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`"
+            echo "(or right-click the executable, Open) before starting it the first time."
+          } > notes.md
+          gh release create "$ver" dist/* --target "$GITHUB_SHA" --title "Orbit64 $ver" --notes-file notes.md --latest
