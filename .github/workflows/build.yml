@@ -22,12 +22,16 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: macos-universal
             os: macos-14
+            shell: bash
             configure: >-
               -G Ninja
               "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
@@ -35,18 +39,21 @@ jobs:
             exe: out/orbit64
           - name: linux-x64
             os: ubuntu-22.04
+            shell: bash
             configure: >-
               -G Ninja
               -DCMAKE_C_COMPILER=gcc-12
               -DCMAKE_CXX_COMPILER=g++-12
               "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
             exe: out/orbit64
+          # MinGW-w64 (GCC) as with the Makefile: the core uses GCC builtins MSVC lacks.
           - name: windows-x64
             os: windows-2022
+            shell: msys2 {0}
             configure: >-
-              -A x64
-              -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-            exe: out/Release/orbit64.exe
+              -G Ninja
+              -DCMAKE_EXE_LINKER_FLAGS=-static
+            exe: out/orbit64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +61,17 @@ jobs:
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja || true
+
+      - name: Install MinGW-w64 toolchain (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
 
       - name: Install SDL3 build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -67,7 +85,6 @@ jobs:
             libdbus-1-dev libudev-dev libibus-1.0-dev
 
       - name: Configure
-        shell: bash
         run: >-
           cmake -S . -B out
           -DCMAKE_BUILD_TYPE=Release
@@ -79,7 +96,6 @@ jobs:
         run: cmake --build out --config Release --parallel
 
       - name: Package
-        shell: bash
         run: |
           mkdir -p dist/orbit64
           cp "${{ matrix.exe }}" README.md dist/orbit64/
@@ -88,7 +104,7 @@ jobs:
           case "${{ runner.os }}" in
             Linux)   tar -czf orbit64-${{ matrix.name }}.tar.gz orbit64 ;;
             macOS)   ditto -c -k --keepParent orbit64 orbit64-${{ matrix.name }}.zip ;;
-            Windows) 7z a -tzip orbit64-${{ matrix.name }}.zip orbit64 > /dev/null ;;
+            Windows) cmake -E tar cf orbit64-${{ matrix.name }}.zip --format=zip orbit64 ;;
           esac
           ls -l
 
