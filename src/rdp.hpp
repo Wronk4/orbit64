@@ -51,7 +51,9 @@ enum class MicrocodeType {
     S2DEX,
     S2DEX2,
     F3DGOLDEN,
-    F3DPD // Perfect Dark: Fast3D with 12-byte vertices that index a color table
+    F3DPD,  // Perfect Dark: Fast3D with 12-byte vertices that index a color table
+    F3DDKR, // Diddy Kong Racing: DMA-loaded matrices, 10-byte vertices, textured triangle lists
+    F3DJFG  // Jet Force Gemini: F3DDKR with a different vertex count and matrix multiply
 };
 
 
@@ -139,6 +141,7 @@ public:
         s(ambient_light, lookat_x, lookat_y, lookat_set, dir_lights, num_lights);
         s(scissor_ulx, scissor_uly, scissor_lrx, scissor_lry);
         s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2, vtx_color_base);
+        s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
         s.fixed(internal_zbuffer);
@@ -279,6 +282,15 @@ private:
     u32 rdp_half1{0};
     u32 rdp_half2{0};
     u32 vtx_color_base{0}; // F3DPD: where vertex colors/normals live (set by opcode 0x07)
+    // F3DDKR/F3DJFG: offsets added to matrix and vertex addresses, where the
+    // next appended vertex goes, the model-view slot in use (and the slots
+    // themselves), and whether vertices are billboarded around vertex 0.
+    u32 dkr_mtx_offset{0};
+    u32 dkr_vtx_offset{0};
+    u32 dkr_vtx_index{0};
+    u32 dkr_mv_index{0};
+    bool dkr_billboard{false};
+    std::array<Matrix4x4, 4> dkr_mv{};
 
     // S2DEX / S2DEX2 state -------------------------------------------------
     // The four RSP "general status" words used by G_MOVEWORD(G_MW_GENSTAT)
@@ -337,6 +349,10 @@ private:
 
     void execute_mtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size);
     void execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size);
+    // F3DDKR/F3DJFG commands (see process_display_list()).
+    void dkr_dma_matrix(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size);
+    void dkr_select_matrix(u32 index);
+    void dkr_dma_triangles(u32 w0, u32 w1, u8* rdram, size_t rdram_size);
     void execute_moveword(u32 w0, u32 w1, MicrocodeType ucode);
 
     // Primitive rasterizers

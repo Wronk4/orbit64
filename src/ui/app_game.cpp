@@ -15,7 +15,7 @@ namespace ui {
 
 namespace fs = std::filesystem;
 
-static const char* kUcodeLong[] = {"Auto", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)", "F3D (Perfect Dark)"};
+static const char* kUcodeLong[] = {"Auto", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)", "F3D (Perfect Dark)", "F3D (Diddy Kong Racing)", "F3D (Jet Force Gemini)"};
 
 void App::draw_game_view(ImVec2 pos, ImVec2 size) {
     ImGui::SetCursorScreenPos(pos);
@@ -419,7 +419,7 @@ void App::draw_info_panel(ImVec2 pos, ImVec2 size) {
 
     section("HARDWARE");
     {
-        kv("GPU microcode", s.ucode >= 0 && s.ucode < 8 ? kUcodeLong[s.ucode] : "Unknown");
+        kv("GPU microcode", s.ucode >= 0 && s.ucode < 10 ? kUcodeLong[s.ucode] : "Unknown");
         static const char* abi[] = {"ABI 1", "n_audio", "Nintendo Audio (MK)", "Nintendo Audio (SF)", "Nintendo Audio (Zelda)", "MusyX"};
         kv("Audio microcode", s.audio_abi >= 0 && s.audio_abi < 6 ? abi[s.audio_abi] : "Unknown");
         ImVec4 on = g_pal.success, off = g_pal.text_dim;

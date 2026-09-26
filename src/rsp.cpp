@@ -11,18 +11,24 @@ RSP::RSP() {
 }
 
 namespace {
-// Perfect Dark's graphics microcode carries no credit string to recognize it
-// by, so it is recognized by a CRC-32 of the start of its code.
-bool is_perfect_dark_ucode(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
+// Some of Rare's graphics microcodes carry no credit string to recognize them
+// by, so they are recognized by a CRC-32 of the start of their code; Auto
+// (no match) leaves the banner search to decide.
+MicrocodeType ucode_by_crc(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
     constexpr u32 kLen = 0x800;
     const u32 phys = ucode_ptr & static_cast<u32>(rdram_size - 1);
-    if (phys + kLen > rdram_size) return false;
+    if (phys + kLen > rdram_size) return MicrocodeType::Auto;
     u32 c = 0xFFFFFFFFu;
     for (u32 i = 0; i < kLen; ++i) {
         c ^= rdram[phys + i];
         for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
     }
-    return ~c == 0xF295D221u;
+    switch (~c) {
+        case 0xF295D221u: return MicrocodeType::F3DPD;  // Perfect Dark
+        case 0xE434110Du: return MicrocodeType::F3DDKR; // Diddy Kong Racing
+        case 0x248DCED9u: return MicrocodeType::F3DJFG; // Jet Force Gemini
+        default: return MicrocodeType::Auto;
+    }
 }
 } // namespace
 
@@ -275,8 +281,8 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
             };
 
             if (!detect_banner(ucode_data_ptr)) {
-                if (is_perfect_dark_ucode(ucode_ptr, rdram, rdram_size)) {
-                    rdp.set_ucode_type(MicrocodeType::F3DPD);
+                if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
+                    rdp.set_ucode_type(t);
                 } else if (!detect_banner(ucode_ptr)) {
                     static int dbg_fail = 0;
                     if (dbg_fail < 5) {

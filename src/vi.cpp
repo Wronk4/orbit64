@@ -118,9 +118,9 @@ VIScanout VI::scanout(size_t rdram_size) const {
     so.canvas_h = std::max<u32>(1, scaled(240, ys));
     so.shown_w = std::min(so.width, std::max<u32>(1, scaled(h_end - h_beg, xs)));
     so.lines = std::max<u32>(1, scaled((v_end - v_beg) / 2, ys));
-    // libultra's standard window is 237 lines of a 240-line buffer: show it
-    // all rather than a sliver of black.
-    if (so.lines < so.canvas_h && so.canvas_h - so.lines <= scaled(4, ys)) so.lines = so.canvas_h;
+    // libultra's standard window is 237 lines of a 240-line buffer; the last
+    // lines are never shown, and games (Diddy Kong Racing, Jet Force Gemini)
+    // don't clear them.
     so.canvas_w = std::max(so.canvas_w, so.shown_w);
     so.canvas_h = std::max(so.canvas_h, so.lines);
     so.x0 = (so.canvas_w - so.shown_w) / 2;

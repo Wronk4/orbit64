@@ -15,7 +15,7 @@ namespace ui {
 
 namespace fs = std::filesystem;
 
-static const char* kUcodeNames[] = {"Auto", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)", "F3DPD"};
+static const char* kUcodeNames[] = {"Auto", "Fast3D", "F3DEX", "F3DEX2", "S2DEX", "S2DEX2", "F3DEX (GoldenEye)", "F3DPD", "F3DDKR", "F3DJFG"};
 static const char* kAbiShort[] = {"ABI", "n_audio", "Nintendo Audio", "Nintendo Audio", "Nintendo Audio", "MusyX"};
 static const char* kAbiLong[] = {
     "Standard libultra audio microcode (ABI 1)",
@@ -486,7 +486,7 @@ void App::draw_statusbar(ImVec2 pos, ImVec2 size) {
     std::snprintf(buf, sizeof buf, "%llu", static_cast<unsigned long long>(loaded ? s.frame : 0));
     segs.push_back({"Frame", buf, g_pal.text, {}, "Frames emulated since power-on / reset", 5});
     {
-        std::string u = (loaded && s.ucode >= 0 && s.ucode < 8) ? kUcodeNames[s.ucode] : "Unknown";
+        std::string u = (loaded && s.ucode >= 0 && s.ucode < 10) ? kUcodeNames[s.ucode] : "Unknown";
         std::string tip = "Graphics microcode detected from the game's display lists";
         if (settings_.ucode_override > 0) tip += "\nOverride active in Settings \xE2\x80\xBA Emulation";
         segs.push_back({"GPU", u, loaded && s.ucode >= 0 ? g_pal.text : dim, {}, tip, 2});

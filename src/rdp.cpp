@@ -159,6 +159,9 @@ void RDP::reset() {
     rdp_half1 = 0;
     rdp_half2 = 0;
     vtx_color_base = 0;
+    dkr_mtx_offset = dkr_vtx_offset = dkr_vtx_index = dkr_mv_index = 0;
+    dkr_billboard = false;
+    dkr_mv.fill(Matrix4x4::identity());
     ucode_type = MicrocodeType::Auto;
 
     std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
@@ -364,6 +367,13 @@ void RDP::write_dps_reg(u32 addr, u32 val) {
     }
 }
 
+// The microcodes built on Fast3D's command set (vertex indices x10, F3D
+// geometry mode bits, G_RDPHALF_CONT, ...).
+static bool is_f3d_family(MicrocodeType u) {
+    return u == MicrocodeType::Fast3D || u == MicrocodeType::F3DGOLDEN || u == MicrocodeType::F3DPD ||
+           u == MicrocodeType::F3DDKR || u == MicrocodeType::F3DJFG;
+}
+
 u32 RDP::segment_to_physical(u32 seg_addr) const {
     u32 seg = (seg_addr >> 24) & 0x0F;
     return (segments[seg] + (seg_addr & 0x00FFFFFF)) & 0x00FFFFFF;
@@ -450,6 +460,74 @@ void RDP::execute_mtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
     }
 }
 
+// F3DDKR/F3DJFG G_DMA_MTX (0x01): loads a matrix (at the matrix offset) into
+// one of the model-view slots and makes it current. DKR picks the slot with
+// bits 23..22; Jet Force Gemini with bits 19..16, and bit 23 multiplies the
+// new matrix onto slot 0. The matrices already include the projection.
+void RDP::dkr_dma_matrix(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size) {
+    if ((w0 & 0xFFFF) != 64) return; // not a whole matrix
+    u32 index = (w0 >> 16) & 0xF;
+    bool multiply = false;
+    if (ucode == MicrocodeType::F3DJFG && index != 0) {
+        multiply = ((w0 >> 23) & 1) != 0;
+    } else {
+        index = (w0 >> 22) & 0x3;
+    }
+    index &= 3;
+    const u32 addr = (segment_to_physical(w1) + dkr_mtx_offset) & 0x00FFFFFF;
+    capture_mtx_addr = addr;
+    if (addr + 64 > rdram_size) return;
+    Matrix4x4 mat{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            const u32 idx = (i * 4 + j) * 2;
+            const s16 int_part = static_cast<s16>((rdram[addr + idx] << 8) | rdram[addr + idx + 1]);
+            const u16 frac_part = static_cast<u16>((rdram[addr + 32 + idx] << 8) | rdram[addr + 32 + idx + 1]);
+            mat.m[i][j] = int_part + (frac_part / 65536.0f);
+        }
+    }
+    dkr_mv[index] = multiply ? Matrix4x4::multiply(mat, dkr_mv[0]) : mat;
+    dkr_select_matrix(index);
+}
+
+void RDP::dkr_select_matrix(u32 index) {
+    dkr_mv_index = index & 3;
+    projection_matrix = Matrix4x4::identity();
+    modelview_stack.resize(1);
+    modelview_stack.back() = dkr_mv[dkr_mv_index];
+    combined_matrix_dirty = true;
+}
+
+// F3DDKR/F3DJFG G_DMA_TRI (0x05): (w0 >> 4) & 0xFFF triangles of 16 bytes -
+// a flag byte (0x40 = drawn from both sides), the three vertex slots, then
+// each corner's S and T (10.5) - after which vertices start over at slot 0.
+void RDP::dkr_dma_triangles(u32 w0, u32 w1, u8* rdram, size_t rdram_size) {
+    const u32 n = (w0 >> 4) & 0xFFF;
+    u32 addr = segment_to_physical(w1);
+    const u32 saved_mode = geometry_mode;
+    // These microcodes have no G_TEXTURE: the triangles are textured
+    // whenever the combiner uses a texel, at the coordinates they carry.
+    if (!texture_enabled) {
+        texture_enabled = true;
+        draw_state_dirty_ = true;
+    }
+    for (u32 i = 0; i < n && addr + 16 <= rdram_size; ++i, addr += 16) {
+        const u8* t = rdram + addr;
+        const u32 vi[3] = {t[1], t[2], t[3]};
+        if (vi[0] >= vertex_cache.size() || vi[1] >= vertex_cache.size() || vi[2] >= vertex_cache.size()) continue;
+        for (int k = 0; k < 3; ++k) {
+            const s16 st_s = static_cast<s16>((t[4 + k * 4] << 8) | t[5 + k * 4]);
+            const s16 st_t = static_cast<s16>((t[6 + k * 4] << 8) | t[7 + k * 4]);
+            vertex_cache[vi[k]].u = st_s / 32.0f;
+            vertex_cache[vi[k]].v = st_t / 32.0f;
+        }
+        geometry_mode = (saved_mode & ~0x3000u) | ((t[0] & 0x40) ? 0u : 0x2000u); // G_CULL_BACK unless two-sided
+        emit_triangle(vi[0], vi[1], vi[2], rdram, rdram_size);
+    }
+    geometry_mode = saved_mode;
+    dkr_vtx_index = 0;
+}
+
 void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size_t rdram_size) {
     update_combined_matrix();
 
@@ -466,6 +544,15 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         count = (w0 >> 10) & 0x3F;
         if (count == 0) count = ((w0 >> 20) & 0x0F) + 1;
         dest = ((w0 >> 16) & 0xFF) / 2;
+    } else if (ucode == MicrocodeType::F3DDKR || ucode == MicrocodeType::F3DJFG) {
+        // Bits 23..19 = count (- 1 on DKR), 13..9 = first slot; bit 16 appends
+        // to the vertices loaded since the last triangle list instead (after
+        // vertex 0, the billboard origin, when billboarding).
+        count = ((w0 >> 19) & 0x1F) + (ucode == MicrocodeType::F3DDKR ? 1 : 0);
+        if (!(w0 & 0x10000)) dkr_vtx_index = 0;
+        else if (dkr_billboard) dkr_vtx_index = 1;
+        dest = dkr_vtx_index + ((w0 >> 9) & 0x1F);
+        dkr_vtx_index += count;
     } else {
         // Fast3D: bits 23..20 = count - 1, bits 19..16 = dest
         count = ((w0 >> 20) & 0x0F) + 1;
@@ -478,25 +565,34 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
     // entries hold the RGBA color (or the normal, when lit) that the other
     // microcodes keep in bytes 12-15 of the vertex itself.
     const bool pd = ucode == MicrocodeType::F3DPD;
-    const u32 stride = pd ? 12 : 16;
+    // Diddy Kong Racing's are 10 bytes: x, y, z, then the color (or normal and
+    // alpha); texture coordinates come with each triangle (dkr_dma_triangles()).
+    const bool dkr = ucode == MicrocodeType::F3DDKR || ucode == MicrocodeType::F3DJFG;
+    if (dkr) vtx_addr = (vtx_addr + dkr_vtx_offset) & 0x00FFFFFF;
+    const u32 stride = dkr ? 10 : pd ? 12 : 16;
 
     for (u32 i = 0; i < count; ++i) {
         u32 cur_vtx = vtx_addr + i * stride;
         if (cur_vtx + stride > rdram_size) break;
         u32 dest_idx = (dest + i) % vertex_cache.size();
         // The 4 color/normal bytes.
-        const u8* col = rdram + cur_vtx + 12;
+        const u8* col = rdram + cur_vtx + (dkr ? 6 : 12);
         if (pd) col = rdram + ((vtx_color_base + rdram[cur_vtx + 7]) & (static_cast<u32>(rdram_size) - 4));
 
         s16 vx = static_cast<s16>((rdram[cur_vtx + 0] << 8) | rdram[cur_vtx + 1]);
         s16 vy = static_cast<s16>((rdram[cur_vtx + 2] << 8) | rdram[cur_vtx + 3]);
         s16 vz = static_cast<s16>((rdram[cur_vtx + 4] << 8) | rdram[cur_vtx + 5]);
-        s16 tu = static_cast<s16>((rdram[cur_vtx + 8] << 8) | rdram[cur_vtx + 9]);
-        s16 tv = static_cast<s16>((rdram[cur_vtx + 10] << 8) | rdram[cur_vtx + 11]);
+        s16 tu = dkr ? 0 : static_cast<s16>((rdram[cur_vtx + 8] << 8) | rdram[cur_vtx + 9]);
+        s16 tv = dkr ? 0 : static_cast<s16>((rdram[cur_vtx + 10] << 8) | rdram[cur_vtx + 11]);
 
         Vertex& v = vertex_cache[dest_idx];
         raw_vertex[dest_idx] = {static_cast<f32>(vx), static_cast<f32>(vy), static_cast<f32>(vz), cur_vtx};
         combined_matrix.transform_point(vx, vy, vz, v.x, v.y, v.z, v.w);
+        if (dkr && dkr_billboard && dest_idx != 0) {
+            // Billboards are given relative to vertex 0, in clip space.
+            const Vertex& o = vertex_cache[0];
+            v.x += o.x; v.y += o.y; v.z += o.z; v.w += o.w;
+        }
         compute_screen_coords(v);
 
         f32 tnx = 0.0f, tny = 0.0f, tnz = 1.0f;
@@ -1048,12 +1144,28 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
     current_ucode_active = current_ucode;
 
     std::vector<u32> dl_stack;
+    // G_DMA_DL lists (F3DDKR/F3DJFG) end after a number of commands instead
+    // of at a G_ENDDL: {dl_stack depth inside them, commands left}.
+    struct CountedDl { size_t depth; u32 left; };
+    std::vector<CountedDl> counted_dl;
     u32 pc = dl_addr;
 
     const u32 MAX_COMMANDS = 100000;
     u32 cmd_count = 0;
 
     while (cmd_count++ < MAX_COMMANDS) {
+        while (!counted_dl.empty()) {
+            const CountedDl& c = counted_dl.back();
+            if (c.depth > dl_stack.size()) { // it ended at a G_ENDDL instead
+                counted_dl.pop_back();
+            } else if (c.depth == dl_stack.size() && c.left == 0) { // all its commands ran
+                pc = dl_stack.back();
+                dl_stack.pop_back();
+                counted_dl.pop_back();
+            } else {
+                break;
+            }
+        }
         u32 phys_pc = segment_to_physical(pc);
         if (phys_pc + 8 > rdram_size) break;
         capture_dl_addr = phys_pc;
@@ -1070,6 +1182,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
         pc += 8;
         u8 opcode = (w0 >> 24) & 0xFF;
+        if (!counted_dl.empty() && counted_dl.back().depth == dl_stack.size()) counted_dl.back().left--;
         if (dl_trace_frame_ >= 0 && g_current_frame >= dl_trace_frame_ && g_current_frame < dl_trace_frame_ + dl_trace_count_)
             std::fprintf(stderr, "DL %d %08x: %08x %08x\n", g_current_frame, phys_pc, w0, w1);
 
@@ -1087,6 +1200,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             case 0x01: {
                 if (current_ucode == MicrocodeType::F3DEX2) {
                     execute_vtx(w0, w1, current_ucode, rdram, rdram_size);
+                } else if (current_ucode == MicrocodeType::F3DDKR || current_ucode == MicrocodeType::F3DJFG) {
+                    dkr_dma_matrix(w0, w1, current_ucode, rdram, rdram_size);
                 } else {
                     execute_mtx(w0, w1, current_ucode, rdram, rdram_size);
                 }
@@ -1354,7 +1469,11 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0x05: { // G_TRI1 (F3DEX2)
+            case 0x05: { // G_TRI1 (F3DEX2) / G_DMA_TRI (F3DDKR/F3DJFG)
+                if (current_ucode == MicrocodeType::F3DDKR || current_ucode == MicrocodeType::F3DJFG) {
+                    dkr_dma_triangles(w0, w1, rdram, rdram_size);
+                    break;
+                }
                 u32 v0 = ((w0 >> 16) & 0xFF) / 2;
                 u32 v1 = ((w0 >> 8) & 0xFF) / 2;
                 u32 v2 = (w0 & 0xFF) / 2;
@@ -1364,8 +1483,13 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0xBF: { // G_TRI1 (Fast3D or F3DEX)
-                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) ? 10 : 2;
+            case 0xBF: { // G_TRI1 (Fast3D or F3DEX) / G_DMA_OFFSETS (F3DDKR/F3DJFG)
+                if (current_ucode == MicrocodeType::F3DDKR || current_ucode == MicrocodeType::F3DJFG) {
+                    dkr_mtx_offset = w0 & 0x00FFFFFF;
+                    dkr_vtx_offset = w1 & 0x00FFFFFF;
+                    break;
+                }
+                u32 div = (is_f3d_family(current_ucode)) ? 10 : 2;
                 u32 v0 = ((w1 >> 16) & 0xFF) / div;
                 u32 v1 = ((w1 >> 8) & 0xFF) / div;
                 u32 v2 = (w1 & 0xFF) / div;
@@ -1407,7 +1531,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             }
 
             case 0xB2: { // G_MODIFYVTX (F3DEX) / G_RDPHALF_CONT (Fast3D)
-                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) {
+                if (is_f3d_family(current_ucode)) {
                     rdp_half2 = w1;
                     break;
                 }
@@ -1440,7 +1564,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
             case 0xBE: { // G_CULLDL (Fast3D / F3DEX)
                 u32 vstart = 0, vend = 0;
-                if (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) {
+                if (is_f3d_family(current_ucode)) {
                     vstart = ((w0 & 0xFFFF) / 40) & 0x0F;
                     vend = (((w1 & 0xFFFF) / 40) > 0) ? (((w1 & 0xFFFF) / 40) - 1) & 0x0F : 0;
                 } else {
@@ -1466,7 +1590,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             }
 
             case 0xB5: { // G_LINE3D (Fast3D / F3DEX)
-                u32 div = (current_ucode == MicrocodeType::Fast3D || current_ucode == MicrocodeType::F3DGOLDEN || current_ucode == MicrocodeType::F3DPD) ? 10 : 2;
+                u32 div = (is_f3d_family(current_ucode)) ? 10 : 2;
                 u32 v0 = ((w1 >> 16) & 0xFF) / div;
                 u32 v1 = ((w1 >> 8) & 0xFF) / div;
                 if (v0 < vertex_cache.size() && v1 < vertex_cache.size()) {
@@ -1500,7 +1624,14 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0x07: { // G_QUAD (F3DEX2) / vertex color table (F3DPD)
+            case 0x07: { // G_QUAD (F3DEX2) / vertex color table (F3DPD) / G_DMA_DL (F3DDKR/F3DJFG)
+                if (current_ucode == MicrocodeType::F3DDKR || current_ucode == MicrocodeType::F3DJFG) {
+                    // Runs (w0 >> 16) & 0xFF commands at w1, then comes back.
+                    dl_stack.push_back(pc);
+                    counted_dl.push_back({dl_stack.size(), (w0 >> 16) & 0xFF});
+                    pc = w1;
+                    break;
+                }
                 if (current_ucode == MicrocodeType::F3DPD) {
                     vtx_color_base = segment_to_physical(w1);
                     break;
@@ -1605,6 +1736,12 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
             case 0xBC: // G_MOVEWORD (Fast3D / F3DEX)
             case 0xDB: { // G_MOVEWORD (F3DEX2)
+                if ((current_ucode == MicrocodeType::F3DDKR || current_ucode == MicrocodeType::F3DJFG) && opcode == 0xBC) {
+                    // Two indices of their own: billboarding on/off, and which
+                    // model-view slot is current.
+                    if ((w0 & 0xFF) == 0x02) { dkr_billboard = (w1 & 1) != 0; break; }
+                    if ((w0 & 0xFF) == 0x0A) { dkr_select_matrix((w1 >> 6) & 3); break; }
+                }
                 execute_moveword(w0, w1, current_ucode);
                 break;
             }
