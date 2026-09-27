@@ -63,6 +63,7 @@
 #define GPU_ST_PASS_THROUGH (1u << 14) // DrawState::blend_pass_through
 #define GPU_ST_ALPHA_CVG (1u << 15)    // DrawState::alpha_from_cvg
 #define GPU_ST_FORCE_BLEND (1u << 16)  // DrawState::force_blend
+#define GPU_ST_Z_DECAL (1u << 17)      // DrawState::z_decal
 // word 1: tlut type | active tile << 4 | alpha compare << 8 | alpha threshold << 16
 // words 2-5: colour combiner cycle 1 (a, b, c, d bytes), alpha cycle 1, colour cycle 2, alpha cycle 2
 // words 6-9: primitive, environment, blend and fog colour (RDP order: r in bits 24-31)

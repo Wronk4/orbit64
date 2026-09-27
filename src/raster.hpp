@@ -156,6 +156,7 @@ struct DrawState {
     // (full inside a primitive), not what the combiner worked out.
     bool alpha_from_cvg{false};
     bool z_compare{false}, z_update{false};
+    bool z_decal{false}; // ZMODE_DEC: passes when about as deep as what is there
     // Texture level of detail: G_TEXTURE's level count, gDPSetPrimColor's
     // minimum level and fraction; derived: whether LOD is worked out at all.
     u8 max_level{0}, min_level{0}, prim_lod_frac{0};
@@ -234,6 +235,7 @@ struct DrawState {
         alpha_from_cvg = (other_mode_l & 0x3000) == 0x2000;
         z_compare = (other_mode_l & 0x10) != 0;
         z_update = (other_mode_l & 0x20) != 0;
+        z_decal = ((other_mode_l >> 10) & 3) == 3;
 
         tex_lod_en = (other_mode_h >> 16) & 1;
         sharpen = (other_mode_h >> 17) & 1;
@@ -287,6 +289,15 @@ inline void lod_tiles(const DrawState& st, f32 delta, u32 prim_tile, u32& t0, u3
         t0 = (prim_tile + l_tile + (magnify ? 0 : 1)) & 7;
         t1 = (prim_tile + l_tile + ((!distant && !magnify) ? 2 : 1)) & 7;
     }
+}
+
+// The depth test. Decals (ZMODE_DEC) are drawn on a surface at about its
+// depth: they pass within a small distance either way.
+constexpr f32 kDecalDepth = 2.0f / 1023.0f;
+inline bool depth_fails(const DrawState& st, f32 z, f32 stored) {
+    if (!st.z_compare) return false;
+    if (st.z_decal) return std::fabs(z - stored) > kDecalDepth;
+    return z > stored;
 }
 
 // 5-bit colour channel -> 8 bits, rounded: (c * 255 + 15) / 31.

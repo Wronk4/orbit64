@@ -271,6 +271,13 @@ uint blend_pixel(uint sb, uint src, uint shade_a, uint dst, bool blend) {
     return (uint(c.r) << 16u) | (uint(c.g) << 8u) | uint(c.b);
 }
 
+// raster::depth_fails()
+bool depth_fails(uint flags, float fz, float z) {
+    if ((flags & GPU_ST_Z_COMPARE) == 0u) return false;
+    if ((flags & GPU_ST_Z_DECAL) != 0u) return abs(fz - z) > 2.0 / 1023.0;
+    return fz > z;
+}
+
 // HiResSink::write: scissor, alpha compare, depth test, blending, store.
 void sink_write(uint sb, uint x, uint y, uint src, float fz, uint shade_a, inout uint c, inout float z) {
     uint flags = D[sb];
@@ -285,7 +292,7 @@ void sink_write(uint sb, uint x, uint y, uint src, float fz, uint shade_a, inout
         if (a == 0u) return;
     }
     if (a == 0u && (flags & GPU_ST_ZERO_KILL) != 0u) return;
-    if ((flags & GPU_ST_Z_COMPARE) != 0u && fz > z) return;
+    if (depth_fails(flags, fz, z)) return;
     if ((flags & GPU_ST_Z_UPDATE) != 0u) z = fz;
     uint rgb = src & 0x00FFFFFFu;
     bool blend = (flags & GPU_ST_BLEND) != 0u && a < 255u;
@@ -312,7 +319,7 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
     float fz = w0 * fword(pb + 5u) + w1 * fword(pb + 12u) + w2 * fword(pb + 19u);
     // A pixel that fails the depth test is dropped whatever its colour
     // (sink_write), so it isn't shaded at all.
-    if ((flags & GPU_ST_Z_COMPARE) != 0u && fz > z) return;
+    if (depth_fails(flags, fz, z)) return;
     uint c0 = D[pb + 9u], c1 = D[pb + 16u], c2 = D[pb + 23u];
     uint shade;
     if ((flags & GPU_ST_SMOOTH) != 0u) {
@@ -376,7 +383,7 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
 void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint c, inout float z) {
     // Outside the scissor or behind what is there: dropped by sink_write anyway.
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
-    if ((D[sb] & GPU_ST_Z_COMPARE) != 0u && 0.0 > z) return;
+    if (depth_fails(D[sb], 0.0, z)) return;
     float cur_s = clamp(fword(pb + 4u) + float(int(x) - int(rx0)) * fword(pb + 6u), fword(pb + 9u), fword(pb + 10u));
     float cur_t = clamp(fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u), fword(pb + 11u), fword(pb + 12u));
     bool flip = D[pb + 8u] != 0u;

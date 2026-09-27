@@ -2527,7 +2527,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
     // Depth test
     u32 pixel_idx = y * fb_w + x;
     if (st.z_compare && pixel_idx < internal_zbuffer.size()) {
-        if (z > internal_zbuffer[pixel_idx]) {
+        if (raster::depth_fails(st, z, internal_zbuffer[pixel_idx])) {
             stats.z_fail++;
             return; // Behind existing pixel
         }

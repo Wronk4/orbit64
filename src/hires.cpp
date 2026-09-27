@@ -43,7 +43,7 @@ struct HiResSink {
         }
         if (a == 0 && st.alpha_zero_kill) return;
         const size_t idx = static_cast<size_t>(y) * width + x;
-        if (st.z_compare && z > depth[idx]) return;
+        if (st.z_compare && raster::depth_fails(st, z, depth[idx])) return;
         if (st.z_update) depth[idx] = z;
         u8 r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
         const bool blend = st.blend_enabled && a < 255;
