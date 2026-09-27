@@ -756,7 +756,7 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         }
         // G_FOG: the shade alpha is the fog factor, z/w scaled and offset as
         // gSPFogPosition set it up (0 behind the eye), for the blender's A_SHADE.
-        if ((geometry_mode & 0x00010000) && !dkr && fog_supported(ucode)) {
+        if ((geometry_mode & 0x00010000) && fog_supported(ucode)) {
             const f32 f = v.w > 0.0f ? (v.z / v.w) * fog_mul + fog_ofs : 0.0f;
             v.a = static_cast<u8>(std::clamp(f, 0.0f, 255.0f));
         }
@@ -766,7 +766,8 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
 // The microcodes whose G_FOG puts the fog factor in the shade alpha.
 bool RDP::fog_supported(MicrocodeType u) {
     return u == MicrocodeType::Fast3D || u == MicrocodeType::F3DEX || u == MicrocodeType::F3DEX2 ||
-           u == MicrocodeType::F3DGOLDEN || u == MicrocodeType::F3DPD;
+           u == MicrocodeType::F3DGOLDEN || u == MicrocodeType::F3DPD || u == MicrocodeType::F3DDKR ||
+           u == MicrocodeType::F3DJFG;
 }
 
 void RDP::compute_screen_coords(Vertex& v) const {
