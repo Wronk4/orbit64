@@ -2,6 +2,7 @@
 
 #include "common.hpp"
 #include "ahle.hpp"
+#include "rsp_core.hpp"
 
 class MI;
 class RDP;
@@ -40,6 +41,18 @@ public:
     const u8* get_imem() const { return imem.data(); }
 
     u32 get_status() const { return status; }
+
+    // The low-level RSP (rsp_core.hpp) reaches the SP and DP registers
+    // through its COP0 registers 0-7 and 8-15.
+    u32 cop0_read(u32 reg, RDP& rdp);
+    void cop0_write(u32 reg, u32 val, MI& mi, RDP& rdp, u8* rdram, size_t rdram_size);
+    void core_break(MI& mi); // BREAK: halt, and interrupt the CPU if asked to
+    // Run every task on the low-level RSP (ORBIT64_RSP=lle, or lle-audio for
+    // the audio tasks), not only the ones the high-level emulation doesn't know.
+    void set_force_lle(bool on) { force_lle_ = on; }
+    bool lle_active() const { return lle_running; }
+    u64 get_lle_task_count() const { return lle_task_count; }
+    const RspCore& debug_core() const { return core; }
     void check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size);
 
     // Advance emulated RSP task latency; completes a pending task once its
@@ -53,8 +66,8 @@ public:
 
     // Save states (savestate.hpp).
     template <class S> void serialize(S& s) {
-        s(dmem, imem, mem_addr, dram_addr, rd_len, wr_len, status, semaphore, pc, task_pending, task_delay_cycles, ahle,
-          gfx_task_count, audio_task_count);
+        s(dmem, imem, mem_addr, dram_addr, rd_len, wr_len, status, semaphore, task_pending, task_delay_cycles, ahle,
+          gfx_task_count, audio_task_count, core, lle_running, lle_task_count, lle_cycle_debt);
     }
 
 private:
@@ -67,7 +80,13 @@ private:
     u32 wr_len{0};
     u32 status{SPStatus::HALT};
     u32 semaphore{0};
-    u32 pc{0};
+
+    RspCore core;
+    bool lle_running{false}; // the halted RSP was started on a task run by `core`
+    bool force_lle_{false};
+    bool force_lle_audio_{false}; // ORBIT64_RSP=lle-audio: audio tasks only
+    u64 lle_task_count{0};
+    s64 lle_cycle_debt{0};   // RSP cycles owed from the last step (2 RSP : 3 CPU)
 
     // A task's completion (interrupt + status update) is deferred by this many
     // cycles instead of firing synchronously inside the SP_STATUS write that
@@ -77,8 +96,9 @@ private:
     bool task_pending{false};
     s64 task_delay_cycles{0};
 
-    void execute_sp_dma_read(u8* rdram, size_t rdram_size);
-    void execute_sp_dma_write(const u8* rdram, size_t rdram_size);
+    void execute_sp_dma(bool to_rdram, u32 len_reg, u8* rdram, size_t rdram_size);
+    void write_status(u32 val, MI& mi);
+    void start(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size);
 
     AudioHLE ahle;
     u64 gfx_task_count{0};

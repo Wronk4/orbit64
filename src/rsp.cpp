@@ -3,6 +3,8 @@
 #include "rdp.hpp"
 #include "jit/jit_invalidate.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -41,15 +43,21 @@ void RSP::reset() {
     wr_len = 0;
     status = SPStatus::HALT;
     semaphore = 0;
-    pc = 0;
     task_pending = false;
     task_delay_cycles = 0;
+    core.reset();
+    lle_running = false;
+    lle_cycle_debt = 0;
     ahle.reset();
+    if (const char* e = std::getenv("ORBIT64_RSP")) {
+        force_lle_ = std::strcmp(e, "lle") == 0;
+        force_lle_audio_ = std::strcmp(e, "lle-audio") == 0;
+    }
 }
 
 u32 RSP::read_reg(u32 addr) const {
     if (addr >= 0x04080000 && addr <= 0x04080004) {
-        return pc;
+        return core.pc;
     }
     u32 reg = (addr & 0x1F) >> 2;
     switch (reg) {
@@ -69,79 +77,113 @@ u32 RSP::read_reg(u32 addr) const {
     }
 }
 
+void RSP::write_status(u32 val, MI& mi) {
+    if (val & (1 << 0)) status &= ~SPStatus::HALT;        // Clr Halt
+    if (val & (1 << 1)) status |= SPStatus::HALT;         // Set Halt
+    if (val & (1 << 2)) status &= ~SPStatus::BROKE;       // Clr Broke
+    if (val & (1 << 3)) mi.clear_interrupt(MIInterrupt::SP); // Clr Intr
+    if (val & (1 << 4)) mi.raise_interrupt(MIInterrupt::SP); // Set Intr
+    if (val & (1 << 5)) status &= ~SPStatus::SINGLE_STEP;
+    if (val & (1 << 6)) status |= SPStatus::SINGLE_STEP;
+    if (val & (1 << 7)) status &= ~SPStatus::INTR_ON_BREAK;
+    if (val & (1 << 8)) status |= SPStatus::INTR_ON_BREAK;
+    for (int s = 0; s < 8; ++s) {
+        if (val & (1 << (9 + s * 2)))     status &= ~(1 << (7 + s)); // Clr Sig
+        if (val & (1 << (10 + s * 2)))    status |= (1 << (7 + s));  // Set Sig
+    }
+}
+
 void RSP::write_reg(u32 addr, u32 val, MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
-    (void)rdp;
     if (addr >= 0x04080000 && addr <= 0x04080004) {
-        pc = val & 0xFFC;
+        core.pc = val & 0xFFC;
+        core.npc = (core.pc + 4) & 0xFFC;
         return;
     }
 
     u32 reg = (addr & 0x1F) >> 2;
     switch (reg) {
         case 0: // SP_MEM_ADDR_REG
-            mem_addr = val & 0x1FFF;
+            mem_addr = val & 0x1FF8;
             break;
         case 1: // SP_DRAM_ADDR_REG
-            dram_addr = val & 0x00FFFFFF;
+            dram_addr = val & 0x00FFFFF8;
             break;
         case 2: // SP_RD_LEN_REG (RDRAM to SP)
             rd_len = val;
-            execute_sp_dma_read(rdram, rdram_size);
+            execute_sp_dma(false, val, rdram, rdram_size);
             break;
         case 3: // SP_WR_LEN_REG (SP to RDRAM)
             wr_len = val;
-            execute_sp_dma_write(rdram, rdram_size);
+            execute_sp_dma(true, val, rdram, rdram_size);
             break;
         case 4: { // SP_STATUS_REG
-            if (val & (1 << 0)) status &= ~SPStatus::HALT;        // Clr Halt
-            if (val & (1 << 1)) status |= SPStatus::HALT;         // Set Halt
-            if (val & (1 << 2)) status &= ~SPStatus::BROKE;       // Clr Broke
-            if (val & (1 << 3)) mi.clear_interrupt(MIInterrupt::SP); // Clr Intr
-            if (val & (1 << 4)) mi.raise_interrupt(MIInterrupt::SP); // Set Intr
-            if (val & (1 << 5)) status &= ~SPStatus::SINGLE_STEP;
-            if (val & (1 << 6)) status |= SPStatus::SINGLE_STEP;
-            if (val & (1 << 7)) status &= ~SPStatus::INTR_ON_BREAK;
-            if (val & (1 << 8)) status |= SPStatus::INTR_ON_BREAK;
-
-            for (int s = 0; s < 8; ++s) {
-                if (val & (1 << (9 + s * 2)))     status &= ~(1 << (7 + s)); // Clr Sig
-                if (val & (1 << (10 + s * 2)))    status |= (1 << (7 + s));  // Set Sig
-            }
-
-            if (!(status & SPStatus::HALT) && !task_pending) {
-                // Simulate RSP run time instead of completing the task
-                // synchronously inside this register write. Some games'
-                // message-queue schedulers expect the CPU to reach its wait
-                // state before the "task done" signal arrives.
-                u32 task_type = (static_cast<u32>(dmem[0xFC0]) << 24) |
-                                (static_cast<u32>(dmem[0xFC1]) << 16) |
-                                (static_cast<u32>(dmem[0xFC2]) << 8)  |
-                                 static_cast<u32>(dmem[0xFC3]);
-                task_pending = true;
-                if (task_type == 2) {
-                    // Audio tasks now do real decode/mix work (ahle.process),
-                    // proportional to the command list size, not a flat
-                    // worst-case constant: a fixed multi-thousand-cycle
-                    // penalty per task starves audio throughput when a game
-                    // submits several small audio tasks per frame (measured
-                    // effective output well below the target sample rate).
-                    // Scale with data_size instead, with a small floor so a
-                    // tiny task still yields the CPU once.
-                    u32 data_size = (static_cast<u32>(dmem[0xFC0 + 0x34]) << 24) |
-                                    (static_cast<u32>(dmem[0xFC0 + 0x35]) << 16) |
-                                    (static_cast<u32>(dmem[0xFC0 + 0x36]) << 8)  |
-                                     static_cast<u32>(dmem[0xFC0 + 0x37]);
-                    task_delay_cycles = std::max<u32>(500, data_size * 4);
-                } else {
-                    task_delay_cycles = 2976;
-                }
-            }
+            const bool was_halted = status & SPStatus::HALT;
+            write_status(val, mi);
+            if (was_halted && !(status & SPStatus::HALT) && !task_pending && !lle_running)
+                start(mi, rdp, rdram, rdram_size);
             break;
         }
         case 7: // SP_SEMAPHORE_REG
             semaphore = 0;
             break;
     }
+}
+
+// The CPU has just let the RSP run. libultra's tasks (an OSTask at DMEM
+// 0xFC0) of the graphics and audio microcodes are emulated at a high level;
+// anything else runs on the low-level RSP.
+void RSP::start(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
+    (void)mi; (void)rdp; (void)rdram; (void)rdram_size;
+    const u32 task_type = (static_cast<u32>(dmem[0xFC0]) << 24) | (static_cast<u32>(dmem[0xFC1]) << 16) |
+                          (static_cast<u32>(dmem[0xFC2]) << 8) | static_cast<u32>(dmem[0xFC3]);
+    if (force_lle_ || (force_lle_audio_ && task_type == 2) || (task_type != 1 && task_type != 2)) {
+        lle_running = true;
+        lle_cycle_debt = 0;
+        ++lle_task_count;
+        if (const char* d = std::getenv("ORBIT64_RSP_DUMP")) { char n[512]; std::snprintf(n, sizeof n, "%s/t%05llu_pc%03x.bin", d, (unsigned long long)lle_task_count, core.pc); if (FILE* f = std::fopen(n, "wb")) { std::fwrite(imem.data(), 1, 4096, f); std::fwrite(dmem.data(), 1, 4096, f); std::fclose(f); } }
+        return;
+    }
+    // Simulate RSP run time instead of completing the task synchronously
+    // inside this register write. Some games' message-queue schedulers
+    // expect the CPU to reach its wait state before the "task done" signal
+    // arrives.
+    task_pending = true;
+    if (task_type == 2) {
+        // Audio tasks now do real decode/mix work (ahle.process),
+        // proportional to the command list size, not a flat
+        // worst-case constant: a fixed multi-thousand-cycle
+        // penalty per task starves audio throughput when a game
+        // submits several small audio tasks per frame (measured
+        // effective output well below the target sample rate).
+        // Scale with data_size instead, with a small floor so a
+        // tiny task still yields the CPU once.
+        u32 data_size = (static_cast<u32>(dmem[0xFC0 + 0x34]) << 24) |
+                        (static_cast<u32>(dmem[0xFC0 + 0x35]) << 16) |
+                        (static_cast<u32>(dmem[0xFC0 + 0x36]) << 8)  |
+                         static_cast<u32>(dmem[0xFC0 + 0x37]);
+        task_delay_cycles = std::max<u32>(500, data_size * 4);
+    } else {
+        task_delay_cycles = 2976;
+    }
+}
+
+u32 RSP::cop0_read(u32 reg, RDP& rdp) {
+    if (reg < 8) return read_reg(0x04040000 + reg * 4);
+    return rdp.read_dpc_reg(0x04100000 + (reg - 8) * 4);
+}
+
+void RSP::cop0_write(u32 reg, u32 val, MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
+    if (reg < 8) {
+        if (reg == 4) write_status(val, mi); // no task start: the RSP is running
+        else write_reg(0x04040000 + reg * 4, val, mi, rdp, rdram, rdram_size);
+    } else {
+        rdp.write_dpc_reg(0x04100000 + (reg - 8) * 4, val, mi, rdram, rdram_size);
+    }
+}
+
+void RSP::core_break(MI& mi) {
+    status |= SPStatus::HALT | SPStatus::BROKE;
+    if (status & SPStatus::INTR_ON_BREAK) mi.raise_interrupt(MIInterrupt::SP);
 }
 
 u8 RSP::read_dmem(u32 addr) const {
@@ -160,44 +202,51 @@ void RSP::write_imem(u32 addr, u8 val) {
     imem[addr & (IMEM_SIZE - 1)] = val;
 }
 
-void RSP::execute_sp_dma_read(u8* rdram, size_t rdram_size) {
-    u32 len = (rd_len & 0xFFF) + 1;
-    len = (len + 7) & ~7; // 8-byte aligned
-
-    u32 sp_target = mem_addr & 0x1FFF;
-    u8* target_buf = (sp_target & 0x1000) ? imem.data() : dmem.data();
-    u32 offset = sp_target & 0xFFF;
-
-    for (u32 i = 0; i < len; ++i) {
-        u32 dram_idx = (dram_addr + i) & (rdram_size - 1);
-        u32 sp_idx = (offset + i) & 0xFFF;
-        target_buf[sp_idx] = rdram[dram_idx];
+// SP DMA: count + 1 rows of length + 1 bytes (a multiple of 8), with `skip`
+// bytes between rows in RDRAM. Both addresses advance, and the length
+// register reads back as 0xFF8 afterwards, as on hardware.
+void RSP::execute_sp_dma(bool to_rdram, u32 len_reg, u8* rdram, size_t rdram_size) {
+    const u32 length = (len_reg & 0xFFF) | 7;
+    const u32 count = (len_reg >> 12) & 0xFF;
+    const u32 skip = (len_reg >> 20) & 0xFFF;
+    u8* mem = (mem_addr & 0x1000) ? imem.data() : dmem.data();
+    u32 maddr = mem_addr & 0xFF8;
+    u32 daddr = dram_addr & 0xFFFFF8;
+    const u32 mask = static_cast<u32>(rdram_size - 1);
+    for (u32 row = 0; row <= count; ++row) {
+        for (u32 i = 0; i <= length; ++i) {
+            const u32 m = (maddr + i) & 0xFFF, d = (daddr + i) & mask;
+            if (to_rdram) rdram[d] = mem[m];
+            else mem[m] = rdram[d];
+        }
+        if (to_rdram) {
+            // Drop JIT blocks compiled from what was just overwritten
+            // (wrapping at the end of RDRAM like the copy above).
+            const u32 start = daddr & mask;
+            const u32 first = std::min<u32>(length + 1, static_cast<u32>(rdram_size) - start);
+            jit::notify_code_write(start, first);
+            if (first < length + 1) jit::notify_code_write(0, length + 1 - first);
+        }
+        maddr += length + 1;
+        daddr += length + 1 + skip;
     }
-}
-
-void RSP::execute_sp_dma_write(const u8* rdram, size_t rdram_size) {
-    u32 len = (wr_len & 0xFFF) + 1;
-    len = (len + 7) & ~7;
-
-    u32 sp_target = mem_addr & 0x1FFF;
-    const u8* src_buf = (sp_target & 0x1000) ? imem.data() : dmem.data();
-    u32 offset = sp_target & 0xFFF;
-
-    for (u32 i = 0; i < len; ++i) {
-        u32 dram_idx = (dram_addr + i) & (rdram_size - 1);
-        u32 sp_idx = (offset + i) & 0xFFF;
-        const_cast<u8*>(rdram)[dram_idx] = src_buf[sp_idx];
-    }
-
-    // Report the written range (wrapping at the end of RDRAM like the copy
-    // above) so JIT blocks compiled from it are dropped.
-    u32 start = dram_addr & (rdram_size - 1);
-    u32 first = static_cast<u32>(std::min<size_t>(len, rdram_size - start));
-    jit::notify_code_write(start, first);
-    if (first < len) jit::notify_code_write(0, len - first);
+    mem_addr = (mem_addr & 0x1000) | (maddr & 0xFF8);
+    dram_addr = daddr & 0xFFFFF8;
+    (to_rdram ? wr_len : rd_len) = (len_reg & 0xFFF00000u) | 0xFF8;
 }
 
 void RSP::step(u32 cycles, MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
+    if (lle_running) {
+        // The RSP runs at 2/3 of the CPU clock.
+        lle_cycle_debt += static_cast<s64>(cycles) * 2 / 3;
+        if (lle_cycle_debt > 0 && !(status & SPStatus::HALT))
+            lle_cycle_debt -= core.run(static_cast<u32>(lle_cycle_debt), *this, mi, rdp, rdram, rdram_size);
+        if (status & SPStatus::HALT) {
+            lle_running = false;
+            lle_cycle_debt = 0;
+        }
+        return;
+    }
     if (!task_pending) return;
     task_delay_cycles -= cycles;
     if (task_delay_cycles <= 0) {

@@ -47,7 +47,7 @@ OBJS := $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(CORE_SRCS) $(UI_SRCS) $
 # Headless RDP checker (tools/rdp_check.cpp): the core without main.cpp and the UI.
 CHECK_OBJS := $(filter-out $(BUILD_DIR)/main.o, $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(CORE_SRCS)))
 DEPS := $(OBJS:.o=.d) $(BUILD_DIR)/test_rdp.d $(BUILD_DIR)/hires_exact.d \
-        $(BUILD_DIR)/tools/rdp_check.d $(BUILD_DIR)/tools/rdp_check_exact.d $(BUILD_DIR)/tools/savestate_check.d
+        $(BUILD_DIR)/tools/rdp_check.d $(BUILD_DIR)/tools/rdp_check_exact.d $(BUILD_DIR)/tools/savestate_check.d $(BUILD_DIR)/tools/rsp_test.d
 TARGET := $(BIN_DIR)/n64$(EXE)
 TEST_TARGET := $(BIN_DIR)/test_rdp$(EXE)
 CHECK_TARGET := $(BIN_DIR)/rdp_check$(EXE)
@@ -56,7 +56,7 @@ SAVESTATE_CHECK_TARGET := $(BIN_DIR)/savestate_check$(EXE)
 JIT_SELFTEST_TARGET := $(BIN_DIR)/jit_selftest$(EXE)
 DEPS += $(BUILD_DIR)/jit/jit_selftest_main.d
 
-.PHONY: all clean run test_rdp rdp_check rdp_check_exact savestate_check jit_selftest gpu_check shaders
+.PHONY: all clean run test_rdp rdp_check rdp_check_exact savestate_check rsp_test jit_selftest gpu_check shaders
 .DEFAULT_GOAL := all
 
 # Interpreter-vs-JIT differential test (src/jit/jit_selftest_main.cpp).
@@ -104,7 +104,7 @@ $(BUILD_DIR)/tools/audio_check.o: tools/audio_check.cpp
 
 # Console tools without SDL keep their own main().
 $(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o \
-$(BUILD_DIR)/tools/savestate_check.o: CXXFLAGS += -Umain
+$(BUILD_DIR)/tools/savestate_check.o $(BUILD_DIR)/tools/rsp_test.o: CXXFLAGS += -Umain
 
 all: $(TARGET)
 
@@ -116,6 +116,9 @@ rdp_check_exact: $(CHECK_EXACT_TARGET)
 
 # Save states restore exactly the machine they were made from (tools/savestate_check.cpp).
 savestate_check: $(SAVESTATE_CHECK_TARGET)
+
+# Runs RSP memory images on the low-level RSP (tools/rsp_test.cpp).
+rsp_test: $(BIN_DIR)/rsp_test$(EXE)
 
 -include $(DEPS)
 
@@ -134,6 +137,13 @@ $(CHECK_EXACT_TARGET): $(BUILD_DIR)/tools/rdp_check_exact.o $(BUILD_DIR)/hires_e
 
 $(SAVESTATE_CHECK_TARGET): $(BUILD_DIR)/tools/savestate_check.o $(CHECK_OBJS) | $(BIN_DIR)
 	$(CXX) $^ -o $@ -lpthread
+
+$(BIN_DIR)/rsp_test$(EXE): $(BUILD_DIR)/tools/rsp_test.o $(CHECK_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ -lpthread
+
+$(BUILD_DIR)/tools/rsp_test.o: tools/rsp_test.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(dir $@)

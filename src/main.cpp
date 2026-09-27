@@ -248,7 +248,7 @@ int main(int argc, char* argv[]) {
             RSP& rsp = emu.get_rsp();
             const int uc = rdp.has_processed_display_list() ? static_cast<int>(rdp.get_active_ucode()) : 0;
             std::cout << "[Main] info: gfx_ucode=" << ucodes[uc < 10 ? uc : 0] << " gfx_tasks=" << rsp.get_gfx_task_count()
-                      << " display_lists=" << rdp.get_display_list_count() << " audio_tasks=" << rsp.get_audio_task_count()
+                      << " display_lists=" << rdp.get_display_list_count() << " audio_tasks=" << rsp.get_audio_task_count() << " lle_tasks=" << rsp.get_lle_task_count()
                       << " audio_abi=" << (rsp.get_audio_task_count() ? rsp.get_audio_hle().get_abi_index() : -1)
                       << " ai_rate=" << emu.get_ai().get_native_sample_rate()
                       << " save=" << static_cast<int>(emu.get_cartridge().get_save_type())

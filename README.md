@@ -83,6 +83,15 @@ to get past title screens) and writes `test_output/compat/report.html`: status, 
 screenshots and the captured sound per game, plus `sheet.png` with all screenshots and `results.json`.
 `--compare <old results.json>` marks what changed since an earlier sweep; `--filter <text>` runs a subset.
 
+## RSP
+
+The graphics and audio tasks of libultra games are emulated at a high level (`src/rdp.cpp`, `src/ahle.*`). Every other
+task a game starts on the RSP runs on a low-level interpreter of the RSP's scalar and vector units
+(`src/rsp_core.*`), which passes all of the RSP sub-tests of Nintendo's N64 diagnostics cartridge.
+`ORBIT64_RSP=lle` runs every task on it and `ORBIT64_RSP=lle-audio` only the audio ones (their output is within
+rounding of the high-level audio, a good check of both). `ORBIT64_RSP_DUMP=<dir>` saves the IMEM and DMEM each
+low-level task starts with, and `make rsp_test && bin/rsp_test <dir>/*.bin` runs such images on their own.
+
 ## Audio
 
 - **Microcode HLE** (`src/ahle.*`): the audio command lists of the libultra ABI 1 microcode (and its GoldenEye /
