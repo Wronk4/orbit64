@@ -244,7 +244,7 @@ uint combine(uint sb, uint tex0, uint tex1, uint shade, int lod_frac) {
 // ---- Blender and the frame buffer write ---------------------------------------------
 
 // raster::blend_pixel(): both blender cycles.
-vec3 blend_cycle(uint sb, uint mux, vec3 in_c, vec3 mem_c, float a_in, float shade_a, float mem_a, bool eq) {
+vec3 blend_cycle(uint sb, uint mux, vec3 in_c, vec3 mem_c, float a_in, float shade_a, float mem_a, bool eq, bool norm) {
     uint p = mux & 3u, ai = (mux >> 8u) & 3u, m = (mux >> 16u) & 3u, bi = (mux >> 24u) & 3u;
     uint bc = D[sb + 8u], fc = D[sb + 9u];
     vec3 blc = vec3(float((bc >> 24u) & 0xFFu), float((bc >> 16u) & 0xFFu), float((bc >> 8u) & 0xFFu));
@@ -254,7 +254,8 @@ vec3 blend_cycle(uint sb, uint mux, vec3 in_c, vec3 mem_c, float a_in, float sha
     float A = ai == 0u ? a_in : ai == 1u ? float(fc & 0xFFu) : ai == 2u ? shade_a : 0.0;
     float B = bi == 0u ? 255.0 - A : bi == 1u ? mem_a : bi == 2u ? 255.0 : 0.0;
     vec3 mc = m == 0u ? in_c : m == 1u ? mem_c : m == 2u ? blc : fgc;
-    return floor(clamp((pc * A + mc * B) / 255.0, vec3(0.0), vec3(255.0)));
+    float div = ((D[sb] & GPU_ST_FORCE_BLEND) != 0u || !norm) ? 255.0 : max(A + B, 1.0);
+    return floor(clamp((pc * A + mc * B) / div, vec3(0.0), vec3(255.0)));
 }
 
 uint blend_pixel(uint sb, uint src, uint shade_a, uint dst, bool blend) {
@@ -262,10 +263,10 @@ uint blend_pixel(uint sb, uint src, uint shade_a, uint dst, bool blend) {
     vec3 mem_c = vec3(float((dst >> 16u) & 0xFFu), float((dst >> 8u) & 0xFFu), float(dst & 0xFFu));
     float a_in = float(src >> 24u), sa = float(shade_a), ma = float(dst >> 24u);
     if ((D[sb] & GPU_ST_TWO_CYCLE) != 0u) {
-        c = blend_cycle(sb, D[sb + 10u], c, mem_c, a_in, sa, ma, true);
-        c = blend_cycle(sb, D[sb + GPU_ST_BLEND2], c, mem_c, a_in, sa, ma, blend);
+        c = blend_cycle(sb, D[sb + 10u], c, mem_c, a_in, sa, ma, true, false);
+        c = blend_cycle(sb, D[sb + GPU_ST_BLEND2], c, mem_c, a_in, sa, ma, blend, true);
     } else {
-        c = blend_cycle(sb, D[sb + 10u], c, mem_c, a_in, sa, ma, blend);
+        c = blend_cycle(sb, D[sb + 10u], c, mem_c, a_in, sa, ma, blend, true);
     }
     return (uint(c.r) << 16u) | (uint(c.g) << 8u) | uint(c.b);
 }

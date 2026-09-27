@@ -147,7 +147,8 @@ struct DrawState {
     u8 bl_p{0}, bl_a{0}, bl_m{0}, bl_b{0};     // blender cycle 1 (the only one in 1-cycle mode)
     u8 bl2_p{0}, bl2_a{0}, bl2_m{0}, bl2_b{0}; // blender cycle 2
     bool blend_pass_through{true}; // an unblended pixel comes out of the blender as it went in
-    bool blend_enabled{false};  // FORCE_BL / ZMODE_XLU: blend when alpha < 255
+    bool blend_enabled{false};  // FORCE_BL / ZMODE_XLU / AA with CVG_X_ALPHA: blend when alpha < 255
+    bool force_blend{false};    // FORCE_BL: P*A + M*B as it is; otherwise divided by A + B
     u8 alpha_compare{0};        // G_AC_*: 0 none, 1 threshold, 3 dither
     u8 alpha_threshold{0};      // blend colour alpha
     bool alpha_zero_kill{false}; // CVG_X_ALPHA/ALPHA_CVG_SEL/FORCE_BL/ZMODE_XLU/IM_RD/AA_EN: drop alpha-0 pixels
@@ -222,7 +223,11 @@ struct DrawState {
         // goes in); IN*0 + IN*1 and IN*A + IN*(1-A) change nothing.
         const bool first_identity = bl_p == 0 && bl_m == 0 && ((bl_a == 3 && bl_b == 2) || bl_b == 0);
         blend_pass_through = two_cycle ? (first_identity && bl2_p == 0) : bl_p == 0;
-        blend_enabled = (other_mode_l & 0x4800) != 0;
+        // FORCE_BL / ZMODE_XLU, or anti-aliasing with coverage times alpha:
+        // the texture's alpha is the coverage of edge pixels, which the
+        // blender mixes with what is behind them (billboards' soft edges).
+        force_blend = (other_mode_l & 0x4000) != 0;
+        blend_enabled = (other_mode_l & 0x4800) != 0 || (other_mode_l & 0x1008) == 0x1008;
         alpha_compare = other_mode_l & 0x3;
         alpha_threshold = blend_color & 0xFF;
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
@@ -678,7 +683,8 @@ inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb,
 inline void blend_pixel(const DrawState& st, u32 in, u8 shade_a, u8 mem_r, u8 mem_g, u8 mem_b, u8 mem_a, bool blend,
                         u8& out_r, u8& out_g, u8& out_b) {
     const f32 a_in = static_cast<f32>((in >> 24) & 0xFF);
-    auto cycle = [&](u8 p, u8 a, u8 m, u8 b, f32 ir, f32 ig, f32 ib, bool eq, f32& r, f32& g, f32& bl) {
+    // `norm`: the cycle that blends only when asked to (not the first of 2-cycle mode).
+    auto cycle = [&](u8 p, u8 a, u8 m, u8 b, f32 ir, f32 ig, f32 ib, bool eq, bool norm, f32& r, f32& g, f32& bl) {
         auto pick = [&](u8 sel, f32& x, f32& y, f32& z) {
             switch (sel) {
                 case 0: x = ir; y = ig; z = ib; break; // G_BL_CLR_IN
@@ -698,17 +704,19 @@ inline void blend_pixel(const DrawState& st, u32 in, u8 shade_a, u8 mem_r, u8 me
         const f32 B = b == 0 ? 255.0f - A : b == 1 ? static_cast<f32>(mem_a) : b == 2 ? 255.0f : 0.0f;
         f32 mr, mg, mb;
         pick(m, mr, mg, mb);
+        // Without FORCE_BL the blender normalises by A + B (coverage blending).
         // Whole numbers between the cycles, as the hardware keeps 8 bits.
-        r = std::floor(std::clamp((pr * A + mr * B) / 255.0f, 0.0f, 255.0f));
-        g = std::floor(std::clamp((pg * A + mg * B) / 255.0f, 0.0f, 255.0f));
-        bl = std::floor(std::clamp((pb * A + mb * B) / 255.0f, 0.0f, 255.0f));
+        const f32 div = (st.force_blend || !norm) ? 255.0f : std::max(A + B, 1.0f);
+        r = std::floor(std::clamp((pr * A + mr * B) / div, 0.0f, 255.0f));
+        g = std::floor(std::clamp((pg * A + mg * B) / div, 0.0f, 255.0f));
+        bl = std::floor(std::clamp((pb * A + mb * B) / div, 0.0f, 255.0f));
     };
     f32 r = static_cast<f32>((in >> 16) & 0xFF), g = static_cast<f32>((in >> 8) & 0xFF), b = static_cast<f32>(in & 0xFF);
     if (st.two_cycle) {
-        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, true, r, g, b);
-        cycle(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b, r, g, b, blend, r, g, b);
+        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, true, false, r, g, b);
+        cycle(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b, r, g, b, blend, true, r, g, b);
     } else {
-        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, blend, r, g, b);
+        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, blend, true, r, g, b);
     }
     out_r = static_cast<u8>(r);
     out_g = static_cast<u8>(g);

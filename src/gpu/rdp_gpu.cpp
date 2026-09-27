@@ -279,7 +279,8 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
            flag(st.need_tex1, GPU_ST_NEED_TEX1) | flag(st.blend_enabled, GPU_ST_BLEND) |
            flag(st.alpha_zero_kill, GPU_ST_ZERO_KILL) | flag(st.z_compare, GPU_ST_Z_COMPARE) |
            flag(st.z_update, GPU_ST_Z_UPDATE) | flag(st.fb_size == 2, GPU_ST_16BIT) |
-           flag(st.blend_pass_through, GPU_ST_PASS_THROUGH) | flag(st.alpha_from_cvg, GPU_ST_ALPHA_CVG);
+           flag(st.blend_pass_through, GPU_ST_PASS_THROUGH) | flag(st.alpha_from_cvg, GPU_ST_ALPHA_CVG) |
+           flag(st.force_blend, GPU_ST_FORCE_BLEND);
     w[1] = (st.tlut_type & 15) | (st.active_tile & 7) << 4 | static_cast<u32>(st.alpha_compare & 3) << 8 |
            static_cast<u32>(st.alpha_threshold) << 16;
     auto mux = [](u8 a, u8 b, u8 c, u8 d) {
