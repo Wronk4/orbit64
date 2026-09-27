@@ -970,6 +970,31 @@ void RDP::debug_pick(u32 a, u32 b, u32 c) const {
     for (const Vertex* v : {&A, &B, &C})
         std::fprintf(stderr, "  v sx=%.1f sy=%.1f sz=%.4f w=%.2f uv=%.2f,%.2f rgba=%02x%02x%02x%02x\n", v->sx, v->sy, v->sz,
                      v->w, v->u, v->v, v->r, v->g, v->b, v->a);
+    // ORBIT64_PICK_DUMP=<dir>: the draw's tiles, decoded, as PPM images (colour, then alpha).
+    if (const char* dir = std::getenv("ORBIT64_PICK_DUMP")) {
+        static int n = 0;
+        const DrawState& st = const_cast<RDP*>(this)->draw_state();
+        for (int i = 0; i < 2; ++i) {
+            const raster::TexUnit& tu = st.tex[(active_tile + i) & 7];
+            u32 w = 0, h = 0;
+            raster::tex_cache_dims(tu, w, h);
+            if (w * h == 0 || w * h > 1024 * 1024) continue;
+            char path[512];
+            std::snprintf(path, sizeof path, "%s/pick%03d_tile%d.ppm", dir, n, i);
+            if (FILE* f = std::fopen(path, "wb")) {
+                std::fprintf(f, "P6 %u %u 255\n", w * 2, h);
+                for (u32 t = 0; t < h; ++t)
+                    for (u32 k = 0; k < w * 2; ++k) {
+                        const u32 c = raster::fetch_wrapped(tu, st.tmem, st.tmem_dxt, st.tlut_type, static_cast<s32>(k % w), static_cast<s32>(t));
+                        const u8 px[3] = {static_cast<u8>(k < w ? c >> 16 : c >> 24), static_cast<u8>(k < w ? c >> 8 : c >> 24),
+                                          static_cast<u8>(k < w ? c : c >> 24)};
+                        std::fwrite(px, 1, 3, f);
+                    }
+                std::fclose(f);
+            }
+        }
+        ++n;
+    }
 }
 
 void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram, size_t rdram_size) {
