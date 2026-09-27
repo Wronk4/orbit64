@@ -61,6 +61,9 @@ enum class MicrocodeType {
 // in its data segment: the first one in [p, p + len). A 2.x version means the
 // GBI-2 (F3DEX2 / S2DEX2) command set. Auto when there is none.
 MicrocodeType identify_ucode_banner(const u8* p, size_t len);
+// Whether that first credit string is Conker's Bad Fur Day's F3DEXBG, an
+// F3DEX2 with point lights, per-vertex normals kept apart and G_TRI4.
+bool ucode_banner_is_cbfd(const u8* p, size_t len);
 
 class MI;
 
@@ -85,6 +88,10 @@ public:
     void recreate_hires();
 
     void set_ucode_type(MicrocodeType type) { ucode_type = type; }
+    void set_cbfd(bool on) {
+        if (on && !cbfd_) cbfd_advanced_ = false;
+        cbfd_ = on;
+    }
     MicrocodeType get_ucode_type() const { return ucode_type; }
 
     // Frontend status queries (read-only).
@@ -149,6 +156,7 @@ public:
         s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
+        s(cbfd_, cbfd_advanced_, cbfd_normal_base_, cbfd_coord_mod_, cbfd_lights_, cbfd_num_lights_);
         s.fixed(internal_zbuffer);
         // G_MTX pushes a copy of the top of the stack, which must exist.
         if (modelview_stack.empty() || modelview_stack.size() > 32) s.fail("the RDP matrix stack is invalid");
@@ -302,6 +310,23 @@ private:
     // and consulted/updated by G_SELECT_DL / G_SELECT_BRANCH_DL (sid must be
     // one of 0, 4, 8, 12 -- indexed here as sid/4).
     u32 s2d_genstat[4]{};
+
+    // F3DEXBG (Conker's Bad Fur Day). Lights 0..n-1 (the last one
+    // directional, the others point lights), then the ambient colour.
+    struct CbfdLight {
+        f32 r, g, b;    // 0..1
+        f32 x, y, z;    // direction, normalised
+        f32 px, py, pz; // position
+        f32 ca;         // point light strength
+    };
+    bool cbfd_{false};
+    bool cbfd_advanced_{false}; // its G_LOAD_UCODE turns on the second lighting mode
+    u32 cbfd_normal_base_{0};
+    f32 cbfd_coord_mod_[16]{};
+    std::array<CbfdLight, 13> cbfd_lights_{};
+    u32 cbfd_num_lights_{0};
+    f32 cbfd_ldir_[13][3]{}; // their directions in model space (execute_vtx)
+    bool execute_cbfd_command(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size);
 
     // The single 2D transform matrix (no stack, no push/pop) used by
     // G_OBJ_SPRITE (full A,B,C,D,X,Y) and G_OBJ_RECTANGLE_R (X,Y,BaseScale only).

@@ -97,6 +97,12 @@ MicrocodeType identify_ucode_banner(const u8* p, size_t len) {
     return MicrocodeType::Auto;
 }
 
+bool ucode_banner_is_cbfd(const u8* p, size_t len) {
+    const std::string_view h(reinterpret_cast<const char*>(p), len);
+    const size_t gfx = h.find("RSP Gfx ucode ");
+    return gfx != std::string_view::npos && h.substr(gfx + 14, 7) == "F3DEXBG";
+}
+
 RDP::RDP() {
     reset();
     if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
@@ -189,6 +195,11 @@ void RDP::reset() {
     ucode_type = MicrocodeType::Auto;
 
     std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
+    cbfd_ = cbfd_advanced_ = false;
+    cbfd_normal_base_ = 0;
+    std::fill(std::begin(cbfd_coord_mod_), std::end(cbfd_coord_mod_), 0.0f);
+    cbfd_lights_ = {};
+    cbfd_num_lights_ = 0;
     obj2d_matrix = Obj2DMatrix{};
     obj_render_mode = 0;
     s2d_pending_flag = 0;
@@ -594,6 +605,20 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
     const bool dkr = ucode == MicrocodeType::F3DDKR || ucode == MicrocodeType::F3DJFG;
     if (dkr) vtx_addr = (vtx_addr + dkr_vtx_offset) & 0x00FFFFFF;
     const u32 stride = dkr ? 10 : pd ? 12 : 16;
+    if (cbfd_ && ucode == MicrocodeType::F3DEX2) {
+        // The light directions in model space (the inverse of the
+        // modelview's rotation applied to them), to meet the model's normals.
+        const auto& mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
+        for (u32 l = 0; l < cbfd_lights_.size(); ++l) {
+            const CbfdLight& c = cbfd_lights_[l];
+            f32 x = mv.m[0][0] * c.x + mv.m[0][1] * c.y + mv.m[0][2] * c.z;
+            f32 y = mv.m[1][0] * c.x + mv.m[1][1] * c.y + mv.m[1][2] * c.z;
+            f32 z = mv.m[2][0] * c.x + mv.m[2][1] * c.y + mv.m[2][2] * c.z;
+            const f32 len = std::sqrt(x * x + y * y + z * z);
+            if (len > 0.0f) { x /= len; y /= len; z /= len; }
+            cbfd_ldir_[l][0] = x; cbfd_ldir_[l][1] = y; cbfd_ldir_[l][2] = z;
+        }
+    }
 
     for (u32 i = 0; i < count; ++i) {
         u32 cur_vtx = vtx_addr + i * stride;
@@ -655,7 +680,44 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
             v.v = (tv / 32.0f) * texture_scale_t;
         }
 
-        if (geometry_mode & 0x00020000) { // G_LIGHTING
+        if ((geometry_mode & 0x00020000) && cbfd_ && ucode == MicrocodeType::F3DEX2) {
+            // F3DEXBG: the colour stays the vertex's own, scaled by the light;
+            // the normal comes from the separate table (2 bytes per vertex
+            // slot) and the low byte of the vertex's flag word.
+            const u32 nb = (cbfd_normal_base_ + dest_idx * 2) & (static_cast<u32>(rdram_size) - 2);
+            const f32 nx = static_cast<s8>(rdram[nb]) / 127.0f;
+            const f32 ny = static_cast<s8>(rdram[nb + 1]) / 127.0f;
+            const f32 nz = static_cast<s8>(rdram[cur_vtx + 7]) / 127.0f;
+            const u32 nl = cbfd_num_lights_;
+            const f32* m = cbfd_coord_mod_;
+            const f32 px = (vx + m[8]) * m[12], py = (vy + m[9]) * m[13], pz = (vz + m[10]) * m[14];
+            f32 lr = cbfd_lights_[nl].r, lg = cbfd_lights_[nl].g, lb = cbfd_lights_[nl].b;
+            auto add = [&](const CbfdLight& l, f32 k) {
+                if (k > 0.0f) { lr += l.r * k; lg += l.g * k; lb += l.b * k; }
+            };
+            auto point = [&](const CbfdLight& l) {
+                const f32 dx = px - l.px, dy = py - l.py, dz = pz - l.pz;
+                const f32 len = 2.0f * (dx * dx + dy * dy + dz * dz) / 65536.0f;
+                return len > 0.0f ? std::min(1.0f, l.ca / len) : 1.0f;
+            };
+            if (!cbfd_advanced_) {
+                for (int l = static_cast<int>(nl) - 2; l >= 0; --l) add(cbfd_lights_[l], point(cbfd_lights_[l]));
+            } else if (nl > 0) {
+                auto dot = [&](int l) {
+                    return std::min(1.0f, nx * cbfd_ldir_[l][0] + ny * cbfd_ldir_[l][1] + nz * cbfd_ldir_[l][2]);
+                };
+                add(cbfd_lights_[nl - 1], dot(static_cast<int>(nl) - 1));
+                for (int l = static_cast<int>(nl) - 2; l >= 0; --l) {
+                    f32 k = point(cbfd_lights_[l]);
+                    if (geometry_mode & 0x00400000) k *= dot(l); // G_POINT_LIGHTING
+                    add(cbfd_lights_[l], k);
+                }
+            }
+            v.r = static_cast<u8>(col[0] * std::min(1.0f, lr));
+            v.g = static_cast<u8>(col[1] * std::min(1.0f, lg));
+            v.b = static_cast<u8>(col[2] * std::min(1.0f, lb));
+            v.a = col[3];
+        } else if (geometry_mode & 0x00020000) { // G_LIGHTING
             u8 ca = col[3];
             f32 lit_r = ambient_light.r;
             f32 lit_g = ambient_light.g;
@@ -1046,6 +1108,88 @@ void RDP::execute_moveword(u32 w0, u32 w1, MicrocodeType current_ucode) {
     }
 }
 
+// The commands in which F3DEXBG (Conker's Bad Fur Day) differs from F3DEX2;
+// false for the others.
+bool RDP::execute_cbfd_command(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size) {
+    if (opcode >= 0x10 && opcode <= 0x1F) { // G_TRI4: 5-bit vertex indices
+        const u32 idx[12] = {(w0 >> 23) & 31, (w0 >> 18) & 31, (((w0 >> 15) & 7) << 2) | (w1 >> 30),
+                             (w0 >> 10) & 31, (w0 >> 5) & 31,  w0 & 31,
+                             (w1 >> 25) & 31, (w1 >> 20) & 31, (w1 >> 15) & 31,
+                             (w1 >> 10) & 31, (w1 >> 5) & 31,  w1 & 31};
+        for (int t = 0; t < 4; ++t) {
+            const u32 a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
+            if (a == b && b == c) continue; // an unused slot
+            emit_triangle(a, b, c, rdram, rdram_size);
+        }
+        return true;
+    }
+    switch (opcode) {
+        case 0xDD: // G_LOAD_UCODE: here it switches to the second lighting mode
+            cbfd_advanced_ = true;
+            return true;
+        case 0xDB: { // G_MOVEWORD
+            const u32 type = (w0 >> 16) & 0xFF;
+            if (type == 0x02) { // G_MW_NUMLIGHT: 48-byte lights
+                cbfd_num_lights_ = std::min<u32>(w1 / 48, 12);
+                return true;
+            }
+            if (type == 0x10) { // G_MW_COORD_MOD: how light positions relate to vertices
+                if (w0 & 8) return true;
+                const u32 i = (w0 >> 1) & 3, pos = w0 & 0x30;
+                f32* m = cbfd_coord_mod_;
+                if (pos == 0) {
+                    m[0 + i] = static_cast<s16>(w1 >> 16);
+                    m[1 + i] = static_cast<s16>(w1);
+                } else if (pos == 0x10) {
+                    m[4 + i] = static_cast<f32>(w1 >> 16) / 65536.0f;
+                    m[5 + i] = static_cast<f32>(w1 & 0xFFFF) / 65536.0f;
+                    m[12 + i] = m[0 + i] + m[4 + i];
+                    m[13 + i] = m[1 + i] + m[5 + i];
+                } else if (pos == 0x20) {
+                    m[8 + i] = static_cast<s16>(w1 >> 16);
+                    m[9 + i] = static_cast<s16>(w1);
+                }
+                return true;
+            }
+            return false;
+        }
+        case 0xDC: { // G_MOVEMEM
+            const u32 idx = w0 & 0xFF;
+            const u32 src = segment_to_physical(w1);
+            if (idx == 14) { // G_MV_NORMALES: the per-vertex normals
+                cbfd_normal_base_ = src;
+                return true;
+            }
+            if (idx != 10 || src + 40 > rdram_size) return false;
+            const u32 n = ((w0 >> 5) & 0x3FFF) / 48;
+            auto dir = [&](u32 o) { return static_cast<s8>(rdram[src + o]) / 127.0f; };
+            if (n < 2) { // LookAt X / Y
+                Light& la = n == 0 ? lookat_x : lookat_y;
+                la = {rdram[src + 0], rdram[src + 1], rdram[src + 2], dir(8), dir(9), dir(10)};
+                lookat_set = true;
+                return true;
+            }
+            if (n - 2 >= cbfd_lights_.size()) return true;
+            CbfdLight& l = cbfd_lights_[n - 2];
+            l.r = rdram[src + 0] / 255.0f;
+            l.g = rdram[src + 1] / 255.0f;
+            l.b = rdram[src + 2] / 255.0f;
+            f32 x = static_cast<s8>(rdram[src + 8]), y = static_cast<s8>(rdram[src + 9]), z = static_cast<s8>(rdram[src + 10]);
+            const f32 len = std::sqrt(x * x + y * y + z * z);
+            if (len > 0.0f) { x /= len; y /= len; z /= len; }
+            l.x = x; l.y = y; l.z = z;
+            auto s16at = [&](u32 o) { return static_cast<f32>(static_cast<s16>((rdram[src + o] << 8) | rdram[src + o + 1])); };
+            l.px = s16at(32);
+            l.py = s16at(34);
+            l.pz = s16at(36);
+            l.ca = rdram[src + 12] / 16.0f;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi) {
     display_list_count++;
     dir_lights.clear();
@@ -1229,6 +1373,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             continue;
         }
         if (!keeps_draw_state(opcode)) draw_state_dirty_ = true;
+        if (cbfd_ && current_ucode == MicrocodeType::F3DEX2 && execute_cbfd_command(opcode, w0, w1, rdram, rdram_size))
+            continue;
 
         switch (opcode) {
             case 0x00: // G_SPNOOP
