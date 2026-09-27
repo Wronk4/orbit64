@@ -105,6 +105,14 @@ bool ucode_banner_is_cbfd(const u8* p, size_t len) {
     return gfx != std::string_view::npos && h.substr(gfx + 14, 7) == "F3DEXBG";
 }
 
+bool ucode_banner_is_non(const u8* p, size_t len) {
+    const std::string_view h(reinterpret_cast<const char*>(p), len);
+    const size_t gfx = h.find("RSP Gfx ucode ");
+    if (gfx == std::string_view::npos) return false;
+    const std::string_view name = h.substr(gfx + 14, 16);
+    return name.substr(0, name.find(' ')).find(".NoN") != std::string_view::npos;
+}
+
 RDP::RDP() {
     reset();
     if (const char* e = std::getenv("ORBIT64_PICK")) std::sscanf(e, "%d,%d,%d", &pick_x_, &pick_y_, &pick_frame_);
@@ -160,6 +168,7 @@ void RDP::reset() {
     prim_color = 0xFFFFFFFF;
     tex_max_level = prim_min_level = prim_lod_frac = 0;
     fog_mul = fog_ofs = 0;
+    no_near_clip_ = false;
     env_color = 0xFFFFFFFF;
     blend_color = 0;
     fog_color = 0;
@@ -1012,14 +1021,18 @@ void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram
         if (v0.x < -v0.w && v1.x < -v1.w && v2.x < -v2.w) return;
         if (v0.y > v0.w && v1.y > v1.w && v2.y > v2.w) return;
         if (v0.y < -v0.w && v1.y < -v1.w && v2.y < -v2.w) return;
-        if (v0.z > v0.w && v1.z > v1.w && v2.z > v2.w) return;
-        if (v0.z < -v0.w && v1.z < -v1.w && v2.z < -v2.w) return;
+        if (!no_near_clip_) {
+            if (v0.z > v0.w && v1.z > v1.w && v2.z > v2.w) return;
+            if (v0.z < -v0.w && v1.z < -v1.w && v2.z < -v2.w) return;
+        }
     }
 
     // Trivial acceptance: if all 3 vertices are completely inside all frustum planes
-    bool v0_in = (v0.w >= NEAR_W && v0.x >= -v0.w && v0.x <= v0.w && v0.y >= -v0.w && v0.y <= v0.w && v0.z >= -v0.w && v0.z <= v0.w);
-    bool v1_in = (v1.w >= NEAR_W && v1.x >= -v1.w && v1.x <= v1.w && v1.y >= -v1.w && v1.y <= v1.w && v1.z >= -v1.w && v1.z <= v1.w);
-    bool v2_in = (v2.w >= NEAR_W && v2.x >= -v2.w && v2.x <= v2.w && v2.y >= -v2.w && v2.y <= v2.w && v2.z >= -v2.w && v2.z <= v2.w);
+    // A .NoN microcode leaves depth out of it (it is clamped instead).
+    const bool zc = !no_near_clip_;
+    bool v0_in = (v0.w >= NEAR_W && v0.x >= -v0.w && v0.x <= v0.w && v0.y >= -v0.w && v0.y <= v0.w && (!zc || (v0.z >= -v0.w && v0.z <= v0.w)));
+    bool v1_in = (v1.w >= NEAR_W && v1.x >= -v1.w && v1.x <= v1.w && v1.y >= -v1.w && v1.y <= v1.w && (!zc || (v1.z >= -v1.w && v1.z <= v1.w)));
+    bool v2_in = (v2.w >= NEAR_W && v2.x >= -v2.w && v2.x <= v2.w && v2.y >= -v2.w && v2.y <= v2.w && (!zc || (v2.z >= -v2.w && v2.z <= v2.w)));
 
     if (v0_in && v1_in && v2_in) {
         rasterize_triangle(v0, v1, v2, rdram, rdram_size);
@@ -1045,10 +1058,12 @@ void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram
     if (poly1.size() < 3) return;
     clip_against([&](const Vertex& v) { return v.w - v.y; });
     if (poly1.size() < 3) return;
-    clip_against([&](const Vertex& v) { return v.w + v.z; });
-    if (poly1.size() < 3) return;
-    clip_against([&](const Vertex& v) { return v.w - v.z; });
-    if (poly1.size() < 3) return;
+    if (zc) {
+        clip_against([&](const Vertex& v) { return v.w + v.z; });
+        if (poly1.size() < 3) return;
+        clip_against([&](const Vertex& v) { return v.w - v.z; });
+        if (poly1.size() < 3) return;
+    }
 
     for (auto& v : poly1) {
         compute_screen_coords(v);
@@ -1979,6 +1994,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                             rdram + data_phys, std::min(dsize, rdram_size - data_phys));
                         if (t != MicrocodeType::Auto) {
                             current_ucode = current_ucode_active = t;
+                            no_near_clip_ = ucode_banner_is_non(rdram + data_phys, std::min(dsize, rdram_size - data_phys));
                             std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
                             break;
                         }

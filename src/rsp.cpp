@@ -291,6 +291,7 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
                 if (const MicrocodeType t = identify_ucode_banner(&rdram[phys], check_len); t != MicrocodeType::Auto) {
                     rdp.set_ucode_type(t);
                     rdp.set_cbfd(ucode_banner_is_cbfd(&rdram[phys], check_len));
+                    rdp.set_no_near_clip(ucode_banner_is_non(&rdram[phys], check_len));
                     return true;
                 }
                 // Require the longer "ucode S2DEX" anchor (part of the real credit
