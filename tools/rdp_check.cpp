@@ -13,7 +13,7 @@
 //
 //   bin/rdp_check rom.z64 [--frames N] [--scale S] [--warm N] [--int]
 //                 [--mash btn] [--press frame:btn] [--shot frame:out.png]
-//                 [--frame-log out.txt] [--timing] [--dump-ram out.bin]
+//                 [--frame-log out.txt] [--timing] [--dump-ram out.bin] [--raw frame:out.argb]
 //
 // --timing skips the per-frame hashing (it costs several ms per frame at
 // high scales). --frame-log writes one hash per frame, to find the first frame
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
     std::string rom, mash, frame_log, dump_ram;
     int frames = 900, scale = 1, warm = 300;
     bool interp = false, timing = false;
-    std::vector<std::pair<int, std::string>> presses, shots;
+    std::vector<std::pair<int, std::string>> presses, shots, raws;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -63,11 +63,11 @@ int main(int argc, char** argv) {
         else if (a == "--mash") mash = next();
         else if (a == "--frame-log") frame_log = next();
         else if (a == "--dump-ram") dump_ram = next();
-        else if (a == "--press" || a == "--shot") {
+        else if (a == "--press" || a == "--shot" || a == "--raw") {
             std::string v = next();
             size_t c = v.find(':');
             if (c == std::string::npos) continue;
-            (a == "--press" ? presses : shots).emplace_back(std::stoi(v.substr(0, c)), v.substr(c + 1));
+            (a == "--press" ? presses : a == "--shot" ? shots : raws).emplace_back(std::stoi(v.substr(0, c)), v.substr(c + 1));
         } else rom = a;
     }
     Emulator emu;
@@ -105,6 +105,12 @@ int main(int argc, char** argv) {
         if (flog) std::fprintf(flog, "%d %016llx\n", f, (unsigned long long)fnv(1469598103934665603ull, px.data(), px.size() * 4));
         for (const auto& s : shots)
             if (f == s.first) save_png(s.second, px, w, h);
+        for (const auto& r : raws)
+            if (f == r.first)
+                if (FILE* rf = std::fopen(r.second.c_str(), "wb")) {
+                    std::fwrite(px.data(), 4, px.size(), rf);
+                    std::fclose(rf);
+                }
     }
     auto t1 = Clock::now();
     if (flog) std::fclose(flog);

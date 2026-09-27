@@ -31,9 +31,10 @@ struct HiResSink {
         is16 = s.fb_size == 2;
     }
 
-    void write(u32 x, u32 y, u32 c, f32 z) {
+    void write(u32 x, u32 y, u32 c, f32 z, u8 shade_a = 255) {
         if (x >= width || y >= height) return;
         if (x < sx0 || x >= sx1 || y < sy0 || y >= sy1) return;
+        if (st.alpha_from_cvg) c |= 0xFF000000u;
         u8 a = (c >> 24) & 0xFF;
         if (st.alpha_compare == 1) {
             if (a < st.alpha_threshold) return;
@@ -45,9 +46,10 @@ struct HiResSink {
         if (st.z_compare && z > depth[idx]) return;
         if (st.z_update) depth[idx] = z;
         u8 r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-        if (st.blend_enabled && a < 255) {
+        const bool blend = st.blend_enabled && a < 255;
+        if (blend || !st.blend_pass_through) {
             u32 d = color[idx];
-            raster::blend_rgb(st, c, (d >> 16) & 0xFF, (d >> 8) & 0xFF, d & 0xFF, (d >> 24) & 0xFF, r, g, b);
+            raster::blend_pixel(st, c, shade_a, (d >> 16) & 0xFF, (d >> 8) & 0xFF, d & 0xFF, (d >> 24) & 0xFF, blend, r, g, b);
         }
 #ifdef HIRES_EXACT_TEST
         // Test builds: keep exactly what RDRAM holds, so that at scale 1 the

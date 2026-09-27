@@ -278,7 +278,8 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
            flag(st.combine_set, GPU_ST_COMBINED) | flag(st.need_tex0, GPU_ST_NEED_TEX0) |
            flag(st.need_tex1, GPU_ST_NEED_TEX1) | flag(st.blend_enabled, GPU_ST_BLEND) |
            flag(st.alpha_zero_kill, GPU_ST_ZERO_KILL) | flag(st.z_compare, GPU_ST_Z_COMPARE) |
-           flag(st.z_update, GPU_ST_Z_UPDATE) | flag(st.fb_size == 2, GPU_ST_16BIT);
+           flag(st.z_update, GPU_ST_Z_UPDATE) | flag(st.fb_size == 2, GPU_ST_16BIT) |
+           flag(st.blend_pass_through, GPU_ST_PASS_THROUGH) | flag(st.alpha_from_cvg, GPU_ST_ALPHA_CVG);
     w[1] = (st.tlut_type & 15) | (st.active_tile & 7) << 4 | static_cast<u32>(st.alpha_compare & 3) << 8 |
            static_cast<u32>(st.alpha_threshold) << 16;
     auto mux = [](u8 a, u8 b, u8 c, u8 d) {
@@ -319,6 +320,7 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
         tw[8] = fbits(tu.origin_t);
         tw[9] = GPU_NO_TABLE;
     }
+    w[GPU_ST_BLEND2] = mux(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b);
     w[GPU_ST_LOD] = flag(st.tex_lod_en, GPU_LOD_TEX_EN) | flag(st.sharpen, GPU_LOD_SHARPEN) |
                     flag(st.detail, GPU_LOD_DETAIL) | flag(st.dolod, GPU_LOD_DOLOD) |
                     static_cast<u32>(st.max_level) << 8 | static_cast<u32>(st.min_level) << 16 |

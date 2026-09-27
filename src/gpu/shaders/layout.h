@@ -60,15 +60,18 @@
 #define GPU_ST_Z_COMPARE (1u << 11)
 #define GPU_ST_Z_UPDATE (1u << 12)
 #define GPU_ST_16BIT (1u << 13)
+#define GPU_ST_PASS_THROUGH (1u << 14) // DrawState::blend_pass_through
+#define GPU_ST_ALPHA_CVG (1u << 15)    // DrawState::alpha_from_cvg
 // word 1: tlut type | active tile << 4 | alpha compare << 8 | alpha threshold << 16
 // words 2-5: colour combiner cycle 1 (a, b, c, d bytes), alpha cycle 1, colour cycle 2, alpha cycle 2
 // words 6-9: primitive, environment, blend and fog colour (RDP order: r in bits 24-31)
-// word 10: blender p | a << 8 | m << 16 | b << 24
+// word 10: blender cycle 1 p | a << 8 | m << 16 | b << 24 (word 97: cycle 2)
 // words 11-14: scissor x0, x1, y0, y1 at scale S, half-open
 // word 15: word offset of the TMEM snapshot
 // words 16..95: 8 tiles of GPU_TILE_WORDS
 // word 96: level of detail: flags | max level << 8 | min level << 16 | PRIM_LOD_FRAC << 24
 #define GPU_ST_LOD 96u
+#define GPU_ST_BLEND2 97u
 #define GPU_LOD_TEX_EN (1u << 0)
 #define GPU_LOD_SHARPEN (1u << 1)
 #define GPU_LOD_DETAIL (1u << 2)

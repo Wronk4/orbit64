@@ -144,11 +144,16 @@ struct DrawState {
     u8 cc_a1{0}, cc_b1{0}, cc_c1{0}, cc_d1{0}, ac_a1{0}, ac_b1{0}, ac_c1{0}, ac_d1{0};
     f32 prim_r{0}, prim_g{0}, prim_b{0}, prim_a{0};
     f32 env_r{0}, env_g{0}, env_b{0}, env_a{0};
-    u8 bl_p{0}, bl_a{0}, bl_m{0}, bl_b{0};
+    u8 bl_p{0}, bl_a{0}, bl_m{0}, bl_b{0};     // blender cycle 1 (the only one in 1-cycle mode)
+    u8 bl2_p{0}, bl2_a{0}, bl2_m{0}, bl2_b{0}; // blender cycle 2
+    bool blend_pass_through{true}; // an unblended pixel comes out of the blender as it went in
     bool blend_enabled{false};  // FORCE_BL / ZMODE_XLU: blend when alpha < 255
     u8 alpha_compare{0};        // G_AC_*: 0 none, 1 threshold, 3 dither
     u8 alpha_threshold{0};      // blend colour alpha
     bool alpha_zero_kill{false}; // CVG_X_ALPHA/ALPHA_CVG_SEL/FORCE_BL/ZMODE_XLU/IM_RD/AA_EN: drop alpha-0 pixels
+    // ALPHA_CVG_SEL without CVG_X_ALPHA: the pixel's alpha is its coverage
+    // (full inside a primitive), not what the combiner worked out.
+    bool alpha_from_cvg{false};
     bool z_compare{false}, z_update{false};
     // Texture level of detail: G_TEXTURE's level count, gDPSetPrimColor's
     // minimum level and fraction; derived: whether LOD is worked out at all.
@@ -203,16 +208,25 @@ struct DrawState {
         need_tex0 = c1_t0 || (two_cycle && c2_t0);
         need_tex1 = c1_t1 || (two_cycle && c2_t1);
 
-        // G_MDSFT_BLENDER=16: 1-cycle (and 2-cycle first pass) P/A/M/B at bits
-        // 30/26/22/18, the 2-cycle output pass at 28/24/20/16.
-        bl_p = (other_mode_l >> (two_cycle ? 28 : 30)) & 0x3;
-        bl_a = (other_mode_l >> (two_cycle ? 24 : 26)) & 0x3;
-        bl_m = (other_mode_l >> (two_cycle ? 20 : 22)) & 0x3;
-        bl_b = (other_mode_l >> (two_cycle ? 16 : 18)) & 0x3;
+        // G_MDSFT_BLENDER=16: the first cycle's P/A/M/B at bits 30/26/22/18,
+        // the second cycle's (2-cycle mode) at 28/24/20/16.
+        bl_p = (other_mode_l >> 30) & 0x3;
+        bl_a = (other_mode_l >> 26) & 0x3;
+        bl_m = (other_mode_l >> 22) & 0x3;
+        bl_b = (other_mode_l >> 18) & 0x3;
+        bl2_p = (other_mode_l >> 28) & 0x3;
+        bl2_a = (other_mode_l >> 24) & 0x3;
+        bl2_m = (other_mode_l >> 20) & 0x3;
+        bl2_b = (other_mode_l >> 16) & 0x3;
+        // In 2-cycle mode the first cycle always blends (that is where fog
+        // goes in); IN*0 + IN*1 and IN*A + IN*(1-A) change nothing.
+        const bool first_identity = bl_p == 0 && bl_m == 0 && ((bl_a == 3 && bl_b == 2) || bl_b == 0);
+        blend_pass_through = two_cycle ? (first_identity && bl2_p == 0) : bl_p == 0;
         blend_enabled = (other_mode_l & 0x4800) != 0;
         alpha_compare = other_mode_l & 0x3;
         alpha_threshold = blend_color & 0xFF;
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
+        alpha_from_cvg = (other_mode_l & 0x3000) == 0x2000;
         z_compare = (other_mode_l & 0x10) != 0;
         z_update = (other_mode_l & 0x20) != 0;
 
@@ -655,42 +669,50 @@ inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb,
             static_cast<u32>(out_b);
 }
 
-// RDP blender (G_BL_* P/A/M/B multiplexer): blends the combiner's output colour
-// against the frame buffer using the active render mode.
-inline void blend_rgb(const DrawState& st, u32 src_color, u8 dest_r, u8 dest_g, u8 dest_b, u8 dest_a,
-                      u8& out_r, u8& out_g, u8& out_b) {
-    u8 sr = (src_color >> 16) & 0xFF, sg = (src_color >> 8) & 0xFF, sb = src_color & 0xFF, sa = (src_color >> 24) & 0xFF;
-
-    auto pick_color = [&](u32 sel, f32& r, f32& g, f32& b) {
-        switch (sel) {
-            case 0: r = sr; g = sg; b = sb; break; // G_BL_CLR_IN
-            case 1: r = dest_r; g = dest_g; b = dest_b; break; // G_BL_CLR_MEM
-            case 2: // G_BL_CLR_BL (blend_color register; true 2-cycle intermediate not modeled)
-                r = (st.blend_color >> 24) & 0xFF; g = (st.blend_color >> 16) & 0xFF; b = (st.blend_color >> 8) & 0xFF;
-                break;
-            default: // G_BL_CLR_FOG
-                r = (st.fog_color >> 24) & 0xFF; g = (st.fog_color >> 16) & 0xFF; b = (st.fog_color >> 8) & 0xFF;
-                break;
-        }
+// The RDP blender. `in` is the combiner's output (its alpha is A_IN),
+// shade_a the shade alpha (A_SHADE: the fog factor when G_FOG is on), mem
+// the frame buffer pixel. `blend` says whether this pixel is blended
+// (FORCE_BL, ZMODE_XLU, ...); a cycle that doesn't blend passes its P input
+// on. In 2-cycle mode the first cycle always blends and the second one
+// takes its result as IN.
+inline void blend_pixel(const DrawState& st, u32 in, u8 shade_a, u8 mem_r, u8 mem_g, u8 mem_b, u8 mem_a, bool blend,
+                        u8& out_r, u8& out_g, u8& out_b) {
+    const f32 a_in = static_cast<f32>((in >> 24) & 0xFF);
+    auto cycle = [&](u8 p, u8 a, u8 m, u8 b, f32 ir, f32 ig, f32 ib, bool eq, f32& r, f32& g, f32& bl) {
+        auto pick = [&](u8 sel, f32& x, f32& y, f32& z) {
+            switch (sel) {
+                case 0: x = ir; y = ig; z = ib; break; // G_BL_CLR_IN
+                case 1: x = mem_r; y = mem_g; z = mem_b; break; // G_BL_CLR_MEM
+                case 2: // G_BL_CLR_BL
+                    x = (st.blend_color >> 24) & 0xFF; y = (st.blend_color >> 16) & 0xFF; z = (st.blend_color >> 8) & 0xFF;
+                    break;
+                default: // G_BL_CLR_FOG
+                    x = (st.fog_color >> 24) & 0xFF; y = (st.fog_color >> 16) & 0xFF; z = (st.fog_color >> 8) & 0xFF;
+                    break;
+            }
+        };
+        f32 pr, pg, pb;
+        pick(p, pr, pg, pb);
+        if (!eq) { r = pr; g = pg; bl = pb; return; }
+        const f32 A = a == 0 ? a_in : a == 1 ? static_cast<f32>(st.fog_color & 0xFF) : a == 2 ? static_cast<f32>(shade_a) : 0.0f;
+        const f32 B = b == 0 ? 255.0f - A : b == 1 ? static_cast<f32>(mem_a) : b == 2 ? 255.0f : 0.0f;
+        f32 mr, mg, mb;
+        pick(m, mr, mg, mb);
+        // Whole numbers between the cycles, as the hardware keeps 8 bits.
+        r = std::floor(std::clamp((pr * A + mr * B) / 255.0f, 0.0f, 255.0f));
+        g = std::floor(std::clamp((pg * A + mg * B) / 255.0f, 0.0f, 255.0f));
+        bl = std::floor(std::clamp((pb * A + mb * B) / 255.0f, 0.0f, 255.0f));
     };
-    // A_IN/A_FOG/A_SHADE all approximated as the fragment's final alpha: this pipeline
-    // doesn't track a separate depth-based fog factor or pre-combine shade alpha here.
-    f32 A = (st.bl_a == 3) ? 0.0f : static_cast<f32>(sa);
-    f32 B;
-    switch (st.bl_b) {
-        case 0: B = 255.0f - A; break;  // G_BL_1MA
-        case 1: B = dest_a; break;      // G_BL_A_MEM
-        case 2: B = 255.0f; break;      // G_BL_1
-        default: B = 0.0f; break;       // G_BL_0
+    f32 r = static_cast<f32>((in >> 16) & 0xFF), g = static_cast<f32>((in >> 8) & 0xFF), b = static_cast<f32>(in & 0xFF);
+    if (st.two_cycle) {
+        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, true, r, g, b);
+        cycle(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b, r, g, b, blend, r, g, b);
+    } else {
+        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, blend, r, g, b);
     }
-
-    f32 pr, pg, pb, mr, mg, mb;
-    pick_color(st.bl_p, pr, pg, pb);
-    pick_color(st.bl_m, mr, mg, mb);
-
-    out_r = static_cast<u8>(std::clamp((pr * A + mr * B) / 255.0f, 0.0f, 255.0f));
-    out_g = static_cast<u8>(std::clamp((pg * A + mg * B) / 255.0f, 0.0f, 255.0f));
-    out_b = static_cast<u8>(std::clamp((pb * A + mb * B) / 255.0f, 0.0f, 255.0f));
+    out_r = static_cast<u8>(r);
+    out_g = static_cast<u8>(g);
+    out_b = static_cast<u8>(b);
 }
 
 // Signed screen-space area (twice the triangle's area); its sign is the winding.
@@ -702,7 +724,7 @@ inline f32 triangle_area(const V& v0, const V& v1, const V& v2) {
 // Rasterizes one (already culled) triangle at `scale` times the frame buffer
 // resolution, visiting only output rows [row_begin, row_end). Pixels whose
 // centre lies inside the triangle are shaded and handed to
-// sink.write(x, y, colour, z). V is any vertex type with the screen-space
+// sink.write(x, y, colour, z, shade alpha). V is any vertex type with the screen-space
 // fields of Vertex. Returns false when the scissor leaves nothing to draw.
 // The scissored bounding box triangle() scans at `scale`; false if it is
 // empty (nothing is drawn). Rows int(min_y) .. int(max_y) are the only ones
@@ -790,6 +812,7 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     b = v0.b;
                     a = v0.a;
                 }
+                const u8 shade_a = a; // the blender's A_SHADE
 
                 u32 color;
                 if (textured) {
@@ -834,7 +857,7 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     }
                 }
 
-                sink.write(static_cast<u32>(x), static_cast<u32>(y), color, z);
+                sink.write(static_cast<u32>(x), static_cast<u32>(y), color, z, shade_a);
             }
         }
     }

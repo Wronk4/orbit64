@@ -43,7 +43,9 @@ struct RDP::NativeSink {
     u32* shadow;
     size_t shadow_len;
     PixelStats& stats;
-    void write(u32 x, u32 y, u32 color, f32 z) { rdp.write_pixel(st, x, y, color, z, rdram, rdram_size, shadow, shadow_len, stats); }
+    void write(u32 x, u32 y, u32 color, f32 z, u8 shade_a = 255) {
+        rdp.write_pixel(st, x, y, color, z, rdram, rdram_size, shadow, shadow_len, stats, shade_a);
+    }
 };
 
 Matrix4x4 Matrix4x4::identity() {
@@ -157,6 +159,7 @@ void RDP::reset() {
     fill_color = 0;
     prim_color = 0xFFFFFFFF;
     tex_max_level = prim_min_level = prim_lod_frac = 0;
+    fog_mul = fog_ofs = 0;
     env_color = 0xFFFFFFFF;
     blend_color = 0;
     fog_color = 0;
@@ -751,7 +754,19 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
             v.r = cr; v.g = cg; v.b = cb;
             v.a = ca;
         }
+        // G_FOG: the shade alpha is the fog factor, z/w scaled and offset as
+        // gSPFogPosition set it up (0 behind the eye), for the blender's A_SHADE.
+        if ((geometry_mode & 0x00010000) && !dkr && fog_supported(ucode)) {
+            const f32 f = v.w > 0.0f ? (v.z / v.w) * fog_mul + fog_ofs : 0.0f;
+            v.a = static_cast<u8>(std::clamp(f, 0.0f, 255.0f));
+        }
     }
+}
+
+// The microcodes whose G_FOG puts the fog factor in the shade alpha.
+bool RDP::fog_supported(MicrocodeType u) {
+    return u == MicrocodeType::Fast3D || u == MicrocodeType::F3DEX || u == MicrocodeType::F3DEX2 ||
+           u == MicrocodeType::F3DGOLDEN || u == MicrocodeType::F3DPD;
 }
 
 void RDP::compute_screen_coords(Vertex& v) const {
@@ -942,9 +957,9 @@ void RDP::debug_pick(u32 a, u32 b, u32 c) const {
     };
     const f32 e0 = edge(A, B, px, py), e1 = edge(B, C, px, py), e2 = edge(C, A, px, py);
     if (!((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0))) return;
-    std::fprintf(stderr, "PICK dl=%08x ucode=%d geom=%08x omh=%08x oml=%08x comb=%08x:%08x prim=%08x env=%08x tex=%d tile=%u\n",
+    std::fprintf(stderr, "PICK dl=%08x ucode=%d geom=%08x omh=%08x oml=%08x comb=%08x:%08x prim=%08x env=%08x fog=%08x fm=%d fo=%d tex=%d tile=%u\n",
                  capture_dl_addr, static_cast<int>(current_ucode_active), geometry_mode, other_mode_h, other_mode_l,
-                 combine_mode_w0, combine_mode_w1, prim_color, env_color, texture_enabled, active_tile);
+                 combine_mode_w0, combine_mode_w1, prim_color, env_color, fog_color, fog_mul, fog_ofs, texture_enabled, active_tile);
     for (int i = 0; i < 2; ++i) {
         const Tile& t = tiles[(active_tile + i) & 7];
         std::fprintf(stderr, "  tile%d fmt=%u siz=%u line=%u tmem=%u pal=%u cms=%u/%u/%u/%u cmt=%u/%u/%u/%u sl=%u tl=%u sh=%u th=%u\n",
@@ -1115,6 +1130,9 @@ void RDP::execute_moveword(u32 w0, u32 w1, MicrocodeType current_ucode) {
     } else if (type == 0x08 && is_s2dex_ucode(current_ucode)) { // G_MW_GENSTAT (S2DEX gSPSetStatus)
         u32 slot = offset / 4;
         if (slot < 4) s2d_genstat[slot] = w1;
+    } else if (type == 0x08) { // G_MW_FOG: gSPFogPosition's multiplier and offset
+        fog_mul = static_cast<s16>(w1 >> 16);
+        fog_ofs = static_cast<s16>(w1 & 0xFFFF);
     } else if (type == 0x0C) { // G_MW_POINTS (Fast3D gsSPModifyVertex)
         u32 vtx_idx = offset / 40;
         u8 where = offset % 40;
@@ -2478,19 +2496,20 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
 }
 
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size) {
-    write_pixel(st, x, y, color, z, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels);
+    write_pixel(st, x, y, color, z, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels, 255);
 }
 
 // Thread-safe for pixels of distinct rows of one colour image (the native
 // pass's bands): it only touches that pixel's RDRAM, depth and shadow entry.
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
-                      u32* shadow, size_t shadow_len, PixelStats& stats) {
+                      u32* shadow, size_t shadow_len, PixelStats& stats, u8 shade_a) {
     u32 fb_w = st.fb_w;
     if (x >= fb_w || y >= kMaxFbLines) return;
     u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? st.scissor_lrx : fb_w;
     u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? st.scissor_lry : kMaxFbLines;
     if (x < st.scissor_ulx || x >= eff_lrx || y < st.scissor_uly || y >= eff_lry) return;
 
+    if (st.alpha_from_cvg) color |= 0xFF000000u; // the alpha is the (full) coverage
     u8 a = (color >> 24) & 0xFF;
     if (st.alpha_compare == 1) { // G_AC_THRESHOLD
         if (a < st.alpha_threshold) return;
@@ -2525,13 +2544,14 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
 
         u32 idx = st.fb_addr + pixel_idx * 2;
         if (idx + 1 < rdram_size) {
-            if (st.blend_enabled && a < 255) {
+            const bool blend = st.blend_enabled && a < 255;
+            if (blend || !st.blend_pass_through) {
                 u16 dest_p = (static_cast<u16>(rdram[idx + 0]) << 8) | static_cast<u16>(rdram[idx + 1]);
                 u8 dest_r = ((dest_p >> 11) & 0x1F) * 255 / 31;
                 u8 dest_g = ((dest_p >> 6) & 0x1F) * 255 / 31;
                 u8 dest_b = ((dest_p >> 1) & 0x1F) * 255 / 31;
                 u8 dest_a = (dest_p & 1) ? 255 : 0;
-                raster::blend_rgb(st, color, dest_r, dest_g, dest_b, dest_a, r, g, b);
+                raster::blend_pixel(st, color, shade_a, dest_r, dest_g, dest_b, dest_a, blend, r, g, b);
             }
 
             u16 p = (((r * 31 / 255) & 0x1F) << 11) |
@@ -2550,12 +2570,13 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
             u8 g = (color >> 8) & 0xFF;
             u8 b = color & 0xFF;
 
-            if (st.blend_enabled && a < 255) {
+            const bool blend = st.blend_enabled && a < 255;
+            if (blend || !st.blend_pass_through) {
                 u8 dest_r = rdram[idx + 0];
                 u8 dest_g = rdram[idx + 1];
                 u8 dest_b = rdram[idx + 2];
                 u8 dest_a = rdram[idx + 3];
-                raster::blend_rgb(st, color, dest_r, dest_g, dest_b, dest_a, r, g, b);
+                raster::blend_pixel(st, color, shade_a, dest_r, dest_g, dest_b, dest_a, blend, r, g, b);
             }
 
             rdram[idx + 0] = r;

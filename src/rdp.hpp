@@ -156,7 +156,7 @@ public:
         s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
-        s(tex_max_level, prim_min_level, prim_lod_frac);
+        s(tex_max_level, prim_min_level, prim_lod_frac, fog_mul, fog_ofs);
         s(cbfd_, cbfd_advanced_, cbfd_normal_base_, cbfd_coord_mod_, cbfd_lights_, cbfd_num_lights_);
         s.fixed(internal_zbuffer);
         // G_MTX pushes a copy of the top of the stack, which must exist.
@@ -314,6 +314,8 @@ private:
     u8 tex_max_level{0};  // G_TEXTURE: mip-map levels past the first
     u8 prim_min_level{0}; // G_SETPRIMCOLOR: minimum level of detail (1/32 texels)
     u8 prim_lod_frac{0};  // G_SETPRIMCOLOR: PRIM_LOD_FRAC
+    s16 fog_mul{0}, fog_ofs{0}; // G_MW_FOG
+    static bool fog_supported(MicrocodeType u);
 
     // F3DEXBG (Conker's Bad Fur Day). Lights 0..n-1 (the last one
     // directional, the others point lights), then the ambient colour.
@@ -400,7 +402,7 @@ private:
     // coverage rules; the short form uses hires_shadow_ and the global counters.
     void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size);
     void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
-                     u32* shadow, size_t shadow_len, PixelStats& stats);
+                     u32* shadow, size_t shadow_len, PixelStats& stats, u8 shade_a);
 
     // Pixel pipeline state (raster.hpp) for the next draw. Display list
     // commands that can change it mark it dirty; see process_display_list().
