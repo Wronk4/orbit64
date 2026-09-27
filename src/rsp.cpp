@@ -239,6 +239,10 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
                         std::cout << "[UCODE-BANNER-RAW] ptr=0x" << std::hex << ptr << std::dec << " text=\"" << clean.substr(0, 200) << "\"\n";
                     }
                 }
+                if (const MicrocodeType t = identify_ucode_banner(&rdram[phys], check_len); t != MicrocodeType::Auto) {
+                    rdp.set_ucode_type(t);
+                    return true;
+                }
                 // Require the longer "ucode S2DEX" anchor (part of the real credit
                 // string "RSP Gfx ucode S2DEX ...") rather than a bare "S2DEX"/
                 // "S2DEX2" substring: this region isn't always a text banner (it can

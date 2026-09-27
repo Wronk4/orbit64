@@ -260,7 +260,8 @@ u32 Cartridge::get_cic_id() const {
         case CICType::CIC_6101: return 6101;
         case CICType::CIC_6103: return 6103;
         case CICType::CIC_6105: return 6105;
-        case CICType::CIC_6106: return 6106;
+        // What the IPL3s store (osCicId, IMEM[0]): the 6106 one says 6104.
+        case CICType::CIC_6106: return 6104;
         default: return 6102;
     }
 }

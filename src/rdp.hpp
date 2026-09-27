@@ -56,6 +56,11 @@ enum class MicrocodeType {
     F3DJFG  // Jet Force Gemini: F3DDKR with a different vertex count and matrix multiply
 };
 
+// Identifies a graphics microcode from its credit string ("RSP Gfx ucode
+// F3DEX.NoN 1.23 Yoshitaka Yasumoto Nintendo.", "RSP SW Version: 2.0G ...")
+// in its data segment: the first one in [p, p + len). A 2.x version means the
+// GBI-2 (F3DEX2 / S2DEX2) command set. Auto when there is none.
+MicrocodeType identify_ucode_banner(const u8* p, size_t len);
 
 class MI;
 
@@ -338,8 +343,6 @@ private:
     void s2dex_draw_obj_sprite(u32 sp_addr, u8* rdram, size_t rdram_size);
     void s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size);
     void s2dex_load_txtr(u32 tx_addr, u8* rdram, size_t rdram_size);
-    void s2dex_tmem_load_block(u32 tmem_dest_words, u32 src_addr, u32 lrs, u8* rdram, size_t rdram_size);
-    void s2dex_tmem_load_tile(u32 tmem_dest_words, u32 src_addr, u32 texel_w, u32 texel_h, u8* rdram, size_t rdram_size);
 
     // Internal Z-buffer (for depth testing)
     std::vector<f32> internal_zbuffer;

@@ -13,7 +13,7 @@
 //
 //   bin/rdp_check rom.z64 [--frames N] [--scale S] [--warm N] [--int]
 //                 [--mash btn] [--press frame:btn] [--shot frame:out.png]
-//                 [--frame-log out.txt] [--timing]
+//                 [--frame-log out.txt] [--timing] [--dump-ram out.bin]
 //
 // --timing skips the per-frame hashing (it costs several ms per frame at
 // high scales). --frame-log writes one hash per frame, to find the first frame
@@ -48,7 +48,7 @@ static void save_png(const std::string& path, const std::vector<u32>& px, int w,
 }
 
 int main(int argc, char** argv) {
-    std::string rom, mash, frame_log;
+    std::string rom, mash, frame_log, dump_ram;
     int frames = 900, scale = 1, warm = 300;
     bool interp = false, timing = false;
     std::vector<std::pair<int, std::string>> presses, shots;
@@ -62,6 +62,7 @@ int main(int argc, char** argv) {
         else if (a == "--timing") timing = true;
         else if (a == "--mash") mash = next();
         else if (a == "--frame-log") frame_log = next();
+        else if (a == "--dump-ram") dump_ram = next();
         else if (a == "--press" || a == "--shot") {
             std::string v = next();
             size_t c = v.find(':');
@@ -107,6 +108,12 @@ int main(int argc, char** argv) {
     }
     auto t1 = Clock::now();
     if (flog) std::fclose(flog);
+    if (!dump_ram.empty()) {
+        if (FILE* f = std::fopen(dump_ram.c_str(), "wb")) {
+            std::fwrite(emu.get_bus().get_rdram(), 1, emu.get_bus().get_rdram_size(), f);
+            std::fclose(f);
+        }
+    }
     const uint64_t rdram_hash = fnv(1469598103934665603ull, emu.get_bus().get_rdram(), emu.get_bus().get_rdram_size());
     const double after = std::chrono::duration<double>(t1 - t_warm).count();
     std::fprintf(stderr, "rdram=%016llx frames=%016llx size=%dx%d total=%.2fs fps_after_warm=%.1f\n",

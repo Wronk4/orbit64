@@ -64,19 +64,22 @@ void Emulator::reset() {
             std::memcpy(rdram + 0x4, rom.data() + 0x554, 0x888 - 0x554);
 
         // Just before jumping to the game, the 6101/6102 IPL3 clears SP DMEM
-        // and IMEM, and the 6103 one fills them with 0xFF and stores its CIC
-        // number (6103 = 0x17D7) in the first IMEM word. Diddy Kong Racing
+        // and IMEM, and the 6103/6106 ones fill them with 0xFF and store
+        // their osCicId (below) in the first IMEM word. Diddy Kong Racing
         // checks that the first DMEM word is -1 and, if not, burns ~10
-        // million cycles every frame (a new picture only every 11 VIs).
-        // (6105/6106 are left as they were: not checked.)
+        // million cycles every frame (a new picture only every 11 VIs);
+        // Yoshi's Story checks it too and never starts its graphics thread.
+        // (6105 is left as it was: not checked.)
         const CICType cic = cart.get_cic_type();
         if (cic == CICType::CIC_6101 || cic == CICType::CIC_6102) {
             std::memset(rsp.get_dmem(), 0x00, 0x1000);
             std::memset(rsp.get_imem(), 0x00, 0x1000);
-        } else if (cic == CICType::CIC_6103) {
+        } else if (cic == CICType::CIC_6103 || cic == CICType::CIC_6106) {
             std::memset(rsp.get_dmem(), 0xFF, 0x1000);
             std::memset(rsp.get_imem(), 0xFF, 0x1000);
-            static const u8 cic_number[4] = {0x00, 0x00, 0x17, 0xD7};
+            const u32 id = cart.get_cic_id();
+            const u8 cic_number[4] = {static_cast<u8>(id >> 24), static_cast<u8>(id >> 16),
+                                      static_cast<u8>(id >> 8), static_cast<u8>(id)};
             std::memcpy(rsp.get_imem(), cic_number, 4);
         }
     }
@@ -93,7 +96,7 @@ void Emulator::reset() {
     write_u32(0x304, 0);          // osRomType (0 = cartridge)
     write_u32(0x308, 0x10000000); // osRomBase (Cartridge Domain 1)
     write_u32(0x30C, 0);          // osResetType
-    write_u32(0x310, cart.get_cic_id());   // osCicId (e.g. 6105 = 0x17D9)
+    write_u32(0x310, cart.get_cic_id());   // osCicId (e.g. 6105 = 0x17D9, 6106 = 0x17D8)
     write_u32(0x314, 0);          // osVersion
     // osMemSize: 8 MB with the Expansion Pak, 4 MB without.
     const u32 mem_size = bus.get_ram_limit();

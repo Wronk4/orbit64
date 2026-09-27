@@ -32,9 +32,9 @@ SHOTS = [240, 600, 900, 1200, 1500]  # frames (scaled with --frames)
 PRESSES = [(480, "START"), (840, "START"), (900, "A"), (1080, "A"), (1260, "START"), (1320, "A")]
 
 
-def find_roms(filt):
+def find_roms(filt, top):
     roms = []
-    for d, _, files in os.walk(os.path.join(ROOT, "roms")):
+    for d, _, files in os.walk(top):
         for f in files:
             if f.lower().endswith((".z64", ".n64", ".v64")) and (not filt or filt.lower() in f.lower()):
                 roms.append(os.path.join(d, f))
@@ -227,6 +227,7 @@ def main():
     ap.add_argument("--frames", type=int, default=1800)
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 4))
     ap.add_argument("--filter", default="")
+    ap.add_argument("--roms", default=os.path.join(ROOT, "roms"), help="folder to search for ROMs (default roms/)")
     ap.add_argument("--cpu", default="jit", choices=["jit", "interp"])
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--out", default=os.path.join(ROOT, "test_output", "compat"))
@@ -234,9 +235,9 @@ def main():
     ap.add_argument("--exe", default=os.path.join(ROOT, "bin", "n64.exe" if os.name == "nt" else "n64"))
     args = ap.parse_args()
 
-    roms = find_roms(args.filter)
+    roms = find_roms(args.filter, args.roms)
     if not roms:
-        print("No ROMs found in roms/")
+        print(f"No ROMs found in {args.roms}")
         return 1
     os.makedirs(args.out, exist_ok=True)
     compare = {}

@@ -73,6 +73,30 @@ void Matrix4x4::transform_point(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz, 
     if (ow == 0.0f) ow = 0.0001f;
 }
 
+MicrocodeType identify_ucode_banner(const u8* p, size_t len) {
+    const std::string_view h(reinterpret_cast<const char*>(p), len);
+    const size_t gfx = h.find("RSP Gfx ucode ");
+    const size_t sw = h.find("RSP SW Version");
+    if (sw != std::string_view::npos && sw < gfx)
+        return h.substr(sw, 32).find("2.0G") != std::string_view::npos ? MicrocodeType::F3DGOLDEN
+                                                                         : MicrocodeType::Fast3D;
+    if (gfx == std::string_view::npos) return MicrocodeType::Auto;
+    const std::string_view text = h.substr(gfx + 14, 48);
+    // The version is the first "<digit>.<digit>" in it.
+    int major = -1;
+    for (size_t i = 0; i + 2 < text.size(); ++i)
+        if (text[i] >= '0' && text[i] <= '9' && text[i + 1] == '.' && text[i + 2] >= '0' && text[i + 2] <= '9' &&
+            (i == 0 || text[i - 1] == ' ')) {
+            major = text[i] - '0';
+            break;
+        }
+    const bool gbi2 = major >= 2;
+    if (text.substr(0, 5) == "S2DEX") return gbi2 ? MicrocodeType::S2DEX2 : MicrocodeType::S2DEX;
+    if (text.substr(0, 3) == "F3D" || text.substr(0, 3) == "L3D")
+        return gbi2 ? MicrocodeType::F3DEX2 : MicrocodeType::F3DEX;
+    return MicrocodeType::Auto;
+}
+
 RDP::RDP() {
     reset();
     if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
@@ -1042,6 +1066,9 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
     } flush_on_exit{*this, hires_.get()};
 
     MicrocodeType current_ucode = ucode_type;
+    // S2DEX keeps its status words in DMEM, which every task (and every
+    // microcode load) starts from the microcode's data: zero.
+    std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
 
     // The banner sniff (rsp.cpp / G_LOAD_UCODE below) can find a real, but
     // *stale or unrelated*, ucode credit string sitting in RDRAM: some ROMs
@@ -1065,7 +1092,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
         bool confirmed_not_s2dex = false;
         u32 scan_pc = dl_addr;
         int depth = 0; // how many G_DL branches we've followed while scanning
-        for (int i = 0; i < 400 && depth < 12 && !confirmed_not_s2dex; ++i) {
+        std::vector<u32> scan_stack;
+        for (int i = 0; i < 400 && depth < 64 && !confirmed_not_s2dex; ++i) {
             u32 phys = segment_to_physical(scan_pc);
             if (phys + 8 > rdram_size) break;
             u8 op = rdram[phys];
@@ -1077,22 +1105,31 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                      (static_cast<u32>(rdram[phys + 5]) << 16) |
                      (static_cast<u32>(rdram[phys + 6]) << 8)  |
                       static_cast<u32>(rdram[phys + 7]);
+            const bool gbi2 = current_ucode == MicrocodeType::S2DEX2;
             if (op == 0xD9) { confirmed_not_s2dex = true; break; }
-            bool is_zero_l_opcode = (current_ucode == MicrocodeType::S2DEX2)
+            bool is_zero_l_opcode = gbi2
                 ? (op == 0x01 || op == 0x02 || op == 0x09 || op == 0x0a)   // OBJ_RECT/SPRITE, BG_1CYC/COPY
                 : (op == 0x01 || op == 0x02 || op == 0x03 || op == 0x04);  // BG_1CYC/COPY, OBJ_RECT/SPRITE
             if (is_zero_l_opcode) {
                 if ((w0 & 0x00FFFFFF) != 0) { confirmed_not_s2dex = true; break; }
-                if (w1 != 0) confirmed_s2dex = true; // a real DMA pointer, not just a zeroed-out slot
+                if (w1 != 0) { confirmed_s2dex = true; break; } // a real DMA pointer, not just a zeroed-out slot
             }
-            if (op == 0xDE) { // G_DL: most top-level S2DEX/F3D lists are mostly
+            // Past a G_LOAD_UCODE the list is some other microcode's.
+            if (op == (gbi2 ? 0xDD : 0xAF)) break;
+            if (op == (gbi2 ? 0xDE : 0x06)) { // G_DL: most top-level S2DEX/F3D lists are mostly
                                // branches to sub-lists, so follow it to actually
                                // sample real content instead of scanning pointers.
+                if (((w0 >> 16) & 0xFF) == 0) scan_stack.push_back(scan_pc + 8);
                 scan_pc = w1;
                 depth++;
                 continue;
             }
-            if (op == 0xDF) break; // G_ENDDL: nothing more to learn from this branch
+            if (op == (gbi2 ? 0xDF : 0xB8)) { // G_ENDDL: back to the caller
+                if (scan_stack.empty()) break;
+                scan_pc = scan_stack.back();
+                scan_stack.pop_back();
+                continue;
+            }
             scan_pc += 8;
         }
         if (!confirmed_s2dex || confirmed_not_s2dex) {
@@ -1707,6 +1744,21 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                     }
                     return false;
                 };
+                // The banner is in the data segment (RDPHALF_1), often past
+                // the first 256 bytes: look through all of it first.
+                if (rdp_half1 != 0) {
+                    const u32 data_phys = segment_to_physical(rdp_half1);
+                    const size_t dsize = std::min<size_t>((w0 & 0xFFFF) + 1, 0x800);
+                    if (data_phys < rdram_size) {
+                        const MicrocodeType t = identify_ucode_banner(
+                            rdram + data_phys, std::min(dsize, rdram_size - data_phys));
+                        if (t != MicrocodeType::Auto) {
+                            current_ucode = current_ucode_active = t;
+                            std::fill(std::begin(s2d_genstat), std::end(s2d_genstat), 0u);
+                            break;
+                        }
+                    }
+                }
                 if (!check_header(w1) && rdp_half1 != 0) {
                     check_header(rdp_half1);
                 }
@@ -1840,7 +1892,12 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 u32 src = timg_addr + (ult * timg_width + uls) * 2;
                 native_before_read(src, static_cast<u64>(src) + count * 2);
                 u32 start_word = tiles[tile_idx].tmem;
-                u32 tmem_dest = start_word * 8;
+                // TMEM keeps palettes packed, entry i at 0x800 + 2i
+                // (raster::lookup_tlut); the hardware quadruples each entry
+                // into its own 64-bit word, so the load at word 256 + n
+                // (gDPLoadTLUT_pal16 with palette n / 16) starts at entry n.
+                u32 tmem_dest = start_word >= 256 ? 0x800 + (start_word - 256) * 2 : start_word * 8;
+                start_word = tmem_dest / 8;
                 u32 bytes = count * 2;
 
                 for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src + b < rdram_size); ++b) {
@@ -2653,137 +2710,44 @@ u32 s2d_bg_row_stride_bytes(u16 image_w_raw, u8 siz) {
 
 } // namespace
 
-void RDP::s2dex_tmem_load_block(u32 tmem_dest_words, u32 src_addr, u32 lrs, u8* rdram, size_t rdram_size) {
-    native_before_read(src_addr, static_cast<u64>(src_addr) + (static_cast<u64>(lrs) + 1) * 8);
-    tmem_dirty = true;
-    ++tmem_gen_;
-    // Mirrors the G_LOADBLOCK opcode handler: a (mostly) format-agnostic raw
-    // copy of (lrs+1) TMEM words. uObjTxtrBlock_t doesn't carry its own
-    // format/size (S2DEX derives them from the ambient G_SETTIMG state, same
-    // as a plain F3D G_LOADBLOCK would), hence the use of timg_size here.
-    u32 tmem_dest = tmem_dest_words * 8;
-    u32 words = lrs + 1;
-    if (timg_size == 3) { // 32-bit: split into RG/BA TMEM banks
-        for (u32 i = 0; i < words; ++i) {
-            u32 dram_idx = src_addr + i * 4;
-            u32 rg_dest = tmem_dest + i * 2;
-            u32 ba_dest = rg_dest + 0x800;
-            if (dram_idx + 3 < rdram_size && ba_dest + 1 < tmem.size()) {
-                tmem[rg_dest + 0] = rdram[dram_idx + 0];
-                tmem[rg_dest + 1] = rdram[dram_idx + 1];
-                tmem[ba_dest + 0] = rdram[dram_idx + 2];
-                tmem[ba_dest + 1] = rdram[dram_idx + 3];
-            }
-        }
-        for (u32 w = 0; w < words && (tmem_dest_words + w < 512); ++w) {
-            tmem_word_dxt_zero[tmem_dest_words + w] = false;
-        }
-    } else {
-        u32 bytes;
-        switch (timg_size) {
-            case 0: bytes = (words + 1) / 2; break;
-            case 1: bytes = words; break;
-            default: bytes = words * 2; break;
-        }
-        for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src_addr + b < rdram_size); ++b) {
-            tmem[tmem_dest + b] = rdram[src_addr + b];
-        }
-        u32 num_words = (bytes + 7) / 8;
-        for (u32 w = 0; w < num_words && (tmem_dest_words + w < 512); ++w) {
-            tmem_word_dxt_zero[tmem_dest_words + w] = false;
-        }
-    }
-}
-
-void RDP::s2dex_tmem_load_tile(u32 tmem_dest_words, u32 src_addr, u32 texel_w, u32 texel_h, u8* rdram, size_t rdram_size) {
-    native_before_read(src_addr, static_cast<u64>(src_addr) + (static_cast<u64>(texel_h) + 1) *
-                                     (static_cast<u64>(std::max<u32>(timg_width, texel_w)) + 1) * 4);
-    tmem_dirty = true;
-    ++tmem_gen_;
-    // Approximates G_LOADTILE for the OBJ_LOADTXTR "tile" load type: copies a
-    // texel_w x texel_h block, using the ambient G_SETTIMG width as the
-    // source row stride and packing TMEM tightly (no destination line
-    // padding, since uObjTxtrTile_t doesn't give us one).
-    u32 tmem_dest = tmem_dest_words * 8;
-    u32 src_row_texels = timg_width ? timg_width : texel_w;
-
-    if (timg_size == 3) { // 32-bit
-        for (u32 row = 0; row < texel_h; ++row) {
-            u32 dram_row = src_addr + row * src_row_texels * 4;
-            u32 tmem_row_rg = tmem_dest + row * texel_w * 2;
-            u32 tmem_row_ba = tmem_row_rg + 0x800;
-            for (u32 col = 0; col < texel_w; ++col) {
-                u32 dram_idx = dram_row + col * 4;
-                u32 rg_idx = tmem_row_rg + col * 2;
-                u32 ba_idx = tmem_row_ba + col * 2;
-                if (dram_idx + 3 < rdram_size && ba_idx + 1 < tmem.size()) {
-                    tmem[rg_idx + 0] = rdram[dram_idx + 0];
-                    tmem[rg_idx + 1] = rdram[dram_idx + 1];
-                    tmem[ba_idx + 0] = rdram[dram_idx + 2];
-                    tmem[ba_idx + 1] = rdram[dram_idx + 3];
-                }
-            }
-            u32 rg_w0 = tmem_row_rg / 8;
-            u32 rg_w1 = (tmem_row_rg + texel_w * 2 + 7) / 8;
-            for (u32 w = rg_w0; w < rg_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-            u32 ba_w0 = (tmem_row_rg + 0x800) / 8;
-            u32 ba_w1 = (tmem_row_rg + 0x800 + texel_w * 2 + 7) / 8;
-            for (u32 w = ba_w0; w < ba_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-        }
-        return;
-    }
-
-    u32 bpp_shift = (timg_size == 2) ? 1 : 0;
-    u32 src_row_bytes = (timg_size == 0) ? ((src_row_texels + 1) / 2) : (src_row_texels << bpp_shift);
-    u32 dst_row_bytes = (timg_size == 0) ? ((texel_w + 1) / 2) : (texel_w << bpp_shift);
-
-    for (u32 row = 0; row < texel_h; ++row) {
-        u32 dram_row = src_addr + row * src_row_bytes;
-        u32 tmem_row = tmem_dest + row * dst_row_bytes;
-        for (u32 b = 0; b < dst_row_bytes; ++b) {
-            if (tmem_row + b < tmem.size() && dram_row + b < rdram_size) {
-                tmem[tmem_row + b] = rdram[dram_row + b];
-            }
-        }
-        u32 w0 = tmem_row / 8;
-        u32 w1 = (tmem_row + dst_row_bytes + 7) / 8;
-        for (u32 w = w0; w < w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-    }
-}
-
+// gSPObjLoadTxtr: what the microcode does with a uObjTxtr (24 bytes: type,
+// image, three u16 parameters, sid, flag, mask). The load is skipped when
+// status word sid/4 already says this texture is there ((status & mask) ==
+// flag), and afterwards the status word takes the flag bits. The loads
+// themselves are plain RDP loads of 8-bit texels (TLUTs: 16-bit), whatever
+// the last gDPSetTextureImage said:
+//   TXTRBLOCK: LOADBLOCK of (tsize + 1) 64-bit words, DXT = tline
+//   TXTRTILE:  LOADTILE of theight/4 + 1 rows of (twidth + 1) * 2 bytes,
+//              which is the TMEM line as well: one contiguous copy
+//   TLUT:      LOADTLUT of pnum + 1 entries to TMEM word phead (>= 256)
 void RDP::s2dex_load_txtr(u32 tx_addr, u8* rdram, size_t rdram_size) {
     if (tx_addr + 24 > rdram_size) return;
-    u32 type = s2d_read_u32(rdram, tx_addr);
-    u32 image_ptr = segment_to_physical(s2d_read_u32(rdram, tx_addr + 4));
+    const u32 type = s2d_read_u32(rdram, tx_addr);
+    const u32 image_ptr = segment_to_physical(s2d_read_u32(rdram, tx_addr + 4));
+    const u16 p0 = s2d_read_u16(rdram, tx_addr + 8);
+    const u16 p1 = s2d_read_u16(rdram, tx_addr + 10);
+    const u16 p2 = s2d_read_u16(rdram, tx_addr + 12);
+    const u32 slot = (s2d_read_u16(rdram, tx_addr + 14) >> 2) & 3;
+    const u32 flag = s2d_read_u32(rdram, tx_addr + 16);
+    const u32 mask = s2d_read_u32(rdram, tx_addr + 20);
+    if ((s2d_genstat[slot] & mask) == flag) return;
+    s2d_genstat[slot] = (s2d_genstat[slot] & ~mask) | (flag & mask);
 
-    if (type == 0x00000030) { // G_OBJLT_TLUT
+    auto copy = [&](u32 dest, u32 bytes, bool dxt_zero) {
+        if (dest >= tmem.size()) return;
+        bytes = std::min<u32>(bytes, static_cast<u32>(tmem.size()) - dest);
+        native_before_read(image_ptr, static_cast<u64>(image_ptr) + bytes);
         tmem_dirty = true;
         ++tmem_gen_;
-        u16 phead = s2d_read_u16(rdram, tx_addr + 8);
-        u16 pnum  = s2d_read_u16(rdram, tx_addr + 10);
-        u32 pal_index_base = (phead >= 256) ? (phead - 256) : 0;
-        u32 count = static_cast<u32>(pnum) + 1;
-        native_before_read(image_ptr, static_cast<u64>(image_ptr) + count * 2);
-        for (u32 i = 0; i < count; ++i) {
-            u32 off = 0x800 + (pal_index_base + i) * 2;
-            u32 src = image_ptr + i * 2;
-            if (off + 1 < tmem.size() && src + 1 < rdram_size) {
-                tmem[off + 0] = rdram[src + 0];
-                tmem[off + 1] = rdram[src + 1];
-            }
-            if (off / 8 < 512) tmem_word_dxt_zero[off / 8] = false;
-        }
+        for (u32 i = 0; i < bytes; ++i) tmem[dest + i] = image_ptr + i < rdram_size ? rdram[image_ptr + i] : 0;
+        for (u32 w = dest / 8; w < (dest + bytes + 7) / 8 && w < 512; ++w) tmem_word_dxt_zero[w] = dxt_zero;
+    };
+    if (type == 0x00000030) { // G_OBJLT_TLUT (packed palette layout, see G_LOADTLUT)
+        copy(p0 >= 256 ? 0x800 + (p0 - 256) * 2u : p0 * 8u, (p1 + 1u) * 2, false);
     } else if (type == 0x00fc1034) { // G_OBJLT_TXTRTILE
-        u16 tmem_word = s2d_read_u16(rdram, tx_addr + 8);
-        u16 twidth  = s2d_read_u16(rdram, tx_addr + 10);
-        u16 theight = s2d_read_u16(rdram, tx_addr + 12);
-        u32 texel_w = (twidth  >> 2) + 1;
-        u32 texel_h = (theight >> 2) + 1;
-        s2dex_tmem_load_tile(tmem_word, image_ptr, texel_w, texel_h, rdram, rdram_size);
-    } else { // G_OBJLT_TXTRBLOCK (0x00001033) and anything else defaults to a raw block load
-        u16 tmem_word = s2d_read_u16(rdram, tx_addr + 8);
-        u16 tsize = s2d_read_u16(rdram, tx_addr + 10);
-        s2dex_tmem_load_block(tmem_word, image_ptr, tsize, rdram, rdram_size);
+        copy(p0 * 8u, ((p2 >> 2) + 1u) * ((p1 + 1u) * 2), false);
+    } else { // G_OBJLT_TXTRBLOCK (0x00001033)
+        copy(p0 * 8u, (p1 + 1u) * 8, p2 == 0);
     }
 }
 
@@ -2926,16 +2890,11 @@ void RDP::s2dex_draw_obj_sprite(u32 sp_addr, u8* rdram, size_t rdram_size) {
     Vertex p11 = transform(ox1, oy1, u1, v1);
     Vertex p01 = transform(ox0, oy1, u0, v1);
 
-    // No combine table set up for S2DEX (it doesn't support gDPSetCombineMode
-    // the way F3D triangles need it to look right without vertex-colour
-    // modulation): draw the raw sampled texel colour directly.
-    bool had_combine = combine_mode_set;
-    combine_mode_set = false;
+    // Shade is white: the combiner set up by the game (prim/env colour
+    // tints, fades) applies as it does to rectangles.
     draw_state_dirty_ = true;
     rasterize_triangle(p00, p10, p11, rdram, rdram_size);
     rasterize_triangle(p00, p11, p01, rdram, rdram_size);
-    combine_mode_set = had_combine;
-    draw_state_dirty_ = true;
 }
 
 void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) {
