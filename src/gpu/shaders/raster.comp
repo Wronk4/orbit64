@@ -87,6 +87,51 @@ uint sample_texture(uint sb, uint tile_idx, float s, float t) {
     return bilerp_argb(c00, c10, c01, c11, ss - float(is0), st - float(it0));
 }
 
+// ---- Level of detail (raster::lod_tiles) ----------------------------------------
+
+void lod_tiles(uint sb, float delta, uint prim_tile, out uint t0, out uint t1, out int lf) {
+    uint lw = D[sb + GPU_ST_LOD];
+    bool sharpen = (lw & GPU_LOD_SHARPEN) != 0u, detail = (lw & GPU_LOD_DETAIL) != 0u;
+    uint max_level = (lw >> 8u) & 0xFFu;
+    int min_level = int((lw >> 16u) & 0xFFu);
+    int lod = delta >= 512.0 ? 0x4000 : int(delta * 32.0);
+    bool magnify, distant;
+    uint l_tile = 0u;
+    if ((lod & 0x4000) != 0) {
+        magnify = false;
+        distant = true;
+        lf = 0xFF;
+    } else if (lod < 32 || lod < min_level) {
+        magnify = true;
+        distant = max_level == 0u;
+        if (!sharpen && !detail) {
+            lf = distant ? 0xFF : 0;
+        } else {
+            lf = (lod < min_level ? min_level : lod) << 3;
+            if (sharpen) lf |= 0x100;
+        }
+    } else {
+        magnify = false;
+        uint texels = uint(lod >> 5) & 0xFFu;
+        l_tile = texels != 0u ? uint(findMSB(texels)) : 0u;
+        distant = max_level == 0u || (lod & 0x6000) != 0 || l_tile >= max_level;
+        lf = (!sharpen && !detail && distant) ? 0xFF : ((lod << 3) >> l_tile) & 0xFF;
+    }
+    if ((lw & GPU_LOD_TEX_EN) == 0u) {
+        t0 = prim_tile & 7u;
+        t1 = (prim_tile + 1u) & 7u;
+        return;
+    }
+    if (distant) l_tile = max_level;
+    if (!detail) {
+        t0 = (prim_tile + l_tile) & 7u;
+        t1 = (distant || (!sharpen && magnify)) ? t0 : ((t0 + 1u) & 7u);
+    } else {
+        t0 = (prim_tile + l_tile + (magnify ? 0u : 1u)) & 7u;
+        t1 = (prim_tile + l_tile + ((!distant && !magnify) ? 2u : 1u)) & 7u;
+    }
+}
+
 // ---- Colour combiner ----------------------------------------------------------
 
 vec3 rgb_of(uint c) { return vec3(unit8((c >> 16u) & 0xFFu), unit8((c >> 8u) & 0xFFu), unit8(c & 0xFFu)); }
@@ -94,7 +139,7 @@ vec3 rgb_of_rdp(uint c) { return vec3(unit8((c >> 24u) & 0xFFu), unit8((c >> 16u
 
 struct CombineIn {
     vec3 t0, t1, prim, shade, env;
-    float t0a, t1a, pa, sa, ea;
+    float t0a, t1a, pa, sa, ea, lf, plf;
 };
 
 vec3 color_abd(uint src, CombineIn ci, vec3 comb) {
@@ -125,25 +170,29 @@ vec3 color_c(uint src, CombineIn ci, vec3 comb, float comb_a) {
         case 10u: return vec3(ci.pa);
         case 11u: return vec3(ci.sa);
         case 12u: return vec3(ci.ea);
+        case 13u: return vec3(ci.lf);
+        case 14u: return vec3(ci.plf);
         default: return vec3(0.0);
     }
 }
 
 float alpha_abd(uint src, CombineIn ci, float comb_a, bool c_slot) {
     switch (src) {
-        case 0u: return comb_a;
+        case 0u: return c_slot ? ci.lf : comb_a;
         case 1u: return ci.t0a;
         case 2u: return ci.t1a;
         case 3u: return ci.pa;
         case 4u: return ci.sa;
         case 5u: return ci.ea;
-        case 6u: return c_slot ? 0.0 : 1.0;
+        case 6u: return c_slot ? ci.plf : 1.0;
         default: return 0.0;
     }
 }
 
-uint combine(uint sb, uint tex0, uint tex1, uint shade) {
+uint combine(uint sb, uint tex0, uint tex1, uint shade, int lod_frac) {
     CombineIn ci;
+    ci.lf = float(lod_frac) / 255.0;
+    ci.plf = unit8(D[sb + GPU_ST_LOD] >> 24u);
     ci.t0 = rgb_of(tex0);
     ci.t1 = rgb_of(tex1);
     ci.t0a = unit8(tex0 >> 24u);
@@ -274,13 +323,33 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
     if ((flags & GPU_ST_TEXTURED) != 0u) {
         float iw = w0 * fword(pb + 6u) + w1 * fword(pb + 13u) + w2 * fword(pb + 20u);
         float w_interp = iw != 0.0 ? 1.0 / iw : 1.0;
-        float u = (w0 * fword(pb + 7u) + w1 * fword(pb + 14u) + w2 * fword(pb + 21u)) * w_interp;
-        float v = (w0 * fword(pb + 8u) + w1 * fword(pb + 15u) + w2 * fword(pb + 22u)) * w_interp;
+        float uw = w0 * fword(pb + 7u) + w1 * fword(pb + 14u) + w2 * fword(pb + 21u);
+        float vw = w0 * fword(pb + 8u) + w1 * fword(pb + 15u) + w2 * fword(pb + 22u);
+        float u = uw * w_interp;
+        float v = vw * w_interp;
         uint tile0 = (D[sb + 1u] >> 4u) & 7u;
+        uint tile1 = (tile0 + 1u) & 7u;
+        int lod_frac = 0;
+        if ((D[sb + GPU_ST_LOD] & GPU_LOD_DOLOD) != 0u) {
+            // The texture coordinates one frame buffer pixel right and down
+            // (raster::triangle()).
+            float dw0x = (y1 - y2) * inv_area, dw1x = (y2 - y0) * inv_area, dw2x = -dw0x - dw1x;
+            float dw0y = (x2 - x1) * inv_area, dw1y = (x0 - x2) * inv_area, dw2y = -dw0y - dw1y;
+            float iw0 = fword(pb + 6u), iw1 = fword(pb + 13u), iw2 = fword(pb + 20u);
+            float u0 = fword(pb + 7u), u1 = fword(pb + 14u), u2 = fword(pb + 21u);
+            float v0 = fword(pb + 8u), v1 = fword(pb + 15u), v2 = fword(pb + 22u);
+            float iwx = iw + (dw0x * iw0 + dw1x * iw1 + dw2x * iw2), iwy = iw + (dw0y * iw0 + dw1y * iw1 + dw2y * iw2);
+            float rx = iwx != 0.0 ? 1.0 / iwx : 1.0, ry = iwy != 0.0 ? 1.0 / iwy : 1.0;
+            float delta = max(max(abs((uw + (dw0x * u0 + dw1x * u1 + dw2x * u2)) * rx - u),
+                                  abs((vw + (dw0x * v0 + dw1x * v1 + dw2x * v2)) * rx - v)),
+                              max(abs((uw + (dw0y * u0 + dw1y * u1 + dw2y * u2)) * ry - u),
+                                  abs((vw + (dw0y * v0 + dw1y * v1 + dw2y * v2)) * ry - v)));
+            lod_tiles(sb, delta, tile0, tile0, tile1, lod_frac);
+        }
         if ((flags & GPU_ST_COMBINED) != 0u) {
             uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, tile0, u, v) : 0u;
-            uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, tile0 + 1u, u, v) : 0u;
-            color = combine(sb, tex, tex1, shade);
+            uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, tile1, u, v) : 0u;
+            color = combine(sb, tex, tex1, shade, lod_frac);
         } else {
             // Texture modulated by the vertex colour.
             uint tex = sample_texture(sb, tile0, u, v);
@@ -291,7 +360,7 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
             color = (a << 24u) | (r << 16u) | (g << 8u) | b;
         }
     } else if ((flags & GPU_ST_COMBINED) != 0u) {
-        color = combine(sb, 0xFFFFFFFFu, 0xFFFFFFFFu, shade);
+        color = combine(sb, 0xFFFFFFFFu, 0xFFFFFFFFu, shade, 0);
     } else {
         color = ((shade >> 24u) << 24u) | ((shade & 0xFFu) << 16u) | (((shade >> 8u) & 0xFFu) << 8u) | ((shade >> 16u) & 0xFFu);
     }
@@ -302,20 +371,21 @@ void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint 
     // Outside the scissor or behind what is there: dropped by sink_write anyway.
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
     if ((D[sb] & GPU_ST_Z_COMPARE) != 0u && 0.0 > z) return;
-    uint tile = D[pb + 3u];
     float cur_s = clamp(fword(pb + 4u) + float(int(x) - int(rx0)) * fword(pb + 6u), fword(pb + 9u), fword(pb + 10u));
     float cur_t = clamp(fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u), fword(pb + 11u), fword(pb + 12u));
     bool flip = D[pb + 8u] != 0u;
     float ss = flip ? cur_t : cur_s;
     float st = flip ? cur_s : cur_t;
     uint flags = D[sb];
+    uint lt = D[pb + 13u];
+    uint t0 = lt & 15u, t1 = (lt >> 4u) & 15u;
     uint color;
     if ((flags & GPU_ST_COMBINED) == 0u || (flags & GPU_ST_COPY) != 0u) {
-        color = sample_texture(sb, tile, ss, st);
+        color = sample_texture(sb, t0, ss, st);
     } else {
-        uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, tile, ss, st) : 0u;
-        uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, tile + 1u, ss, st) : 0u;
-        color = combine(sb, tex, tex1, 0xFFFFFFFFu);
+        uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, t0, ss, st) : 0u;
+        uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, t1, ss, st) : 0u;
+        color = combine(sb, tex, tex1, 0xFFFFFFFFu, int(lt >> 8u));
     }
     sink_write(sb, x, y, color, 0.0, c, z);
 }

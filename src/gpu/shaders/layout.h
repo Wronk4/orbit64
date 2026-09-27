@@ -36,14 +36,15 @@
 #define GPU_PRIM_STATE 31u
 #define GPU_PRIM_TRI 1u    // 3..23: per vertex sx, sy, sz, 1/w, u/w, v/w, rgba (r in bits 0-7); 24: 1/area
 #define GPU_PRIM_RECT 2u   // 3: tile, 4: s, 5: t, 6: ds per pixel, 7: dt per row (both at scale S), 8: flip,
-                           // 9..12: S min/max, T min/max (the native rectangle's range)
+                           // 9..12: S min/max, T min/max (the native rectangle's range),
+                           // 13: TEXEL0 tile | TEXEL1 tile << 4 | LOD fraction << 8 (raster::lod_tiles)
 #define GPU_PRIM_FILL 3u   // 3: ARGB (written as it is)
 #define GPU_PRIM_BLOCK 4u  // 3: ARGB, 4: z   (one native pixel through the pixel pipeline)
 #define GPU_PRIM_BLIT 5u   // 3: data offset, 4: width, 5: x0, 6: y0 (native): ARGB per native pixel, depth 0
 #define GPU_PRIM_UPLOAD 6u // 3: data offset, 4: width, 5: x0, 6: y0 (native): (valid, ARGB) per native pixel
 
 // ---- Draw states -------------------------------------------------------------
-#define GPU_STATE_WORDS 96u
+#define GPU_STATE_WORDS 98u
 // word 0: flags
 #define GPU_ST_TWO_CYCLE (1u << 0)
 #define GPU_ST_COPY (1u << 1)
@@ -66,6 +67,12 @@
 // words 11-14: scissor x0, x1, y0, y1 at scale S, half-open
 // word 15: word offset of the TMEM snapshot
 // words 16..95: 8 tiles of GPU_TILE_WORDS
+// word 96: level of detail: flags | max level << 8 | min level << 16 | PRIM_LOD_FRAC << 24
+#define GPU_ST_LOD 96u
+#define GPU_LOD_TEX_EN (1u << 0)
+#define GPU_LOD_SHARPEN (1u << 1)
+#define GPU_LOD_DETAIL (1u << 2)
+#define GPU_LOD_DOLOD (1u << 3)
 #define GPU_ST_TILES 16u
 #define GPU_TILE_WORDS 10u
 // tile word 0: format | size << 4 | palette << 8 | mask_s << 12 | mask_t << 16 |

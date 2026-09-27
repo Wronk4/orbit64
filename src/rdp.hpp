@@ -156,6 +156,7 @@ public:
         s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
+        s(tex_max_level, prim_min_level, prim_lod_frac);
         s(cbfd_, cbfd_advanced_, cbfd_normal_base_, cbfd_coord_mod_, cbfd_lights_, cbfd_num_lights_);
         s.fixed(internal_zbuffer);
         // G_MTX pushes a copy of the top of the stack, which must exist.
@@ -310,6 +311,9 @@ private:
     // and consulted/updated by G_SELECT_DL / G_SELECT_BRANCH_DL (sid must be
     // one of 0, 4, 8, 12 -- indexed here as sid/4).
     u32 s2d_genstat[4]{};
+    u8 tex_max_level{0};  // G_TEXTURE: mip-map levels past the first
+    u8 prim_min_level{0}; // G_SETPRIMCOLOR: minimum level of detail (1/32 texels)
+    u8 prim_lod_frac{0};  // G_SETPRIMCOLOR: PRIM_LOD_FRAC
 
     // F3DEXBG (Conker's Bad Fur Day). Lights 0..n-1 (the last one
     // directional, the others point lights), then the ambient colour.
@@ -407,6 +411,8 @@ private:
     // of those frames to stderr (debugging).
     int dl_trace_frame_ = -1;
     int dl_trace_count_ = 1;
+    int pick_x_ = 0, pick_y_ = 0, pick_frame_ = -1; // ORBIT64_PICK
+    void debug_pick(u32 a, u32 b, u32 c) const;
     u64 draw_state_serial_{0};
     u64 tmem_gen_{0}; // bumped by every TMEM load
 

@@ -105,6 +105,7 @@ bool ucode_banner_is_cbfd(const u8* p, size_t len) {
 
 RDP::RDP() {
     reset();
+    if (const char* e = std::getenv("ORBIT64_PICK")) std::sscanf(e, "%d,%d,%d", &pick_x_, &pick_y_, &pick_frame_);
     if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
         dl_trace_frame_ = std::atoi(e);
         if (const char* comma = std::strchr(e, ',')) dl_trace_count_ = std::max(1, std::atoi(comma + 1));
@@ -155,6 +156,7 @@ void RDP::reset() {
 
     fill_color = 0;
     prim_color = 0xFFFFFFFF;
+    tex_max_level = prim_min_level = prim_lod_frac = 0;
     env_color = 0xFFFFFFFF;
     blend_color = 0;
     fog_color = 0;
@@ -296,6 +298,9 @@ const DrawState& RDP::draw_state() {
         s.smooth_shading = (current_ucode_active == MicrocodeType::F3DEX2) ? (geometry_mode & 0x00200000) != 0
                                                                           : (geometry_mode & 0x00000200) != 0;
         s.active_tile = active_tile;
+        s.max_level = tex_max_level;
+        s.min_level = prim_min_level;
+        s.prim_lod_frac = prim_lod_frac;
         s.tmem = tmem.data();
         s.tmem_dxt = tmem_word_dxt_zero.data();
         for (int i = 0; i < 8; ++i) s.tex[i].prepare(tiles[i]);
@@ -700,7 +705,9 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
                 const f32 len = 2.0f * (dx * dx + dy * dy + dz * dz) / 65536.0f;
                 return len > 0.0f ? std::min(1.0f, l.ca / len) : 1.0f;
             };
-            if (!cbfd_advanced_) {
+            if (static_cast<s8>(rdram[cur_vtx + 6]) < 0) {
+                lr = lg = lb = 1.0f; // a negative flag word: not lit
+            } else if (!cbfd_advanced_) {
                 for (int l = static_cast<int>(nl) - 2; l >= 0; --l) add(cbfd_lights_[l], point(cbfd_lights_[l]));
             } else if (nl > 0) {
                 auto dot = [&](int l) {
@@ -918,7 +925,35 @@ void RDP::emit_triangle(u32 a, u32 b, u32 c, u8* rdram, size_t rdram_size) {
             }
         }
     }
+    if (pick_frame_ >= 0 && g_current_frame == pick_frame_) debug_pick(a, b, c);
     clip_and_rasterize_triangle(vertex_cache[a], vertex_cache[b], vertex_cache[c], rdram, rdram_size);
+}
+
+// ORBIT64_PICK=x,y,frame: every triangle of that frame that covers pixel
+// x,y (in its unclipped screen position), with the state it is drawn with.
+void RDP::debug_pick(u32 a, u32 b, u32 c) const {
+    const Vertex& A = vertex_cache[a];
+    const Vertex& B = vertex_cache[b];
+    const Vertex& C = vertex_cache[c];
+    if (A.w <= 0.0f || B.w <= 0.0f || C.w <= 0.0f) return; // (partly) behind the camera: not placed right
+    const f32 px = pick_x_ + 0.5f, py = pick_y_ + 0.5f;
+    auto edge = [](const Vertex& p, const Vertex& q, f32 x, f32 y) {
+        return (q.sx - p.sx) * (y - p.sy) - (q.sy - p.sy) * (x - p.sx);
+    };
+    const f32 e0 = edge(A, B, px, py), e1 = edge(B, C, px, py), e2 = edge(C, A, px, py);
+    if (!((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0))) return;
+    std::fprintf(stderr, "PICK dl=%08x ucode=%d geom=%08x omh=%08x oml=%08x comb=%08x:%08x prim=%08x env=%08x tex=%d tile=%u\n",
+                 capture_dl_addr, static_cast<int>(current_ucode_active), geometry_mode, other_mode_h, other_mode_l,
+                 combine_mode_w0, combine_mode_w1, prim_color, env_color, texture_enabled, active_tile);
+    for (int i = 0; i < 2; ++i) {
+        const Tile& t = tiles[(active_tile + i) & 7];
+        std::fprintf(stderr, "  tile%d fmt=%u siz=%u line=%u tmem=%u pal=%u cms=%u/%u/%u/%u cmt=%u/%u/%u/%u sl=%u tl=%u sh=%u th=%u\n",
+                     (active_tile + i) & 7, t.format, t.size, t.line, t.tmem, t.palette, t.clamp_s, t.mirror_s, t.mask_s,
+                     t.shift_s, t.clamp_t, t.mirror_t, t.mask_t, t.shift_t, t.sl, t.tl, t.sh, t.th);
+    }
+    for (const Vertex* v : {&A, &B, &C})
+        std::fprintf(stderr, "  v sx=%.1f sy=%.1f sz=%.4f w=%.2f uv=%.2f,%.2f rgba=%02x%02x%02x%02x\n", v->sx, v->sy, v->sz,
+                     v->w, v->u, v->v, v->r, v->g, v->b, v->a);
 }
 
 void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram, size_t rdram_size) {
@@ -1947,6 +1982,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             case 0xBB: // G_TEXTURE (Fast3D)
             case 0xD7: { // G_TEXTURE (F3DEX / F3DEX2)
                 active_tile = (w0 >> 8) & 0x7;
+                tex_max_level = (w0 >> 11) & 0x7;
                 texture_scale_s = ((w1 >> 16) & 0xFFFF) / 65536.0f;
                 texture_scale_t = (w1 & 0xFFFF) / 65536.0f;
                 if (texture_scale_s == 0.0f) texture_scale_s = 1.0f;
@@ -2324,8 +2360,10 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 blend_color = w1;
                 break;
 
-            case 0xFA: // G_SETPRIMCOLOR
+            case 0xFA: // G_SETPRIMCOLOR (and the minimum LOD level / LOD fraction)
                 prim_color = w1;
+                prim_min_level = (w0 >> 8) & 0x1F;
+                prim_lod_frac = w0 & 0xFF;
                 break;
 
             case 0xFB: // G_SETENVCOLOR

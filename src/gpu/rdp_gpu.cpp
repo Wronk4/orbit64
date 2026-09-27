@@ -319,6 +319,10 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
         tw[8] = fbits(tu.origin_t);
         tw[9] = GPU_NO_TABLE;
     }
+    w[GPU_ST_LOD] = flag(st.tex_lod_en, GPU_LOD_TEX_EN) | flag(st.sharpen, GPU_LOD_SHARPEN) |
+                    flag(st.detail, GPU_LOD_DETAIL) | flag(st.dolod, GPU_LOD_DOLOD) |
+                    static_cast<u32>(st.max_level) << 8 | static_cast<u32>(st.min_level) << 16 |
+                    static_cast<u32>(st.prim_lod_frac) << 24;
     rec_state_ = off;
     rec_serial_ = serial;
     return off;
@@ -371,8 +375,13 @@ void RdpRenderer::triangle(HiResTarget* ht, const DrawState& st, u64 serial, u64
     Target* t = static_cast<Target*>(ht);
     const u32 state = recorded_state(st, serial, tmem_gen, st.texture_enabled);
     if (st.texture_enabled) {
-        if (!st.combine_set || st.need_tex0) attach_table(state, st, st.active_tile, tmem_gen);
-        if (st.combine_set && st.need_tex1) attach_table(state, st, st.active_tile + 1, tmem_gen);
+        if (st.dolod && st.tex_lod_en) {
+            // Any of the mip-map levels (and the detail tile) can be sampled.
+            for (u32 i = 0; i <= st.max_level + 2u && i < 8; ++i) attach_table(state, st, st.active_tile + i, tmem_gen);
+        } else {
+            if (!st.combine_set || st.need_tex0) attach_table(state, st, st.active_tile, tmem_gen);
+            if (st.combine_set && st.need_tex1) attach_table(state, st, st.active_tile + 1, tmem_gen);
+        }
     }
     u32* q = add_prim(GPU_PRIM_TRI, t, depth_for(st), state, static_cast<s32>(min_x), static_cast<s32>(min_y),
                       static_cast<s32>(max_x), static_cast<s32>(max_y));
@@ -414,11 +423,16 @@ void RdpRenderer::tex_rect(HiResTarget* ht, const DrawState& st, u64 serial, u64
     if (x0 >= static_cast<s32>(t->width * S) || y0 >= static_cast<s32>(kFbLines * S)) return;
     const u32 state = recorded_state(st, serial, tmem_gen, true);
     const bool combined = st.combine_set && !st.copy_mode;
-    if (!combined || st.need_tex0) attach_table(state, st, tile, tmem_gen);
-    if (combined && st.need_tex1) attach_table(state, st, tile + 1, tmem_gen);
+    // One level of detail for the whole rectangle, as raster::tex_rect() works it out.
+    u32 t0 = tile & 7, t1 = (tile + 1) & 7;
+    s32 lod_frac = 0;
+    if (st.dolod) raster::lod_tiles(st, std::max(std::fabs(dsdx), std::fabs(dtdy)), tile, t0, t1, lod_frac);
+    if (!combined || st.need_tex0) attach_table(state, st, t0, tmem_gen);
+    if (combined && st.need_tex1) attach_table(state, st, t1, tmem_gen);
     u32* q = add_prim(GPU_PRIM_RECT, t, depth_for(st), state, x0, y0, x1 - 1, y1 - 1);
     if (!q) return;
     q[3] = tile;
+    q[13] = t0 | t1 << 4 | static_cast<u32>(lod_frac & 0x1FF) << 8;
     q[4] = fbits(s);
     q[5] = fbits(tc);
     q[6] = fbits(dsdx / static_cast<f32>(S));

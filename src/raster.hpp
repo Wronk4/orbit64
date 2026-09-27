@@ -150,6 +150,10 @@ struct DrawState {
     u8 alpha_threshold{0};      // blend colour alpha
     bool alpha_zero_kill{false}; // CVG_X_ALPHA/ALPHA_CVG_SEL/FORCE_BL/ZMODE_XLU/IM_RD/AA_EN: drop alpha-0 pixels
     bool z_compare{false}, z_update{false};
+    // Texture level of detail: G_TEXTURE's level count, gDPSetPrimColor's
+    // minimum level and fraction; derived: whether LOD is worked out at all.
+    u8 max_level{0}, min_level{0}, prim_lod_frac{0};
+    bool tex_lod_en{false}, sharpen{false}, detail{false}, dolod{false};
 
     void finalize() {
         u32 cycle_type = (other_mode_h >> 20) & 0x3;
@@ -211,8 +215,60 @@ struct DrawState {
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
         z_compare = (other_mode_l & 0x10) != 0;
         z_update = (other_mode_l & 0x20) != 0;
+
+        tex_lod_en = (other_mode_h >> 16) & 1;
+        sharpen = (other_mode_h >> 17) & 1;
+        detail = (other_mode_h >> 18) & 1;
+        // The combiner's LOD_FRACTION: colour C 13, alpha C 0.
+        const bool uses_lf = cc_c0 == 13 || ac_c0 == 0 || (two_cycle && (cc_c1 == 13 || ac_c1 == 0));
+        dolod = !fill_or_copy && (tex_lod_en || uses_lf);
     }
 };
+
+// The texture unit's level of detail for a pixel whose texture coordinates
+// change by at most `delta` texels to the next pixel and the next row: which
+// tiles TEXEL0 and TEXEL1 come from (mip-mapping, from the draw's tile on)
+// and the LOD fraction the combiner sees (0..255, +256 while sharpening).
+inline void lod_tiles(const DrawState& st, f32 delta, u32 prim_tile, u32& t0, u32& t1, s32& lf) {
+    // In 1/32 texels (the coordinates' 10.5 fixed point); 0x4000 and up is
+    // too far away to have a level.
+    const s32 lod = delta >= 512.0f ? 0x4000 : static_cast<s32>(delta * 32.0f);
+    bool magnify, distant;
+    u32 l_tile = 0;
+    if (lod & 0x4000) {
+        magnify = false;
+        distant = true;
+        lf = 0xFF;
+    } else if (lod < 32 || lod < st.min_level) { // magnified: less than a texel per pixel
+        magnify = true;
+        distant = st.max_level == 0;
+        if (!st.sharpen && !st.detail) {
+            lf = distant ? 0xFF : 0;
+        } else {
+            lf = (lod < st.min_level ? st.min_level : lod) << 3;
+            if (st.sharpen) lf |= 0x100;
+        }
+    } else {
+        magnify = false;
+        const u32 texels = static_cast<u32>(lod >> 5) & 0xFF;
+        l_tile = texels ? 31 - static_cast<u32>(__builtin_clz(texels)) : 0; // floor(log2)
+        distant = st.max_level == 0 || (lod & 0x6000) || l_tile >= st.max_level;
+        lf = (!st.sharpen && !st.detail && distant) ? 0xFF : ((lod << 3) >> l_tile) & 0xFF;
+    }
+    if (!st.tex_lod_en) {
+        t0 = prim_tile & 7;
+        t1 = (prim_tile + 1) & 7;
+        return;
+    }
+    if (distant) l_tile = st.max_level;
+    if (!st.detail) {
+        t0 = (prim_tile + l_tile) & 7;
+        t1 = (distant || (!st.sharpen && magnify)) ? t0 : ((t0 + 1) & 7);
+    } else {
+        t0 = (prim_tile + l_tile + (magnify ? 0 : 1)) & 7;
+        t1 = (prim_tile + l_tile + ((!distant && !magnify) ? 2 : 1)) & 7;
+    }
+}
 
 // 5-bit colour channel -> 8 bits, rounded: (c * 255 + 15) / 31.
 inline constexpr std::array<u8, 32> kFiveToEight = [] {
@@ -485,7 +541,7 @@ inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t) {
 }
 
 // Colour combiner: (A - B) * C + D per channel, once or twice (2-cycle).
-inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb, u8 sa) {
+inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb, u8 sa, s32 lod_frac = 0) {
     // Cycle-local TEXEL0/TEXEL1: on real hardware the texture unit is pipelined, so in
     // 2-cycle mode the second combiner stage sees the texels rotated by one slot -
     // its "TEXEL0" is the tile that was "TEXEL1" in the first stage (and vice versa).
@@ -498,6 +554,7 @@ inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb,
     const f32 v_sr = U[sr], v_sg = U[sg], v_sb = U[sb], v_sa = U[sa];
     const f32 pr = st.prim_r, pg = st.prim_g, pb = st.prim_b, pa = st.prim_a;
     const f32 er = st.env_r, eg = st.env_g, eb = st.env_b, ea = st.env_a;
+    const f32 lf = static_cast<f32>(lod_frac) / 255.0f, plf = U[st.prim_lod_frac];
 
     // A, B and D inputs (B's 6 is CENTER, D's 7 is ZERO; neither is modelled apart from 1.0/0.0).
     auto get_color_abd = [&](u32 src, f32 comb_r, f32 comb_g, f32 comb_b, f32& out_r, f32& out_g, f32& out_b) {
@@ -528,19 +585,21 @@ inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb,
             case 10: out_r = out_g = out_b = pa; break; // PRIMITIVE_ALPHA
             case 11: out_r = out_g = out_b = v_sa; break; // SHADE_ALPHA
             case 12: out_r = out_g = out_b = ea; break; // ENV_ALPHA
+            case 13: out_r = out_g = out_b = lf; break; // LOD_FRACTION
+            case 14: out_r = out_g = out_b = plf; break; // PRIM_LOD_FRAC
             default: out_r = out_g = out_b = 0.0f; break; // 0.0 (including 31)
         }
     };
 
     auto get_alpha_abd = [&](u32 src, f32 comb_a, bool is_c_slot = false) -> f32 {
         switch (src) {
-            case 0: return comb_a; // COMBINED
+            case 0: return is_c_slot ? lf : comb_a; // C slot: LOD_FRACTION; A/B/D: COMBINED
             case 1: return t0a;  // TEXEL0
             case 2: return t1a;  // TEXEL1
             case 3: return pa;   // PRIMITIVE
             case 4: return v_sa; // SHADE
             case 5: return ea;   // ENVIRONMENT
-            case 6: return is_c_slot ? 0.0f : 1.0f; // C slot: PRIM_LOD_FRAC (LOD not modeled); A/B/D: 1.0
+            case 6: return is_c_slot ? plf : 1.0f; // C slot: PRIM_LOD_FRAC; A/B/D: 1.0
             case 7: // 7 is ZERO (G_ACMUX_0 = 7)
             default: return 0.0f;
         }
@@ -690,8 +749,21 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
     const bool smooth_shading = st.smooth_shading;
     const bool textured = st.texture_enabled;
     const bool combined = st.combine_set;
-    const u32 tile0 = st.active_tile;
-    const u32 tile1 = (st.active_tile + 1) & 0x7;
+    u32 tile0 = st.active_tile;
+    u32 tile1 = (st.active_tile + 1) & 0x7;
+    s32 lod_frac = 0;
+
+    // How the barycentric weights change one frame buffer pixel to the right
+    // and down, for the texture coordinates of the neighbouring pixels the
+    // level of detail compares with.
+    const bool dolod = textured && st.dolod;
+    const f32 dw0x = (v1.sy - v2.sy) * inv_area, dw1x = (v2.sy - v0.sy) * inv_area, dw2x = -dw0x - dw1x;
+    const f32 dw0y = (v2.sx - v1.sx) * inv_area, dw1y = (v0.sx - v2.sx) * inv_area, dw2y = -dw0y - dw1y;
+    auto ddx = [&](f32 a0, f32 a1, f32 a2) { return dw0x * a0 + dw1x * a1 + dw2x * a2; };
+    auto ddy = [&](f32 a0, f32 a1, f32 a2) { return dw0y * a0 + dw1y * a1 + dw2y * a2; };
+    const f32 duw_dx = ddx(u_over_w0, u_over_w1, u_over_w2), duw_dy = ddy(u_over_w0, u_over_w1, u_over_w2);
+    const f32 dvw_dx = ddx(v_over_w0, v_over_w1, v_over_w2), dvw_dy = ddy(v_over_w0, v_over_w1, v_over_w2);
+    const f32 diw_dx = ddx(inv_w0, inv_w1, inv_w2), diw_dy = ddy(inv_w0, inv_w1, inv_w2);
 
     for (int y = y_first; y <= y_last; ++y) {
         for (int x = static_cast<int>(min_x); x <= static_cast<int>(max_x); ++x) {
@@ -723,14 +795,23 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                 if (textured) {
                     f32 inv_w_interp = w0 * inv_w0 + w1 * inv_w1 + w2 * inv_w2;
                     f32 w_interp = (inv_w_interp != 0.0f) ? (1.0f / inv_w_interp) : 1.0f;
-                    f32 u = (w0 * u_over_w0 + w1 * u_over_w1 + w2 * u_over_w2) * w_interp;
-                    f32 v = (w0 * v_over_w0 + w1 * v_over_w1 + w2 * v_over_w2) * w_interp;
+                    const f32 uw = w0 * u_over_w0 + w1 * u_over_w1 + w2 * u_over_w2;
+                    const f32 vw = w0 * v_over_w0 + w1 * v_over_w1 + w2 * v_over_w2;
+                    f32 u = uw * w_interp;
+                    f32 v = vw * w_interp;
+                    if (dolod) {
+                        const f32 iwx = inv_w_interp + diw_dx, iwy = inv_w_interp + diw_dy;
+                        const f32 rx = iwx != 0.0f ? 1.0f / iwx : 1.0f, ry = iwy != 0.0f ? 1.0f / iwy : 1.0f;
+                        const f32 delta = std::max(std::max(std::fabs((uw + duw_dx) * rx - u), std::fabs((vw + dvw_dx) * rx - v)),
+                                                   std::max(std::fabs((uw + duw_dy) * ry - u), std::fabs((vw + dvw_dy) * ry - v)));
+                        lod_tiles(st, delta, st.active_tile, tile0, tile1, lod_frac);
+                    }
 
                     if (combined) {
                         // A texel the combiner never reads doesn't change its output.
                         u32 tex = st.need_tex0 ? sample_texture(st, tile0, u, v) : 0;
                         u32 tex1 = st.need_tex1 ? sample_texture(st, tile1, u, v) : 0;
-                        color = combine(st, tex, tex1, r, g, b, a);
+                        color = combine(st, tex, tex1, r, g, b, a, lod_frac);
                     } else {
                         // Modulate texture with vertex color
                         u32 tex = sample_texture(st, tile0, u, v);
@@ -794,13 +875,18 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
     }
 
     const bool combined = st.combine_set && !st.copy_mode;
+    // The texture coordinates step by DSDX / DTDY per pixel: one level of
+    // detail for the whole rectangle.
+    u32 t0 = tile_idx & 7, t1 = (tile_idx + 1) & 7;
+    s32 lod_frac = 0;
+    if (st.dolod) lod_tiles(st, std::max(std::fabs(dsdx), std::fabs(dtdy)), tile_idx, t0, t1, lod_frac);
     auto shade = [&](f32 cur_s, f32 cur_t) -> u32 {
         f32 sample_s = flip ? cur_t : cur_s;
         f32 sample_t = flip ? cur_s : cur_t;
-        if (!combined) return sample_texture(st, tile_idx, sample_s, sample_t);
-        u32 tex = st.need_tex0 ? sample_texture(st, tile_idx, sample_s, sample_t) : 0;
-        u32 tex1 = st.need_tex1 ? sample_texture(st, (tile_idx + 1) & 0x7, sample_s, sample_t) : 0;
-        return combine(st, tex, tex1, 255, 255, 255, 255);
+        if (!combined) return sample_texture(st, t0, sample_s, sample_t);
+        u32 tex = st.need_tex0 ? sample_texture(st, t0, sample_s, sample_t) : 0;
+        u32 tex1 = st.need_tex1 ? sample_texture(st, t1, sample_s, sample_t) : 0;
+        return combine(st, tex, tex1, 255, 255, 255, 255, lod_frac);
     };
 
     if (scale == 1) {
