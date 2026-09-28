@@ -53,7 +53,8 @@ enum class MicrocodeType {
     F3DGOLDEN,
     F3DPD,  // Perfect Dark: Fast3D with 12-byte vertices that index a color table
     F3DDKR, // Diddy Kong Racing: DMA-loaded matrices, 10-byte vertices, textured triangle lists
-    F3DJFG  // Jet Force Gemini: F3DDKR with a different vertex count and matrix multiply
+    F3DJFG, // Jet Force Gemini: F3DDKR with a different vertex count and matrix multiply
+    F3DWRUS // Wave Race 64 (US): Fast3D with vertex slots x5, 32 of them, and G_QUAD at 0xB5
 };
 
 

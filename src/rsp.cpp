@@ -27,6 +27,7 @@ MicrocodeType ucode_by_crc(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
         case 0xF295D221u: return MicrocodeType::F3DPD;  // Perfect Dark
         case 0xE434110Du: return MicrocodeType::F3DDKR; // Diddy Kong Racing
         case 0x248DCED9u: return MicrocodeType::F3DJFG; // Jet Force Gemini
+        case 0xF4A01485u: return MicrocodeType::F3DWRUS; // Wave Race 64 (US; its banner is Fast3D's)
         default: return MicrocodeType::Auto;
     }
 }
@@ -285,10 +286,12 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
                 return false;
             };
 
-            if (!detect_banner(ucode_data_ptr)) {
-                if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
-                    rdp.set_ucode_type(t);
-                } else if (!detect_banner(ucode_ptr)) {
+            // Microcodes known by their code come first: some share another's
+            // banner (Wave Race 64's reads like Super Mario 64's Fast3D).
+            if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
+                rdp.set_ucode_type(t);
+            } else if (!detect_banner(ucode_data_ptr)) {
+                if (!detect_banner(ucode_ptr)) {
                     static int dbg_fail = 0;
                     if (dbg_fail < 5) {
                         dbg_fail++;
