@@ -1383,6 +1383,23 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                     if (type_idx == 0) type_idx = w0 & 0xFF;
 
                     is_viewport = (type_idx == 0x80) || (type_idx == 8);
+                    // G_MV_MATRIX_1..4 (gSPForceMatrix): bytes 0-15, 16-31,
+                    // 32-47 and 48-63 of the whole model-view-projection,
+                    // used as it is until the next G_MTX/G_POPMTX.
+                    const int piece = type_idx == 0x9E ? 0 : type_idx == 0x98 ? 1 : type_idx == 0x9A ? 2
+                                    : type_idx == 0x9C ? 3 : -1;
+                    if (piece >= 0 && src_addr + 16 <= rdram_size) {
+                        std::copy_n(rdram + src_addr, 16, forced_mtx.begin() + piece * 16);
+                        for (int i = 0; i < 4; ++i) {
+                            for (int j = 0; j < 4; ++j) {
+                                const u32 k = (i * 4 + j) * 2;
+                                const s16 ip = static_cast<s16>((forced_mtx[k] << 8) | forced_mtx[k + 1]);
+                                const u16 fp = static_cast<u16>((forced_mtx[32 + k] << 8) | forced_mtx[33 + k]);
+                                combined_matrix.m[i][j] = ip + fp / 65536.0f;
+                            }
+                        }
+                        combined_matrix_dirty = false;
+                    }
                     if (type_idx == 0x84) { // LookAtX
                         if (src_addr + 16 <= rdram_size) {
                             s8 dx = static_cast<s8>(rdram[src_addr + 8]);

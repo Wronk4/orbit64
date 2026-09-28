@@ -142,7 +142,7 @@ public:
         s(combine_mode_w0, combine_mode_w1, combine_mode_set, other_mode_l, other_mode_h);
         s(ambient_light, lookat_x, lookat_y, lookat_set, dir_lights, num_lights);
         s(scissor_ulx, scissor_uly, scissor_lrx, scissor_lry);
-        s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2, vtx_color_base);
+        s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2, vtx_color_base, forced_mtx);
         s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv, cbfd, cbfd_normals);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
@@ -283,6 +283,9 @@ private:
     u64 display_list_count{0};
     u32 rdp_half1{0};
     u32 rdp_half2{0};
+    // Fast3D/F3DEX gSPForceMatrix: the model-view-projection matrix arrives in
+    // four 16-byte G_MOVEMEM pieces (G_MV_MATRIX_1..4), gathered here.
+    std::array<u8, 64> forced_mtx{};
     u32 vtx_color_base{0}; // F3DPD: where vertex colors/normals live (set by opcode 0x07)
     // F3DDKR/F3DJFG: offsets added to matrix and vertex addresses, where the
     // next appended vertex goes, the model-view slot in use (and the slots
