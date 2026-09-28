@@ -258,6 +258,11 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
                     bool is_gbi2 = local.find("S2DEX2") != std::string::npos || local.find("fifo 2") != std::string::npos;
                     rdp.set_ucode_type(is_gbi2 ? MicrocodeType::S2DEX2 : MicrocodeType::S2DEX);
                     return true;
+                } else if (header.find("F3DEXBG") != std::string::npos) {
+                    // Conker's Bad Fur Day's own F3DEX2 (see RDP::cbfd).
+                    rdp.set_ucode_type(MicrocodeType::F3DEX2);
+                    rdp.set_cbfd(true);
+                    return true;
                 } else if (header.find("F3DEX 2") != std::string::npos ||
                     header.find("F3DEX2") != std::string::npos ||
                     header.find("fifo 2") != std::string::npos ||

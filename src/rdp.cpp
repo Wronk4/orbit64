@@ -161,6 +161,8 @@ void RDP::reset() {
     vtx_color_base = 0;
     dkr_mtx_offset = dkr_vtx_offset = dkr_vtx_index = dkr_mv_index = 0;
     dkr_billboard = false;
+    cbfd = false;
+    cbfd_normals = 0;
     dkr_mv.fill(Matrix4x4::identity());
     ucode_type = MicrocodeType::Auto;
 
@@ -277,6 +279,8 @@ const DrawState& RDP::draw_state() {
 static bool keeps_draw_state(u8 opcode) {
     switch (opcode) {
         case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08:
+        case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
+        case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F:
         case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB8: case 0xBC: case 0xBD:
         case 0xBE: case 0xBF: case 0xC0: case 0xD8: case 0xDA: case 0xDB: case 0xDC: case 0xDE: case 0xDF:
         case 0xE1: case 0xE4: case 0xE5: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xEE:
@@ -595,11 +599,22 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         }
         compute_screen_coords(v);
 
+        // Where the normal is: the color bytes, or for Conker's microcode X
+        // and Y from its normals buffer (by vertex slot) and Z from the flag.
+        const bool cbfd_vtx = cbfd && ucode == MicrocodeType::F3DEX2;
+        u8 nrm[3] = {col[0], col[1], col[2]};
+        if (cbfd_vtx) {
+            const u32 na = (cbfd_normals + dest_idx * 2) & (static_cast<u32>(rdram_size) - 2);
+            nrm[0] = rdram[na];
+            nrm[1] = rdram[na + 1];
+            nrm[2] = rdram[cur_vtx + 7];
+        }
+
         f32 tnx = 0.0f, tny = 0.0f, tnz = 1.0f;
         if ((geometry_mode & 0x00020000) || (geometry_mode & 0x00040000)) {
-            s8 nx_i = static_cast<s8>(col[0]);
-            s8 ny_i = static_cast<s8>(col[1]);
-            s8 nz_i = static_cast<s8>(col[2]);
+            s8 nx_i = static_cast<s8>(nrm[0]);
+            s8 ny_i = static_cast<s8>(nrm[1]);
+            s8 nz_i = static_cast<s8>(nrm[2]);
             f32 nx = nx_i / 127.0f;
             f32 ny = ny_i / 127.0f;
             f32 nz = nz_i / 127.0f;
@@ -615,9 +630,9 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         if (geometry_mode & 0x00040000) { // G_TEXTURE_GEN (spherical mapping)
             f32 dot_x = tnx, dot_y = tny;
             if (lookat_set) {
-                s8 nx_i = static_cast<s8>(col[0]);
-                s8 ny_i = static_cast<s8>(col[1]);
-                s8 nz_i = static_cast<s8>(col[2]);
+                s8 nx_i = static_cast<s8>(nrm[0]);
+                s8 ny_i = static_cast<s8>(nrm[1]);
+                s8 nz_i = static_cast<s8>(nrm[2]);
                 f32 nx = nx_i / 127.0f;
                 f32 ny = ny_i / 127.0f;
                 f32 nz = nz_i / 127.0f;
@@ -646,6 +661,11 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
                 }
             }
 
+            if (cbfd_vtx) { // the light tints the vertex's own color
+                lit_r *= col[0] / 255.0f;
+                lit_g *= col[1] / 255.0f;
+                lit_b *= col[2] / 255.0f;
+            }
             v.r = static_cast<u8>(std::clamp(lit_r, 0.0f, 255.0f));
             v.g = static_cast<u8>(std::clamp(lit_g, 0.0f, 255.0f));
             v.b = static_cast<u8>(std::clamp(lit_b, 0.0f, 255.0f));
@@ -971,7 +991,8 @@ void RDP::execute_moveword(u32 w0, u32 w1, MicrocodeType current_ucode) {
     } else if (type == 0x02) { // G_MW_NUMLIGHT
         u32 raw = w1 & 0x7FFFFFFF;
         if (current_ucode == MicrocodeType::F3DEX2) {
-            num_lights = (raw / 24 > 0) ? (raw / 24) : 0;
+            const u32 size = cbfd ? 48 : 24;
+            num_lights = (raw / size > 0) ? (raw / size) : 0;
         } else {
             num_lights = (raw / 32 > 0) ? (raw / 32 - 1) : 0;
         }
@@ -1312,6 +1333,22 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 if (current_ucode == MicrocodeType::F3DEX2) {
                     u8 idx = w0 & 0xFF;
                     is_viewport = (idx == 8);
+                    if (idx == 14 && cbfd) { // Conker's: the normals of the next vertices
+                        cbfd_normals = src_addr;
+                    } else if (idx == 14) { // G_MV_MATRIX (gSPForceMatrix): the whole model-view-projection
+                        if (src_addr + 64 <= rdram_size) {
+                            for (int i = 0; i < 4; ++i) {
+                                for (int j = 0; j < 4; ++j) {
+                                    const u32 k = (i * 4 + j) * 2;
+                                    const s16 ip = static_cast<s16>((rdram[src_addr + k] << 8) | rdram[src_addr + k + 1]);
+                                    const u16 fp = static_cast<u16>((rdram[src_addr + 32 + k] << 8) | rdram[src_addr + 33 + k]);
+                                    combined_matrix.m[i][j] = ip + fp / 65536.0f;
+                                }
+                            }
+                            // Used as it is until the next G_MTX/G_POPMTX.
+                            combined_matrix_dirty = false;
+                        }
+                    }
                     if (idx == 10) { // G_MV_LIGHT
                         u32 ofs = ((w0 >> 8) & 0xFF) * 8;
                         if (ofs == 0) { // G_MVO_LOOKATX
@@ -1334,7 +1371,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                             }
                         } else if (ofs >= 48) {
                             is_light = true;
-                            light_n = (ofs / 24) - 1;
+                            light_n = cbfd ? (ofs / 48) - 1 : (ofs / 24) - 1;
                         }
                     }
                 } else {
@@ -1465,6 +1502,21 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                             pc = rdp_half1;
                         }
                     }
+                }
+                break;
+            }
+
+            case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
+            case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: {
+                // G_TRI4 of Conker's Bad Fur Day's F3DEX2 (no other GBI uses
+                // these opcodes): 12 vertex indices of 5 bits, packed from
+                // bit 0 of w1 up through bit 27 of w0 (the opcode's low
+                // nibble); unused slots repeat a vertex.
+                if (current_ucode != MicrocodeType::F3DEX2) break;
+                const u64 bits = (static_cast<u64>(w0 & 0x0FFFFFFF) << 32) | w1;
+                for (u32 t = 0; t < 4; ++t) {
+                    const u32 a = (bits >> (15 * t)) & 31, b = (bits >> (15 * t + 5)) & 31, c = (bits >> (15 * t + 10)) & 31;
+                    if (a != b && b != c && a != c) emit_triangle(a, b, c, rdram, rdram_size);
                 }
                 break;
             }

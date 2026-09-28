@@ -80,6 +80,7 @@ public:
     void recreate_hires();
 
     void set_ucode_type(MicrocodeType type) { ucode_type = type; }
+    void set_cbfd(bool on) { cbfd = on; }
     MicrocodeType get_ucode_type() const { return ucode_type; }
 
     // Frontend status queries (read-only).
@@ -141,7 +142,7 @@ public:
         s(ambient_light, lookat_x, lookat_y, lookat_set, dir_lights, num_lights);
         s(scissor_ulx, scissor_uly, scissor_lrx, scissor_lry);
         s(ucode_type, current_ucode_active, display_list_count, rdp_half1, rdp_half2, vtx_color_base);
-        s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv);
+        s(dkr_mtx_offset, dkr_vtx_offset, dkr_vtx_index, dkr_mv_index, dkr_billboard, dkr_mv, cbfd, cbfd_normals);
         s(s2d_genstat, obj2d_matrix, obj_render_mode, s2d_pending_flag, s2d_pending_sid, s2d_pending_addr_lo,
           s2d_pending_valid);
         s.fixed(internal_zbuffer);
@@ -291,6 +292,12 @@ private:
     u32 dkr_mv_index{0};
     bool dkr_billboard{false};
     std::array<Matrix4x4, 4> dkr_mv{};
+    // Conker's Bad Fur Day's F3DEX2 ("F3DEXBG"): lights are 48 bytes apart
+    // instead of 24, and lit vertices keep their color and take their normal
+    // from a buffer (G_MOVEMEM 14) holding X and Y for each of 32 slots, Z
+    // being the low byte of the vertex's flag word.
+    bool cbfd{false};
+    u32 cbfd_normals{0};
 
     // S2DEX / S2DEX2 state -------------------------------------------------
     // The four RSP "general status" words used by G_MOVEWORD(G_MW_GENSTAT)
