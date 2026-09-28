@@ -102,16 +102,7 @@ bool Cartridge::load_rom(const std::string& filepath) {
         save_filepath = filepath + ".sav";
     }
 
-    // Load existing save file if present
-    std::ifstream save_file;
-    if (!save_filepath.empty()) save_file.open(utf8_path(save_filepath), std::ios::binary);
-    if (save_file.is_open()) {
-        if (save_type == SaveType::SRAM_32K || save_type == SaveType::FLASHRAM_128K) {
-            save_file.read(reinterpret_cast<char*>(sram.data()), sram.size());
-        } else if (save_type == SaveType::EEPROM_4K || save_type == SaveType::EEPROM_16K) {
-            save_file.read(reinterpret_cast<char*>(eeprom.data()), eeprom.size());
-        }
-    }
+    load_save_file();
 
     // Controller Paks.
     for (int i = 0; i < 4; ++i) {
@@ -150,7 +141,8 @@ u32 crc32(const u8* p, size_t n) {
 
 // Save chip by game (the two-letter id in the middle of the game code, so
 // all regions and the 64DD "C" variants match). Games not listed get a 4 Kbit
-// EEPROM, the most common chip.
+// EEPROM, the most common chip, unless they turn out to use SRAM or FlashRAM
+// (Cartridge::domain2_access()).
 struct SaveEntry { const char id[3]; SaveType type; };
 constexpr SaveEntry kSaveTypes[] = {
     // 16 Kbit EEPROM
@@ -158,7 +150,10 @@ constexpr SaveEntry kSaveTypes[] = {
     {"B7", SaveType::EEPROM_16K}, // Banjo-Tooie
     {"PD", SaveType::EEPROM_16K}, // Perfect Dark
     {"YS", SaveType::EEPROM_16K}, // Yoshi's Story
-    {"EV", SaveType::EEPROM_16K}, // Excitebike 64
+    {"MX", SaveType::EEPROM_16K}, // Excitebike 64
+    {"MV", SaveType::EEPROM_16K}, // Mario Party 3
+    {"CW", SaveType::EEPROM_16K}, // Cruis'n World
+    {"EP", SaveType::EEPROM_16K}, // Star Wars Episode I: Racer
     {"FU", SaveType::EEPROM_16K}, // Conker's Bad Fur Day
     {"JF", SaveType::EEPROM_16K}, // Jet Force Gemini
     {"M8", SaveType::EEPROM_16K}, // Mario Tennis
@@ -170,12 +165,18 @@ constexpr SaveEntry kSaveTypes[] = {
     {"YW", SaveType::SRAM_32K}, // Harvest Moon 64
     {"MF", SaveType::SRAM_32K}, // Mario Golf
     {"OB", SaveType::SRAM_32K}, // Ogre Battle 64
+    {"TE", SaveType::SRAM_32K}, // 1080 Snowboarding
+    {"WL", SaveType::SRAM_32K}, // Waialae Country Club
+    {"KG", SaveType::SRAM_32K}, // Major League Baseball Featuring Ken Griffey Jr.
     // FlashRAM
     {"PF", SaveType::FLASHRAM_128K}, // Pokemon Snap
     {"ZS", SaveType::FLASHRAM_128K}, // Zelda: Majora's Mask
     {"MQ", SaveType::FLASHRAM_128K}, // Paper Mario
     {"PO", SaveType::FLASHRAM_128K}, // Pokemon Stadium
     {"PN", SaveType::FLASHRAM_128K}, // Pokemon Puzzle League
+    {"P3", SaveType::FLASHRAM_128K}, // Pokemon Stadium 2
+    {"CC", SaveType::FLASHRAM_128K}, // Command & Conquer
+    {"SQ", SaveType::FLASHRAM_128K}, // StarCraft 64
     // No save chip (Controller Pak only)
     {"QK", SaveType::NONE}, // Quake
     {"R6", SaveType::NONE}, // Rainbow Six
@@ -220,26 +221,17 @@ void Cartridge::detect_cic_and_save() {
     }
 
     save_type = SaveType::EEPROM_4K;
+    save_auto = true;
     if (game_code.size() >= 3) {
         for (const SaveEntry& e : kSaveTypes) {
             if (game_code[1] == e.id[0] && game_code[2] == e.id[1]) {
                 save_type = e.type;
+                save_auto = false;
                 break;
             }
         }
     }
-
-    sram.clear();
-    eeprom.clear();
-    if (save_type == SaveType::SRAM_32K) {
-        sram.resize(32768, 0xFF);
-    } else if (save_type == SaveType::FLASHRAM_128K) {
-        sram.resize(131072, 0xFF);
-    } else if (save_type == SaveType::EEPROM_4K) {
-        eeprom.resize(512, 0x00);
-    } else if (save_type == SaveType::EEPROM_16K) {
-        eeprom.resize(2048, 0x00);
-    }
+    size_save_memory();
     flash_mode = FLASH_READ_ARRAY;
     flash_status = 0;
     flash_erase_offset = 0;
@@ -271,6 +263,41 @@ u32 Cartridge::get_boot_address() const {
     if (cic_type == CICType::CIC_6103) entry -= 0x100000;
     if (cic_type == CICType::CIC_6106) entry -= 0x200000;
     return entry;
+}
+
+void Cartridge::size_save_memory() {
+    sram.clear();
+    eeprom.clear();
+    if (save_type == SaveType::SRAM_32K) {
+        sram.resize(32768, 0xFF);
+    } else if (save_type == SaveType::FLASHRAM_128K) {
+        sram.resize(131072, 0xFF);
+    } else if (save_type == SaveType::EEPROM_4K) {
+        eeprom.resize(512, 0x00);
+    } else if (save_type == SaveType::EEPROM_16K) {
+        eeprom.resize(2048, 0x00);
+    }
+}
+
+void Cartridge::load_save_file() {
+    if (save_filepath.empty()) return;
+    std::ifstream save_file(utf8_path(save_filepath), std::ios::binary);
+    if (!save_file.is_open()) return;
+    std::vector<u8>& mem = (save_type == SaveType::SRAM_32K || save_type == SaveType::FLASHRAM_128K) ? sram : eeprom;
+    save_file.read(reinterpret_cast<char*>(mem.data()), static_cast<std::streamsize>(mem.size()));
+}
+
+// Games with SRAM or FlashRAM only ever touch domain 2 for it, and libultra's
+// osFlash* functions always start with a command to 0x08010000 while SRAM is
+// read and written directly - so the first access tells which one a game
+// missing from the save table has.
+void Cartridge::domain2_access(bool flash_command) {
+    if (!save_auto) return;
+    save_auto = false;
+    save_type = flash_command ? SaveType::FLASHRAM_128K : SaveType::SRAM_32K;
+    size_save_memory();
+    load_save_file();
+    std::cout << "[Cartridge] save: " << (flash_command ? "FlashRAM" : "SRAM") << " (seen in use)\n";
 }
 
 // ---- Cartridge domain 2: SRAM / FlashRAM --------------------------------------
@@ -309,12 +336,14 @@ void Cartridge::flash_command(u32 cmd) {
 }
 
 u32 Cartridge::read_bus32(u32 off) {
+    domain2_access(false);
     if (save_type == SaveType::FLASHRAM_128K) return 0x11118000u | flash_status; // status register
     return (static_cast<u32>(read_sram(off)) << 24) | (static_cast<u32>(read_sram(off + 1)) << 16) |
            (static_cast<u32>(read_sram(off + 2)) << 8) | read_sram(off + 3);
 }
 
 void Cartridge::write_bus32(u32 off, u32 val) {
+    domain2_access(off == 0x10000);
     if (save_type == SaveType::FLASHRAM_128K) {
         if (off == 0x10000) flash_command(val);
         else if (off == 0) flash_status = 0; // clear status
@@ -324,6 +353,7 @@ void Cartridge::write_bus32(u32 off, u32 val) {
 }
 
 void Cartridge::dma_to_rdram(u32 off, u8* dst, u32 len) {
+    domain2_access(false);
     if (save_type == SaveType::FLASHRAM_128K) {
         if (flash_mode == FLASH_READ_ARRAY) {
             // The flash is addressed in 16-bit units: libultra passes page * 64.
@@ -340,6 +370,7 @@ void Cartridge::dma_to_rdram(u32 off, u8* dst, u32 len) {
 }
 
 void Cartridge::dma_from_rdram(u32 off, const u8* src, u32 len) {
+    domain2_access(false);
     if (save_type == SaveType::FLASHRAM_128K) {
         if (flash_mode == FLASH_WRITE_BUFFER)
             for (u32 i = 0; i < len && i < flash_buf.size(); ++i) flash_buf[i] = src[i];

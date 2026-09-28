@@ -82,6 +82,8 @@ public:
     // Save states (savestate.hpp): the save memory, so the game finds what it
     // last wrote. A loaded state's save memory goes to the .sav file too.
     template <class S> void serialize(S& s) {
+        s(save_type, save_auto);
+        if constexpr (S::loading) size_save_memory();
         s.fixed(sram);
         s.fixed(eeprom);
         s(flash_mode, flash_status, flash_erase_offset, flash_erase_chip, flash_buf);
@@ -133,6 +135,13 @@ private:
     std::string game_code;
     CICType cic_type{CICType::CIC_6102};
     SaveType save_type{SaveType::EEPROM_4K};
+    // A game missing from the save table starts out with a 4 Kbit EEPROM;
+    // its first access to cartridge domain 2 then shows whether it has SRAM
+    // or FlashRAM instead (see domain2_access()).
+    bool save_auto{false};
 
     void detect_cic_and_save();
+    void size_save_memory(); // sram/eeprom sized for save_type, blank
+    void load_save_file();   // fills them from the .sav next to the ROM
+    void domain2_access(bool flash_command);
 };

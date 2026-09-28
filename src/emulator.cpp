@@ -94,7 +94,7 @@ void Emulator::reset() {
     };
     write_u32(0x300, 1);          // osTvType (1 = NTSC)
     write_u32(0x304, 0);          // osRomType (0 = cartridge)
-    write_u32(0x308, 0x10000000); // osRomBase (Cartridge Domain 1)
+    write_u32(0x308, 0xB0000000); // osRomBase: the cartridge via KSEG1, as IPL3 sets it (Turok reads through it)
     write_u32(0x30C, 0);          // osResetType
     write_u32(0x310, cart.get_cic_id());   // osCicId (e.g. 6105 = 0x17D9, 6106 = 0x17D8)
     write_u32(0x314, 0);          // osVersion

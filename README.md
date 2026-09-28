@@ -81,7 +81,12 @@ tools/jit_bench.sh 600 --stats # every ROM in roms/: fps, CPU vs RSP/RDP time, J
 `python tools/compat_sweep.py` runs every ROM in `roms/` headless for 30 s of game time (pressing START/A a few times
 to get past title screens) and writes `test_output/compat/report.html`: status, speed, graphics and audio microcode,
 screenshots and the captured sound per game, plus `sheet.png` with all screenshots and `results.json`.
-`--compare <old results.json>` marks what changed since an earlier sweep; `--filter <text>` runs a subset.
+`--compare <old results.json>` marks what changed since an earlier sweep (status, and whether the game ran differently:
+runs are deterministic, so a different RDRAM hash means different behaviour); `--filter <text>` runs a subset.
+
+With a big library, `python tools/test_set.py` picks a small test set out of a full sweep's `results.json` - every game
+that doesn't simply run, the slowest ones, the noisiest ones, one per microcode, CIC and save type, and a core of games
+whose fixes must not regress - into `tools/test_set.txt`; `compat_sweep.py --list tools/test_set.txt` runs just those.
 
 ## RSP
 

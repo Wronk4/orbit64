@@ -90,6 +90,7 @@ public:
     template <class S> void serialize(S& s) {
         s.fixed(rdram);
         s(tlb_entries, ri_mode, ri_config, ri_current_load, ri_select, ri_refresh, ri_latency, ri_error, ri_werror);
+        if constexpr (S::loading) tlb_gen_++; // the TLB may be different now
     }
 
 private:
@@ -108,6 +109,18 @@ private:
     u32 ram_limit_{RDRAM_SIZE};
     std::array<TLBEntry, 32> tlb_entries{};
     u32 tlb_gen_ = 0;
+    // Recent translations of 4 KB pages (every TLB page is a multiple of
+    // that), good while the TLB (tlb_gen_) and the ASID stay the same:
+    // translate_vaddr() otherwise searches all 32 entries on every access
+    // to mapped memory.
+    struct TlbCacheEntry {
+        u32 vpn = ~0u;  // virtual address >> 12
+        u32 ppage = 0;  // physical address of the page
+        u32 gen = 0;
+        u8 asid = 0;
+        bool writable = false;
+    };
+    std::array<TlbCacheEntry, 64> tlb_cache_{};
 
     // RI registers
     u32 ri_mode{0};

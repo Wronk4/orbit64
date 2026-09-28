@@ -329,6 +329,8 @@ const DrawState& RDP::draw_state() {
 static bool keeps_draw_state(u8 opcode) {
     switch (opcode) {
         case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08:
+        case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
+        case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F:
         case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB8: case 0xBC: case 0xBD:
         case 0xBE: case 0xBF: case 0xC0: case 0xD8: case 0xDA: case 0xDB: case 0xDC: case 0xDE: case 0xDF:
         case 0xE1: case 0xE4: case 0xE5: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xEE:
@@ -423,7 +425,7 @@ void RDP::write_dps_reg(u32 addr, u32 val) {
 // geometry mode bits, G_RDPHALF_CONT, ...).
 static bool is_f3d_family(MicrocodeType u) {
     return u == MicrocodeType::Fast3D || u == MicrocodeType::F3DGOLDEN || u == MicrocodeType::F3DPD ||
-           u == MicrocodeType::F3DDKR || u == MicrocodeType::F3DJFG;
+           u == MicrocodeType::F3DDKR || u == MicrocodeType::F3DJFG || u == MicrocodeType::F3DWRUS;
 }
 
 u32 RDP::segment_to_physical(u32 seg_addr) const {
@@ -596,6 +598,10 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         count = (w0 >> 10) & 0x3F;
         if (count == 0) count = ((w0 >> 20) & 0x0F) + 1;
         dest = ((w0 >> 16) & 0xFF) / 2;
+    } else if (ucode == MicrocodeType::F3DWRUS) {
+        // Bits 15..9 = count, bits 23..16 = first slot * 5.
+        count = (w0 >> 9) & 0x7F;
+        dest = ((w0 >> 16) & 0xFF) / 5;
     } else if (ucode == MicrocodeType::F3DDKR || ucode == MicrocodeType::F3DJFG) {
         // Bits 23..19 = count (- 1 on DKR), 13..9 = first slot; bit 16 appends
         // to the vertices loaded since the last triangle list instead (after
@@ -1589,6 +1595,20 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 if (current_ucode == MicrocodeType::F3DEX2) {
                     u8 idx = w0 & 0xFF;
                     is_viewport = (idx == 8);
+                    if (idx == 14) { // G_MV_MATRIX (gSPForceMatrix): the whole model-view-projection
+                        if (src_addr + 64 <= rdram_size) {
+                            for (int i = 0; i < 4; ++i) {
+                                for (int j = 0; j < 4; ++j) {
+                                    const u32 k = (i * 4 + j) * 2;
+                                    const s16 ip = static_cast<s16>((rdram[src_addr + k] << 8) | rdram[src_addr + k + 1]);
+                                    const u16 fp = static_cast<u16>((rdram[src_addr + 32 + k] << 8) | rdram[src_addr + 33 + k]);
+                                    combined_matrix.m[i][j] = ip + fp / 65536.0f;
+                                }
+                            }
+                            // Used as it is until the next G_MTX/G_POPMTX.
+                            combined_matrix_dirty = false;
+                        }
+                    }
                     if (idx == 10) { // G_MV_LIGHT
                         u32 ofs = ((w0 >> 8) & 0xFF) * 8;
                         if (ofs == 0) { // G_MVO_LOOKATX
@@ -1619,6 +1639,23 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                     if (type_idx == 0) type_idx = w0 & 0xFF;
 
                     is_viewport = (type_idx == 0x80) || (type_idx == 8);
+                    // G_MV_MATRIX_1..4 (gSPForceMatrix): bytes 0-15, 16-31,
+                    // 32-47 and 48-63 of the whole model-view-projection,
+                    // used as it is until the next G_MTX/G_POPMTX.
+                    const int piece = type_idx == 0x9E ? 0 : type_idx == 0x98 ? 1 : type_idx == 0x9A ? 2
+                                    : type_idx == 0x9C ? 3 : -1;
+                    if (piece >= 0 && src_addr + 16 <= rdram_size) {
+                        std::copy_n(rdram + src_addr, 16, forced_mtx.begin() + piece * 16);
+                        for (int i = 0; i < 4; ++i) {
+                            for (int j = 0; j < 4; ++j) {
+                                const u32 k = (i * 4 + j) * 2;
+                                const s16 ip = static_cast<s16>((forced_mtx[k] << 8) | forced_mtx[k + 1]);
+                                const u16 fp = static_cast<u16>((forced_mtx[32 + k] << 8) | forced_mtx[33 + k]);
+                                combined_matrix.m[i][j] = ip + fp / 65536.0f;
+                            }
+                        }
+                        combined_matrix_dirty = false;
+                    }
                     if (type_idx == 0x84) { // LookAtX
                         if (src_addr + 16 <= rdram_size) {
                             s8 dx = static_cast<s8>(rdram[src_addr + 8]);
@@ -1760,13 +1797,13 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0xBF: { // G_TRI1 (Fast3D or F3DEX) / G_DMA_OFFSETS (F3DDKR/F3DJFG)
+            case 0xBF: { // G_TRI1 (Fast3D or F3DEX; F3DWRUS: slots x5) / G_DMA_OFFSETS (F3DDKR/F3DJFG)
                 if (current_ucode == MicrocodeType::F3DDKR || current_ucode == MicrocodeType::F3DJFG) {
                     dkr_mtx_offset = w0 & 0x00FFFFFF;
                     dkr_vtx_offset = w1 & 0x00FFFFFF;
                     break;
                 }
-                u32 div = (is_f3d_family(current_ucode)) ? 10 : 2;
+                u32 div = current_ucode == MicrocodeType::F3DWRUS ? 5 : is_f3d_family(current_ucode) ? 10 : 2;
                 u32 v0 = ((w1 >> 16) & 0xFF) / div;
                 u32 v1 = ((w1 >> 8) & 0xFF) / div;
                 u32 v2 = (w1 & 0xFF) / div;
@@ -1791,7 +1828,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                     }
                     break;
                 }
-                u32 div = (current_ucode == MicrocodeType::Fast3D) ? 10 : 2;
+                u32 div = current_ucode == MicrocodeType::F3DWRUS ? 5 : (current_ucode == MicrocodeType::Fast3D) ? 10 : 2;
                 u32 v0 = ((w0 >> 16) & 0xFF) / div;
                 u32 v1 = ((w0 >> 8) & 0xFF) / div;
                 u32 v2 = (w0 & 0xFF) / div;
@@ -1866,7 +1903,17 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0xB5: { // G_LINE3D (Fast3D / F3DEX)
+            case 0xB5: { // G_LINE3D (Fast3D / F3DEX) / G_QUAD (F3DWRUS)
+                if (current_ucode == MicrocodeType::F3DWRUS) {
+                    const u32 q0 = ((w1 >> 24) & 0xFF) / 5, q1 = ((w1 >> 16) & 0xFF) / 5;
+                    const u32 q2 = ((w1 >> 8) & 0xFF) / 5, q3 = (w1 & 0xFF) / 5;
+                    if (q0 < vertex_cache.size() && q1 < vertex_cache.size() && q2 < vertex_cache.size() &&
+                        q3 < vertex_cache.size()) {
+                        emit_triangle(q0, q1, q2, rdram, rdram_size);
+                        emit_triangle(q0, q2, q3, rdram, rdram_size);
+                    }
+                    break;
+                }
                 u32 div = (is_f3d_family(current_ucode)) ? 10 : 2;
                 u32 v0 = ((w1 >> 16) & 0xFF) / div;
                 u32 v1 = ((w1 >> 8) & 0xFF) / div;

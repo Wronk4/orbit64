@@ -2,6 +2,7 @@
 """Compatibility sweep: runs every ROM in roms/ headless and reports how it did.
 
     python tools/compat_sweep.py [--frames 1800] [--jobs 4] [--filter text] [--cpu jit|interp]
+                                 [--list tools/test_set.txt] [--compare old/results.json]
 
 For each ROM (roms/ and its subfolders) the emulator runs --frames frames with
 a few START/A presses to get past title screens, taking screenshots along the
@@ -32,13 +33,25 @@ SHOTS = [240, 600, 900, 1200, 1500]  # frames (scaled with --frames)
 PRESSES = [(480, "START"), (840, "START"), (900, "A"), (1080, "A"), (1260, "START"), (1320, "A")]
 
 
-def find_roms(filt, top):
+def find_roms(filt, top, listed=None):
     roms = []
     for d, _, files in os.walk(top):
         for f in files:
             if f.lower().endswith((".z64", ".n64", ".v64")) and (not filt or filt.lower() in f.lower()):
-                roms.append(os.path.join(d, f))
+                if listed is None or f in listed:
+                    roms.append(os.path.join(d, f))
     return sorted(roms, key=lambda p: os.path.basename(p).lower())
+
+
+def read_list(path):
+    """ROM file names from a test set list (tools/test_set.py): one per line, '#' starts a comment."""
+    names = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            name = line.split("#", 1)[0].strip()
+            if name:
+                names.add(name)
+    return names
 
 
 def slug(path):
@@ -228,6 +241,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 4))
     ap.add_argument("--filter", default="")
     ap.add_argument("--roms", default=os.path.join(ROOT, "roms"), help="folder to search for ROMs (default roms/)")
+    ap.add_argument("--list", default="", help="only the ROMs named in this file (see tools/test_set.py)")
     ap.add_argument("--cpu", default="jit", choices=["jit", "interp"])
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--out", default=os.path.join(ROOT, "test_output", "compat"))
@@ -235,7 +249,12 @@ def main():
     ap.add_argument("--exe", default=os.path.join(ROOT, "bin", "n64.exe" if os.name == "nt" else "n64"))
     args = ap.parse_args()
 
-    roms = find_roms(args.filter, args.roms)
+    listed = read_list(args.list) if args.list else None
+    roms = find_roms(args.filter, args.roms, listed)
+    if listed is not None:
+        missing = listed - {os.path.basename(r) for r in roms}
+        for name in sorted(missing):
+            print(f"  (not in {args.roms}: {name})")
     if not roms:
         print(f"No ROMs found in {args.roms}")
         return 1
@@ -258,6 +277,22 @@ def main():
         json.dump(results, f, indent=1)
     write_report(results, args.out, args, compare)
     write_sheet(results, args.out)
+    if compare:
+        # What changed since the earlier sweep. A different RDRAM hash means
+        # the game ran differently (runs are deterministic) - expected after
+        # a change aimed at it, worth a look at the screenshots otherwise.
+        changed = same = 0
+        for r in results:
+            o = compare.get(r["name"])
+            if not o:
+                continue
+            if o.get("status") != r["status"]:
+                print(f"  status: {o.get('status')} -> {r['status']}  {os.path.basename(r['rom'])}")
+            if o.get("rdram_hash") and o.get("rdram_hash") != r.get("rdram_hash"):
+                changed += 1
+            else:
+                same += 1
+        print(f"Compared with {args.compare}: {same} ran the same, {changed} differently (RDRAM hash)")
     print(f"Report: {os.path.join(args.out, 'report.html')}")
     return 0
 
