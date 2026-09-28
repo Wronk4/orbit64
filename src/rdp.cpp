@@ -1509,13 +1509,17 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
             case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: {
                 // G_TRI4 of Conker's Bad Fur Day's F3DEX2 (no other GBI uses
-                // these opcodes): 12 vertex indices of 5 bits, packed from
-                // bit 0 of w1 up through bit 27 of w0 (the opcode's low
-                // nibble); unused slots repeat a vertex.
+                // these opcodes): 12 vertex indices of 5 bits - six from bit 0
+                // of w1, five from bit 0 of w0, and the last one w0 bits 25-27
+                // over w1 bits 30-31 (the opcode's low nibble holds w0's top
+                // bit); unused slots repeat a vertex.
                 if (current_ucode != MicrocodeType::F3DEX2) break;
-                const u64 bits = (static_cast<u64>(w0 & 0x0FFFFFFF) << 32) | w1;
+                u32 ix[12];
+                for (u32 i = 0; i < 6; ++i) ix[i] = (w1 >> (5 * i)) & 31;
+                for (u32 i = 0; i < 5; ++i) ix[6 + i] = (w0 >> (5 * i)) & 31;
+                ix[11] = (((w0 >> 25) & 7) << 2) | (w1 >> 30);
                 for (u32 t = 0; t < 4; ++t) {
-                    const u32 a = (bits >> (15 * t)) & 31, b = (bits >> (15 * t + 5)) & 31, c = (bits >> (15 * t + 10)) & 31;
+                    const u32 a = ix[3 * t], b = ix[3 * t + 1], c = ix[3 * t + 2];
                     if (a != b && b != c && a != c) emit_triangle(a, b, c, rdram, rdram_size);
                 }
                 break;
