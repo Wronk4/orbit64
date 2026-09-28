@@ -1,0 +1,74 @@
+# Test set chosen by tools/test_set.py from 318 ROMs; one ROM file name per line.
+007 - GoldenEye.v64  # core
+A Bug_s Life (U) [!].z64  # no picture
+All-Star Baseball 2000 (U) [!].z64  # slow (45 fps)
+All-Star Baseball 2001 (U) [!].z64  # slow (50 fps)
+Banjo-Kazooie (U) [!].z64  # core
+Banjo-Tooie (U) [!].z64  # no picture
+Battlezone - Rise of the Black Dogs (U) (!).n64  # blank screen
+Body Harvest (U) [!].z64  # blank screen
+Brunswick Circuit Pro Bowling (U) [!].z64  # silent
+Chameleon Twist (U) (!).n64  # silent
+Conker's Bad Fur Day (USA).z64  # core
+Cruis_n USA (U) (V1.2) [!].z64  # silent
+Cruis_n World (U) [!].z64  # no picture
+Diddy Kong Racing (U) (M2) (V1.1) [!].z64  # core
+Disney_s Donald Duck - Goin_ Quackers (U) [!].z64  # slow (36 fps)
+Donkey Kong 64 (U) [!].z64  # core
+Excitebike 64 (U) (!).n64  # blank screen
+F-Zero X (U) [!].z64  # core
+F1_World_Grand_Prix2(E).v64  # no picture
+FIFA Soccer 64 (U) (M3) [!].z64  # blank screen
+Fox Sports College Hoops _99 (U) [!].z64  # blank screen
+Gauntlet Legends (U) (!).n64  # blank screen
+GT 64 Championship Edition (U) [!].z64  # no picture
+Indiana Jones and the Infernal Machine (U) [!].z64  # slow (50 fps), 169 warnings
+Jet Force Gemini (U) [!].z64  # core
+Ken Griffey Jr._s Slugfest (U) [!].z64  # blank screen
+Killer Instinct Gold (U) (V1.2) [!].z64  # slow (51 fps), 104 warnings
+Legend of Zelda, The - Ocarina of Time (U) (V1.2) [!].z64  # core
+Lode Runner 3-D (U) (!).n64  # 134 warnings
+Magical Tetris Challenge (U) [!].z64  # gfx S2DEX
+Major League Baseball Featuring Ken Griffey Jr. (U) [!].z64  # blank screen
+Mario Kart 64 (U) [!].z64  # core
+Mario Party 3 (U) [!].z64  # core
+Michael Owens WLS 2000 (E).v64  # blank screen
+Midway_s Greatest Arcade Hits Volume 1 (U) [!].z64  # audio clicks (56.7/s)
+Mike Piazza_s Strike Zone (U) [!].z64  # no picture
+N64 1080 Snowboarding (JU).z64  # core
+NBA Showtime - NBA on NBC (U) [!].z64  # blank screen
+NFL Blitz - Special Edition (U) [!].z64  # blank screen
+NFL Blitz 2000 (U) [!].z64  # blank screen
+NFL Blitz 2001 (U) [!].z64  # blank screen
+Nightmare Creatures (U) [!].z64  # no picture
+Paper Mario (U) [!].z64  # core
+Perfect Dark (U) (V1.1) [!].z64  # core
+Pokemon Snap (U) [!].z64  # core
+Power Rangers - Lightspeed Rescue (U) [!].z64  # slow (49 fps)
+Quake (USA).z64  # core
+Rat Attack (U) [!].z64  # no picture
+Ready 2 Rumble Boxing Round 2 (U) [!].z64  # silent
+Resident Evil 2 (U) [!].z64  # core
+Robotron 64 (U) [!].z64  # audio clicks (88.8/s)
+RR64 - Ridge Racer 64 (U) [!].z64  # audio clicks (58.9/s)
+Star Fox 64 (U) [!].z64  # core
+Star Wars - Rogue Squadron (U) (!).n64  # blank screen
+Star Wars Episode I - Battle for Naboo (U) [!].z64  # slow (53 fps)
+Super Mario 64 (USA).z64  # core
+Super Smash Bros. (U) [!].z64  # core
+Tom Clancy's Rainbow Six (USA).z64  # core
+Tony Hawk_s Pro Skater 2 (U) [!].z64  # silent
+Tony Hawk_s Pro Skater 3 (U).z64  # silent
+Top Gear Rally 2 (U) [!].z64  # slow (52 fps)
+Toy Story 2 (U) [!].z64  # no picture
+Turok - Dinosaur Hunter (U) (V1.2) [!].z64  # core
+Vigilante 8 - 2nd Offense (U) [!].v64  # blank screen
+Wave Race 64 (U) (V1.1) (!).n64  # slow (17 fps)
+WCW vs. nWo - World Tour (U) (V1.1) [!].z64  # slow (18 fps)
+Wipeout 64 (U) [!].z64  # blank screen
+World Driver Championship (U) [!].z64  # blank screen
+Worms - Armageddon (U) (!).n64  # core
+WWF No Mercy (U) [!].z64  # blank screen
+WWF WrestleMania 2000 (U) (!).n64  # blank screen
+Xena Warrior Princess - Talisman of Fate (U) [!].z64  # silent
+Yoshi_s Story (U) [!].z64  # no picture
