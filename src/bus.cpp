@@ -63,6 +63,12 @@ TLBResult Bus::translate_vaddr(u64 vaddr, u32& paddr, bool is_write, u8 current_
     }
 
     // Mapped segments: KUSEG (0x00000000-0x7FFFFFFF), KSSEG (0xC0000000-0xDFFFFFFF), KSEG3 (0xE0000000-0xFFFFFFFF) via TLB
+    const u32 vpn = va >> 12;
+    TlbCacheEntry& cached = tlb_cache_[vpn & (tlb_cache_.size() - 1)];
+    if (cached.vpn == vpn && cached.gen == tlb_gen_ && cached.asid == current_asid && (!is_write || cached.writable)) {
+        paddr = cached.ppage | (va & 0xFFF);
+        return TLBResult::SUCCESS;
+    }
     for (const auto& entry : tlb_entries) {
         if (!entry.initialized) continue;
         u32 mask = 0xFFFFE000 & ~entry.page_mask;
@@ -86,6 +92,7 @@ TLBResult Bus::translate_vaddr(u64 vaddr, u32& paddr, bool is_write, u8 current_
             }
 
             paddr = static_cast<u32>(((lo >> 6) << 12) & ~(page_size - 1)) | (va & (page_size - 1));
+            cached = {vpn, paddr & ~0xFFFu, tlb_gen_, current_asid, (lo & 4) != 0};
             return TLBResult::SUCCESS;
         }
     }
