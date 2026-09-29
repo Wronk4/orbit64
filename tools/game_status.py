@@ -137,7 +137,7 @@ def display_name(fname):
 # Probing
 
 # Exit codes of a process stopped from outside: Ctrl+C / taskkill on Windows, SIGINT / SIGTERM / SIGKILL elsewhere.
-INTERRUPTED = {0xC000013A, 0xFFFFFFFF, -1, -2, -9, -15, 130, 137, 143}
+INTERRUPTED = {0xC000013A, 0xFFFFFFFF, -1, -2, -9, -15, 1, 130, 137, 143}  # 1: TerminateProcess
 
 
 def as_done(futs):
@@ -182,9 +182,12 @@ def run_probe(e, args, outdir, mode="hle"):
     # cut off in the middle has none and runs again.
     if not args.fresh and os.path.exists(os.path.join(gdir, "run.json")):
         return load_run(e, gdir)
-    shutil.rmtree(gdir, ignore_errors=True)
-    os.makedirs(gdir, exist_ok=True)
-    cmd = [EXE, os.path.join(ROOT, e["rom"]), "--out", gdir, "--frames", str(args.frames),
+    # The run goes into a work folder that replaces the old result only when it
+    # ended properly: a run killed from outside must not destroy what was there.
+    work = gdir + ".new"
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work, exist_ok=True)
+    cmd = [EXE, os.path.join(ROOT, e["rom"]), "--out", work, "--frames", str(args.frames),
            "--max-seconds", str(args.max_seconds), "--rsp", mode]
     t0 = time.time()
     rc, out, err, timed_out = spawn(cmd, args.max_seconds + 150)
@@ -192,14 +195,18 @@ def run_probe(e, args, outdir, mode="hle"):
     err_lines = err.splitlines()
     if len(err_lines) > 400:
         err_lines = err_lines[:200] + [f"... {len(err_lines) - 400} lines ..."] + err_lines[-200:]
-    with open(os.path.join(gdir, "log.txt"), "w", encoding="utf-8") as f:
+    with open(os.path.join(work, "log.txt"), "w", encoding="utf-8") as f:
         f.write(" ".join(cmd) + f"\n\nexit={rc} timeout={timed_out} wall={time.time() - t0:.1f}s\n\n--- stdout ---\n"
                 + out + "\n--- stderr ---\n" + "\n".join(err_lines))
     # A probe that was stopped from outside (Ctrl+C, taskkill) isn't a result:
     # no run.json, so the game runs again next time.
-    if rc not in INTERRUPTED and not STOP.is_set():
-        with open(os.path.join(gdir, "run.json"), "w") as f:
-            json.dump({"rc": rc, "timeout": timed_out, "wall_s": round(time.time() - t0, 1)}, f)
+    if rc in INTERRUPTED or STOP.is_set():
+        shutil.rmtree(work, ignore_errors=True)
+        return load_run(e, gdir)
+    with open(os.path.join(work, "run.json"), "w") as f:
+        json.dump({"rc": rc, "timeout": timed_out, "wall_s": round(time.time() - t0, 1)}, f)
+    shutil.rmtree(gdir, ignore_errors=True)
+    os.replace(work, gdir)
     return load_run(e, gdir)
 
 
@@ -573,7 +580,7 @@ def main():
                 futs = [ex.submit(run_probe, e, args, args.out, mode) for e in pending]
                 for n, fu in enumerate(as_done(futs), 1):
                     r = fu.result()
-                    if r.get("rc") in INTERRUPTED and not os.path.exists(os.path.join(r["dir"], "run.json")):
+                    if not os.path.exists(os.path.join(r["dir"], "run.json")):
                         continue  # stopped from outside: not a result, it runs again next time
                     runs[r["crc"]][mode] = r
                     st = classify(r)

@@ -1,39 +1,44 @@
-# ROMs that don't get into the game (BLACK_SCREEN / CRASH_ERROR), as of the 2026-09-29 sweep.
-# Re-check them after a fix, without touching the rest of the results:
-#   python tools/game_status.py --redo-list tools/fix_list.txt --publish
-# Put a '#' in front of a game once it works and the page shows it.
+# ROMs that don't get into the game (BLACK_SCREEN / CRASH_ERROR), sweep of 2026-09-29, plus what is known.
+# After a fix, run just these again (all modes) and rebuild the results and the page:
+#   python tools/game_status.py --redo-list tools/fix_list.txt --jobs 6        (about 30 min)
+#   python tools/game_status.py --report-only --publish
+# A game that works now gets a '#' in front of its name.
+#
+# Not confirmed = the fix is in the code but the status run has not been repeated yet.
+# 'works in LLE' = HLE fails (microcode / RDP side), the low-level mode gets into the game.
 
-A Bug_s Life (U) [!].z64   # BLACK_SCREEN / no display list
-Banjo-Tooie (U) [!].z64   # BLACK_SCREEN / no display list
-Body Harvest (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
-Cruis_n USA (U) (V1.2) [!].z64   # CRASH_ERROR / freeze
-Cruis_n World (U) [!].z64   # BLACK_SCREEN / no display list
-F1_World_Grand_Prix2(E).v64   # BLACK_SCREEN / no display list
-FIFA - Road to World Cup 98 (U) [!].z64   # CRASH_ERROR / freeze
-FIFA Soccer 64 (U) (M3) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
-Flying Dragon (U) [!].z64   # BLACK_SCREEN / black picture, game reacts
-Gauntlet Legends (U) (!).n64   # BLACK_SCREEN / nothing drawn
-GT 64 Championship Edition (U) [!].z64   # BLACK_SCREEN / no display list
-Hydro Thunder (U) [!].z64   # CRASH_ERROR / freeze
-Ken Griffey Jr._s Slugfest (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
-Madden 2000 (U) [!].z64   # CRASH_ERROR / emulator timeout
-Madden Football 64 (U) [!].z64   # CRASH_ERROR / emulator timeout
-Madden NFL 2001 (U) [!].z64   # CRASH_ERROR / emulator timeout
-Madden NFL 2002 (U) [!].z64   # CRASH_ERROR / emulator timeout
-Madden NFL 99 (U) [!].z64   # CRASH_ERROR / emulator timeout
-Major League Baseball Featuring Ken Griffey Jr. (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
-Micro Machines 64 Turbo (U) [!].z64   # CRASH_ERROR / freeze
-Midway_s Greatest Arcade Hits Volume 1 (U) [!].z64   # BLACK_SCREEN / black picture, game reacts
-Mike Piazza_s Strike Zone (U) [!].z64   # BLACK_SCREEN / no display list
-Mortal Kombat 4 (U) [!].z64   # BLACK_SCREEN / black picture, game reacts
-Namco Museum 64 (U) [!].z64   # BLACK_SCREEN / no display list
-NBA Showtime - NBA on NBC (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
-Nightmare Creatures (U) [!].z64   # BLACK_SCREEN / no display list
-Rat Attack (U) [!].z64   # BLACK_SCREEN / no display list
-Ready 2 Rumble Boxing Round 2 (U) [!].z64   # CRASH_ERROR / freeze
-Rush 2 - Extreme Racing USA (U) [!].z64   # BLACK_SCREEN / went black
-Shadow Man (U) [!].z64   # CRASH_ERROR / freeze
-Toy Story 2 (U) [!].z64   # BLACK_SCREEN / no display list
-Vigilante 8 - 2nd Offense (U) [!].v64   # BLACK_SCREEN / nothing drawn, game stopped
-Waialae Country Club-True Golf Classics (U) [!].z64   # BLACK_SCREEN / went black
-Wipeout 64 (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
+A Bug_s Life (U) [!].z64   # FIXED in code (ROM write latch, ba0a99b) - re-run to confirm
+Banjo-Tooie (U) [!].z64   # game thread faults: null queue (a0=0) in osSend/RecvMesg-like call; no gfx task in HLE or LLE
+Blast Corps (U) (V1.1) [!].z64   # works in LLE (INGAME); HLE: CRASH_ERROR / freeze
+Body Harvest (U) [!].z64   # 2 gfx tasks then stops (HLE and LLE)
+Cruis_n USA (U) (V1.2) [!].z64   # spins on a flag word; also LLE
+Cruis_n World (U) [!].z64   # hangs in `b self` after writing two registers: looks like a CIC 6106 check (state IPL3 leaves)
+F1_World_Grand_Prix2(E).v64   # FIXED in code (osTvType from country code, 5e7671d) - re-run to confirm
+FIFA - Road to World Cup 98 (U) [!].z64   # CRASH_ERROR / emulator crash
+FIFA Soccer 64 (U) (M3) [!].z64   # game thread TLB fault, garbage pointer; 2 gfx tasks then stops (HLE and LLE)
+Flying Dragon (U) [!].z64   # CRASH_ERROR / emulator crash
+Gauntlet Legends (U) (!).n64   # CRASH_ERROR / emulator crash
+GT 64 Championship Edition (U) [!].z64   # no gfx task, interrupt MI=0x2 pending (SP?)
+Hydro Thunder (U) [!].z64   # hangs in `jal error; j self` (a panic routine), also LLE
+Ken Griffey Jr._s Slugfest (U) [!].z64   # CRASH_ERROR / emulator crash
+Madden 2000 (U) [!].z64   # CRASH_ERROR / emulator crash
+Madden Football 64 (U) [!].z64   # CRASH_ERROR / emulator crash
+Madden NFL 2001 (U) [!].z64   # CRASH_ERROR / emulator crash
+Madden NFL 2002 (U) [!].z64   # CRASH_ERROR / emulator crash
+Madden NFL 99 (U) [!].z64   # CRASH_ERROR / emulator crash
+Major League Baseball Featuring Ken Griffey Jr. (U) [!].z64   # CRASH_ERROR / emulator crash
+Micro Machines 64 Turbo (U) [!].z64   # CRASH_ERROR / emulator crash
+Midway_s Greatest Arcade Hits Volume 1 (U) [!].z64   # CRASH_ERROR / emulator crash
+Mike Piazza_s Strike Zone (U) [!].z64   # jumps to 0x80000000, exception loop
+Mortal Kombat 4 (U) [!].z64   # HLE: every triangle culled (cull_front); works in LLE
+Namco Museum 64 (U) [!].z64   # runs; draws with the CPU, the tester called it black (fixed in game_status.py) - re-run to confirm
+NBA Showtime - NBA on NBC (U) [!].z64   # CRASH_ERROR / emulator crash
+Nightmare Creatures (U) [!].z64   # exception loop at 0x80000180
+Rat Attack (U) [!].z64   # game thread faults: store through a null pointer
+Ready 2 Rumble Boxing Round 2 (U) [!].z64   # CRASH_ERROR / emulator crash
+Rush 2 - Extreme Racing USA (U) [!].z64   # CRASH_ERROR / emulator crash
+Shadow Man (U) [!].z64   # CRASH_ERROR / emulator crash
+Toy Story 2 (U) [!].z64   # FIXED in code (ROM write latch, ba0a99b) - re-run to confirm
+Vigilante 8 - 2nd Offense (U) [!].v64   # CRASH_ERROR / emulator crash
+Waialae Country Club-True Golf Classics (U) [!].z64   # CRASH_ERROR / emulator crash
+Wipeout 64 (U) [!].z64   # jumps to 0x80000000 after 1 gfx task (HLE and LLE)
