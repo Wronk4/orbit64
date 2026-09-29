@@ -8,6 +8,7 @@ Emulator::Emulator()
       cpu(bus) {
     // Controller 1 has a Controller Pak unless the front end says otherwise.
     controllers[0].set_accessory(Accessory::ControllerPak);
+    rdp.set_rsp_dmem(rsp.get_dmem());
 }
 
 Emulator::~Emulator() {
@@ -236,9 +237,16 @@ u32 Emulator::skip_idle_loop(u32 budget) {
 void Emulator::render_frame(VideoFrame& out) {
     const u8* rdram = bus.get_rdram();
     const size_t rdram_size = bus.get_rdram_size();
-    HiResRenderer* hr = rdp.hires();
+    // The bit-exact RDP draws at native resolution only.
+    HiResRenderer* hr = rdp.exact_drawing() ? nullptr : rdp.hires();
     const VIScanout so = vi.scanout(rdram_size);
-    if (!hr || so.blank || so.lines > kFbLines || !hr->present(so, rdram, rdram_size, out)) {
+    if (rdp.exact_drawing() && vi_exact_) {
+        rdp.flush_pending(); // queued bit-exact draws
+        // Bit-exact RDP output goes through the VI as the hardware scans it out.
+        out.gpu.reset();
+        vi.render_frame_exact(rdram, rdram_size, rdp.exact_rdp(), out.pixels, out.w, out.h);
+        out.scale = 1;
+    } else if (!hr || so.blank || so.lines > kFbLines || !hr->present(so, rdram, rdram_size, out)) {
         // Native resolution, or the VI shows memory the RDP never drew into
         // (a screen the CPU drew, or a 480-line screen, which the
         // high-resolution buffers - 240 lines tall - do not hold): the
@@ -248,7 +256,9 @@ void Emulator::render_frame(VideoFrame& out) {
         out.scale = 1;
     }
     if (hr) hr->end_frame();
-    rdp.clear_zbuffer();
+    // Display lists run whole between two frames; the RDP's command buffer
+    // may be halfway through one, which clears its depth buffer itself.
+    if (!rdp.drawing_rdp_commands()) rdp.clear_zbuffer();
 }
 
 void Emulator::render_frame(std::vector<u32>& out_pixels, int& out_w, int& out_h, int* out_scale) {
@@ -275,6 +285,9 @@ template <class S> void Emulator::serialize(S& s) {
             return;
         }
     }
+    // Draws the RDP has queued belong in the RDRAM saved below (the RDP's
+    // command buffer can be halfway through a frame).
+    if constexpr (!S::loading) rdp.flush_pending();
     // Controllers are left out: they follow the player's input, not the state.
     auto section = [&s](const char (&tag)[5], auto& part) {
         s.begin_section(tag);
@@ -310,6 +323,13 @@ template <class S> void Emulator::serialize(S& s) {
     for (auto& c : controllers) c.transfer_pak().serialize(s);
     s.end_section();
     if constexpr (S::loading) bus.set_ram_limit(ram_limit == 0x400000u ? ram_limit : RDRAM_SIZE);
+    // Also added later: the RDP commands read but not run yet.
+    if constexpr (S::loading) {
+        if (s.at_end()) return;
+    }
+    s.begin_section("RDPC");
+    rdp.serialize_commands(s);
+    s.end_section();
 }
 
 std::vector<u8> Emulator::save_state() {

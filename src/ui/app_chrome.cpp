@@ -486,8 +486,9 @@ void App::draw_statusbar(ImVec2 pos, ImVec2 size) {
     std::snprintf(buf, sizeof buf, "%llu", static_cast<unsigned long long>(loaded ? s.frame : 0));
     segs.push_back({"Frame", buf, g_pal.text, {}, "Frames emulated since power-on / reset", 5});
     {
-        std::string u = (loaded && s.ucode >= 0 && s.ucode < 11) ? kUcodeNames[s.ucode] : "Unknown";
-        std::string tip = "Graphics microcode detected from the game's display lists";
+        std::string u = (loaded && s.gfx_lle) ? "LLE" : (loaded && s.ucode >= 0 && s.ucode < 11) ? kUcodeNames[s.ucode] : "Unknown";
+        std::string tip = s.gfx_lle ? "The game's graphics microcode runs on the low-level RSP; the RDP draws the commands it sends"
+                                    : "Graphics microcode detected from the game's display lists";
         if (settings_.ucode_override > 0) tip += "\nOverride active in Settings \xE2\x80\xBA Emulation";
         segs.push_back({"GPU", u, loaded && s.ucode >= 0 ? g_pal.text : dim, {}, tip, 2});
     }

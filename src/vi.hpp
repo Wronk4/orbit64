@@ -40,6 +40,14 @@ public:
     // Converts the part of the frame buffer on screen to ARGB8888, placed on
     // the whole screen (VIScanout::canvas_w x canvas_h).
     void render_frame(const u8* rdram, size_t rdram_size, std::vector<u32>& out_pixels, int& out_w, int& out_h) const;
+    // The VI as the hardware scans out (vi_exact.cpp): coverage anti-aliasing
+    // or the dither filter, the divot filter, bilinear scaling from
+    // X/Y_SCALE, gamma and gamma dither, over the whole 640-wide picture
+    // including its borders. `rdp` has the RDRAM's ninth bits (coverage);
+    // without it they are what CPU writes leave. The picture comes out
+    // 640 x 480 (576 PAL), each line of a progressive frame shown twice.
+    void render_frame_exact(const u8* rdram, size_t rdram_size, const class ExactRdp* rdp, std::vector<u32>& out_pixels,
+                            int& out_w, int& out_h);
 
     u32 get_origin() const { return origin; }
     u32 get_status() const { return status; }
@@ -71,4 +79,9 @@ private:
     u32 v_burst{0};
     u32 x_scale{0x400};
     u32 y_scale{0x400};
+
+    // render_frame_exact(): the woven picture of interlaced modes, and a
+    // frame counter (gamma dither noise, field parity).
+    std::vector<u32> exact_picture_;
+    u32 exact_frames_{0};
 };

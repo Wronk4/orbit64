@@ -49,7 +49,10 @@ void RasterPool::run(u32 count, const std::function<void(u32)>& fn) {
         return;
     }
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // A worker that woke too late for the previous run may still be in
+        // work(); it must be out before the job it reads is replaced.
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_.wait(lock, [&] { return active_ == 0; });
         fn_ = &fn;
         count_ = count;
         next_.store(0, std::memory_order_relaxed);

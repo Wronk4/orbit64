@@ -21,6 +21,11 @@ using namespace jit_detail;
 
 Recompiler::Recompiler() : code_pages_(RDRAM_SIZE >> kPageShift, 0), jcache_(1u << kJCacheBits) {
     clear_jcache();
+    jit::set_watch_hook(this, [](void* owner, u32 paddr, u32 len) {
+        auto& pages = static_cast<Recompiler*>(owner)->code_pages_;
+        const u32 last = (paddr + len - 1) >> kPageShift;
+        for (u32 p = paddr >> kPageShift; p <= last && p < pages.size(); ++p) pages[p] |= kPageWatched;
+    });
     jit::set_invalidate_hook(this, [](void* owner, u32 paddr, u32 len) {
         static_cast<Recompiler*>(owner)->request_invalidate(paddr, len);
     });
@@ -28,6 +33,7 @@ Recompiler::Recompiler() : code_pages_(RDRAM_SIZE >> kPageShift, 0), jcache_(1u 
 
 Recompiler::~Recompiler() {
     jit::clear_invalidate_hook_if(this);
+    jit::clear_watch_hook_if(this);
 }
 
 void Recompiler::invalidate_all() {
@@ -37,7 +43,7 @@ void Recompiler::invalidate_all() {
         map->last_block = nullptr;
     }
     code_.reset();
-    std::fill(code_pages_.begin(), code_pages_.end(), 0);
+    for (u8& page : code_pages_) page &= kPageWatched;
     page_blocks_.clear();
     dirty_pages_.clear();
     pending_links_.clear();
@@ -64,7 +70,7 @@ void Recompiler::request_invalidate(u32 paddr, u32 len) {
     u32 first_page = paddr >> kPageShift;
     u32 last_page = (paddr + len - 1) >> kPageShift;
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
-        if (code_pages_[p]) {
+        if (code_pages_[p] & kPageCode) {
 #if defined(ORBIT64_JIT_A64)
             // Chained blocks jump into each other: drop everything.
             pending_invalidate_ = true;
@@ -82,7 +88,7 @@ void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot
     u32 first_page = start_paddr >> kPageShift;
     u32 last_page = (end_paddr == start_paddr) ? first_page : (end_paddr - 1) >> kPageShift;
     for (u32 p = first_page; p <= last_page && p < code_pages_.size(); ++p) {
-        code_pages_[p] = 1;
+        code_pages_[p] |= kPageCode;
 #if !defined(ORBIT64_JIT_A64)
         const u32 entry = start_paddr | (delay_slot ? 1u : mapped ? 2u : 0u);
         std::vector<u32>& list = page_blocks_[p];
@@ -93,8 +99,8 @@ void Recompiler::mark_code_pages(u32 start_paddr, u32 end_paddr, bool delay_slot
 
 void Recompiler::drop_dirty_pages() {
     for (u32 p : dirty_pages_) {
-        if (!code_pages_[p]) continue; // already dropped
-        code_pages_[p] = 0;
+        if (!(code_pages_[p] & kPageCode)) continue; // already dropped
+        code_pages_[p] &= ~kPageCode;
         auto it = page_blocks_.find(p);
         if (it == page_blocks_.end()) continue;
         // A block that also covers other pages stays listed there; dropping

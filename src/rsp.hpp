@@ -20,6 +20,17 @@ namespace SPStatus {
     constexpr u32 SIG2           = 1 << 9;
 }
 
+// Which tasks run on the low-level RSP (rsp_core.hpp, a real RSP running the
+// game's own microcode, with the RDP drawing the commands it sends) instead
+// of the high-level emulation. Tasks the high-level emulation doesn't know -
+// including graphics microcodes it can't identify - always run low-level.
+enum class RspMode : u8 {
+    HLE,         // graphics and audio emulated at a high level (fastest)
+    LLEGraphics, // graphics low-level, audio high-level
+    LLE,         // everything low-level (most accurate, slowest)
+    LLEAudio,    // audio low-level only (debugging)
+};
+
 class RSP {
 public:
     RSP();
@@ -47,9 +58,13 @@ public:
     u32 cop0_read(u32 reg, RDP& rdp);
     void cop0_write(u32 reg, u32 val, MI& mi, RDP& rdp, u8* rdram, size_t rdram_size);
     void core_break(MI& mi); // BREAK: halt, and interrupt the CPU if asked to
-    // Run every task on the low-level RSP (ORBIT64_RSP=lle, or lle-audio for
-    // the audio tasks), not only the ones the high-level emulation doesn't know.
-    void set_force_lle(bool on) { force_lle_ = on; }
+    // Which tasks run on the low-level RSP (RspMode); ORBIT64_RSP=hle, lle,
+    // lle-gfx or lle-audio overrides it. Takes effect with the next task.
+    void set_mode(RspMode m) { mode_ = m; }
+    RspMode mode() const { return env_mode_ >= 0 ? static_cast<RspMode>(env_mode_) : mode_; }
+    void set_force_lle(bool on) { mode_ = on ? RspMode::LLE : RspMode::HLE; env_mode_ = -1; }
+    // Whether the last graphics task ran low-level.
+    bool gfx_lle() const { return gfx_lle_; }
     bool lle_active() const { return lle_running; }
     u64 get_lle_task_count() const { return lle_task_count; }
     const RspCore& debug_core() const { return core; }
@@ -83,8 +98,9 @@ private:
 
     RspCore core;
     bool lle_running{false}; // the halted RSP was started on a task run by `core`
-    bool force_lle_{false};
-    bool force_lle_audio_{false}; // ORBIT64_RSP=lle-audio: audio tasks only
+    RspMode mode_{RspMode::HLE};
+    int env_mode_{-1}; // ORBIT64_RSP's RspMode, -1 = not set
+    bool gfx_lle_{false};
     u64 lle_task_count{0};
     s64 lle_cycle_debt{0};   // RSP cycles owed from the last step (2 RSP : 3 CPU)
 
@@ -99,6 +115,9 @@ private:
     void execute_sp_dma(bool to_rdram, u32 len_reg, u8* rdram, size_t rdram_size);
     void write_status(u32 val, MI& mi);
     void start(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size);
+    // Identifies the graphics microcode of the task at DMEM `offset` and
+    // tells the RDP; false when it is none the high-level emulation knows.
+    bool detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_size);
 
     AudioHLE ahle;
     u64 gfx_task_count{0};

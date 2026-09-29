@@ -96,6 +96,7 @@ struct CoreStats {
     float frame_ms = 0.0f;      // host time spent emulating one frame
     std::uint64_t frame = 0;
     int ucode = -1;             // MicrocodeType index, -1 = none seen yet
+    bool gfx_lle = false;       // graphics run on the low-level RSP and RDP
     int audio_abi = -1;         // AudioABI index, -1 = no audio task yet
     bool rsp_active = false;
     bool rdp_active = false;
@@ -135,6 +136,12 @@ public:
     // CPU core: 0 = Interpreter, 1 = Dynamic Recompiler (JIT). Applied at the
     // start of the next emulated frame.
     void set_cpu_core(int core) { cpu_core_ = core; }
+    // RSP emulation (RspMode): 0 = HLE, 1 = LLE graphics, 2 = LLE graphics
+    // and audio. Applied from the next RSP task on.
+    void set_rsp_mode(int mode) { rsp_mode_ = mode; }
+    // Low-level graphics drawn by the bit-exact RDP (native resolution) or
+    // the fast one (which supports the internal resolution).
+    void set_rdp_exact(bool on) { rdp_exact_ = on; }
     // Frame rate limit: 0 = console default (VI rate), >0 = that many frames per second.
     void set_fps_limit(int fps) { fps_limit_ = fps; }
     // Internal resolution of the software RDP: 1 = the game's frame buffer
@@ -229,6 +236,8 @@ private:
     std::atomic<int> ucode_override_{0};
     std::atomic<bool> ucode_dirty_{true};
     std::atomic<int> cpu_core_{1};
+    std::atomic<int> rsp_mode_{0};
+    std::atomic<bool> rdp_exact_{true};
     std::atomic<int> fps_limit_{0};
     std::atomic<int> internal_scale_{1};
     std::mutex factory_mutex_;

@@ -63,6 +63,9 @@ public:
     // Expansion Pak (the 4 MB RDRAM upgrade): without it the game is told it
     // has 4 MB. Takes effect at the next reset().
     void set_expansion_pak(bool on) { expansion_pak_ = on; }
+    // Frames drawn by the bit-exact RDP are scanned out by the exact VI
+    // (filters, scaling, gamma) unless this is off.
+    void set_vi_exact(bool on) { vi_exact_ = on; }
     bool expansion_pak() const { return expansion_pak_; }
 
     Cartridge& get_cartridge() { return cart; }
@@ -84,6 +87,7 @@ private:
     PIF pif;
     Controller controllers[4];
     bool expansion_pak_{true};
+    bool vi_exact_{true};
     MI mi;
     VI vi;
     AI ai;

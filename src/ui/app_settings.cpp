@@ -113,7 +113,7 @@ void App::draw_settings() {
                 break;
             case SettingsPage::Audio: settings_.reset_audio(); open_audio(); break;
             case SettingsPage::Controller: settings_.reset_port(settings_port_); break;
-            case SettingsPage::Emulation: settings_.reset_emulation(); core_.set_ucode_override(0); core_.set_cpu_core(settings_.cpu_core); break;
+            case SettingsPage::Emulation: settings_.reset_emulation(); core_.set_ucode_override(0); core_.set_cpu_core(settings_.cpu_core); core_.set_rsp_mode(settings_.rsp_mode); core_.set_rdp_exact(settings_.rdp_exact); break;
             default: break;
         }
         toast(std::string(pi.name) + " settings restored to defaults");
@@ -703,6 +703,30 @@ void App::settings_emulation() {
     row_begin("Expansion Pak", "The 4 MB memory upgrade (8 MB in total). Some games need it (Majora's Mask, Donkey Kong 64, Perfect Dark's campaign) "
               "and others use it for a high-resolution mode. Applies when a game starts or is reset.", cw);
     if (toggle("expak", &settings_.expansion_pak) && core_.loaded()) toast("Reset the game to apply", ToastKind::Info);
+    row_end();
+
+    row_begin("RSP / RDP emulation",
+              "High-level (HLE) recreates what the graphics and audio microcodes do: fastest. Low-level (LLE) runs the game's own "
+              "microcode on an emulated RSP and draws the RDP commands it produces, so any microcode works, at a higher CPU cost. "
+              "Graphics microcodes HLE doesn't recognize always run low-level.", cw);
+    {
+        const char* items[] = {"HLE (fast)", "LLE graphics, HLE audio", "LLE graphics and audio (accurate)"};
+        if (combo("rspmode", &settings_.rsp_mode, items, 3, cw)) core_.set_rsp_mode(settings_.rsp_mode);
+    }
+    row_end();
+
+    row_begin("Low-level RDP",
+              "How low-level graphics are drawn. Bit-exact reproduces the console's RDP pixel for pixel (dithering, "
+              "coverage, depth precision) at native resolution. Fast draws them through the high-level renderer, "
+              "which supports higher internal resolutions but is not exact.", cw);
+    {
+        const char* items[] = {"Bit-exact (native resolution)", "Fast (supports upscaling)"};
+        int cur = settings_.rdp_exact ? 0 : 1;
+        if (combo("rdpexact", &cur, items, 2, cw)) {
+            settings_.rdp_exact = cur == 0;
+            core_.set_rdp_exact(settings_.rdp_exact);
+        }
+    }
     row_end();
 
     row_begin("Graphics microcode", "Auto-detect works for nearly every game. Override only if a game renders incorrectly.", cw);

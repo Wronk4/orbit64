@@ -1,6 +1,7 @@
 #include "rdp.hpp"
 #include "mi.hpp"
 #include "raster_pool.hpp"
+#include "jit/jit_invalidate.hpp"
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -114,6 +115,10 @@ bool ucode_banner_is_non(const u8* p, size_t len) {
 }
 
 RDP::RDP() {
+    // CPU and DMA writes to RDRAM reset the ninth bits the RDP left there.
+    jit::set_write_hook(this, [](void* owner, u32 paddr, u32 len) {
+        static_cast<RDP*>(owner)->exact_.cpu_wrote(paddr, len);
+    });
     reset();
     if (const char* e = std::getenv("ORBIT64_PICK")) std::sscanf(e, "%d,%d,%d", &pick_x_, &pick_y_, &pick_frame_);
     if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
@@ -122,12 +127,22 @@ RDP::RDP() {
     }
 }
 
-RDP::~RDP() = default;
+RDP::~RDP() {
+    jit::clear_write_hook_if(this);
+}
 
 void RDP::reset() {
     flush_native();
     dpc_start = 0;
     dpc_end = 0;
+    raw_buf_.clear();
+    raw_mode_ = false;
+    raw_unbind_ = true;
+    exact_.reset();
+    if (const char* e = std::getenv("ORBIT64_RDP")) {
+        env_exact_ = std::strcmp(e, "exact") == 0 ? 1 : std::strcmp(e, "fast") == 0 ? 0 : -1;
+        if (env_exact_ >= 0) exact_mode_ = env_exact_ != 0;
+    }
     dpc_current = 0;
     dpc_status = 0;
     dp_pending_ = false;
@@ -307,8 +322,10 @@ const DrawState& RDP::draw_state() {
         s.fb_size = color_image_size;
         s.combine_set = combine_mode_set;
         s.texture_enabled = texture_enabled;
-        s.smooth_shading = (current_ucode_active == MicrocodeType::F3DEX2) ? (geometry_mode & 0x00200000) != 0
-                                                                          : (geometry_mode & 0x00000200) != 0;
+        // The RDP interpolates whatever its triangle commands say; flat
+        // shading is the microcode's job (zero gradients).
+        s.smooth_shading = raw_mode_ || (current_ucode_active == MicrocodeType::F3DEX2 ? (geometry_mode & 0x00200000) != 0
+                                                                                       : (geometry_mode & 0x00000200) != 0);
         s.active_tile = active_tile;
         s.max_level = tex_max_level;
         s.min_level = prim_min_level;
@@ -347,7 +364,7 @@ u32 RDP::read_dpc_reg(u32 addr) const {
         case 0: return dpc_start;
         case 1: return dpc_end;
         case 2: return dpc_current;
-        case 3: return dpc_status;
+        case 3: return dpc_status | (1 << 7); // CBUF_READY: commands are taken right away
         case 4: return dpc_clock;
         case 5: return dpc_bufbusy;
         case 6: return dpc_pipebusy;
@@ -360,15 +377,12 @@ void RDP::write_dpc_reg(u32 addr, u32 val, MI& mi, u8* rdram, size_t rdram_size)
     u32 reg = (addr & 0x1F) >> 2;
     switch (reg) {
         case 0: // DPC_START_REG
-            dpc_start = val & 0x00FFFFFF;
+            dpc_start = val & 0x00FFFFF8;
             dpc_current = dpc_start;
             break;
-        case 1: // DPC_END_REG
-            dpc_end = val & 0x00FFFFFF;
-            if (dpc_current < dpc_end) {
-                process_display_list(dpc_current, rdram, rdram_size, mi);
-                dpc_current = dpc_end;
-            }
+        case 1: // DPC_END_REG: the RDP runs [DPC_CURRENT, DPC_END)
+            dpc_end = val & 0x00FFFFF8;
+            if (!(dpc_status & (1 << 1))) process_rdp_commands(mi, rdram, rdram_size);
             break;
         case 2: // DPC_CURRENT_REG (read only)
             break;
@@ -382,12 +396,307 @@ void RDP::write_dpc_reg(u32 addr, u32 val, MI& mi, u8* rdram, size_t rdram_size)
                     dp_pending_ = false;
                     mi.raise_interrupt(MIInterrupt::DP);
                 }
+                process_rdp_commands(mi, rdram, rdram_size);
             }
             if (val & (1 << 3)) dpc_status |= (1 << 1);  // Set freeze
             if (val & (1 << 4)) dpc_status &= ~(1 << 2); // Clr flush
             if (val & (1 << 5)) dpc_status |= (1 << 2);  // Set flush
             break;
         }
+    }
+}
+
+namespace {
+// Length in 64-bit words of the RDP command `op` (6 bits): triangles carry
+// 4 edge words, then 8 shade, 8 texture and 2 depth words if they have them.
+u32 rdp_command_words(u32 op) {
+    if (op >= 0x08 && op <= 0x0F)
+        return 4 + ((op & 4) ? 8 : 0) + ((op & 2) ? 8 : 0) + ((op & 1) ? 2 : 0);
+    if (op == 0x24 || op == 0x25) return 2; // texture rectangles
+    return 1;
+}
+} // namespace
+
+// Runs the commands between DPC_CURRENT and DPC_END, read from RDRAM (or
+// from DMEM with XBUS). They are run as soon as DPC_END says they are
+// there; a command cut off at the end of the buffer waits for the rest.
+void RDP::process_rdp_commands(MI& mi, u8* rdram, size_t rdram_size) {
+    if (dpc_current >= dpc_end) return;
+    const bool xbus = dpc_status & 1;
+    if (xbus && !rsp_dmem_) return;
+    for (u32 a = dpc_current; a + 8 <= dpc_end; a += 8) {
+        u64 w = 0;
+        for (u32 i = 0; i < 8; ++i) {
+            const u8 b = xbus ? rsp_dmem_[(a + i) & 0xFFF] : (a + i < rdram_size ? rdram[a + i] : 0);
+            w = (w << 8) | b;
+        }
+        raw_buf_.push_back(w);
+    }
+    dpc_current = dpc_end;
+
+    if (!trace_checked_) {
+        trace_checked_ = true;
+        if (const char* path = std::getenv("ORBIT64_RDP_TRACE")) trace_ = std::make_unique<Trace>(path);
+    }
+    // (Only at the start of a frame: what the CPU changes while the RDP is
+    // drawing one is left out, which keeps tracing fast.)
+    // ORBIT64_RDP_TRACE_FINE=<frame>: from that frame on, before every batch.
+    if (trace_ && (!raw_mode_ || raw_unbind_ || (trace_->fine_from >= 0 && g_current_frame >= trace_->fine_from)))
+        trace_->before(rdram, rdram_size);
+
+    if (!raw_mode_ || raw_unbind_) {
+        // The CPU may have changed RDRAM since the RDP last drew.
+        raw_mode_ = true;
+        raw_unbind_ = false;
+        draw_state_dirty_ = true;
+        if (hires_) hires_->unbind();
+    }
+    size_t pos = 0;
+    while (pos < raw_buf_.size()) {
+        const u64 c0 = raw_buf_[pos];
+        const u32 op = static_cast<u32>(c0 >> 56) & 0x3F;
+        const u32 len = rdp_command_words(op);
+        if (pos + len > raw_buf_.size()) break; // the rest comes with the next DPC_END
+        const u64* cmd = &raw_buf_[pos];
+        pos += len;
+        ++raw_cmd_count_;
+        const u32 w0 = static_cast<u32>(c0 >> 32), w1 = static_cast<u32>(c0);
+        if (trace_) trace_->command(cmd, len);
+        if (exact_mode_) {
+            u32 words[44];
+            for (u32 i = 0; i < len; ++i) {
+                words[i * 2] = static_cast<u32>(cmd[i] >> 32);
+                words[i * 2 + 1] = static_cast<u32>(cmd[i]);
+            }
+            if (exact_.command(words, rdram, rdram_size)) { // Sync Full
+                if (trace_) trace_->after(rdram, rdram_size);
+                raw_unbind_ = true;
+                ++display_list_count;
+                mi.raise_interrupt(MIInterrupt::DP);
+            }
+            continue;
+        }
+        const u8 opcode = static_cast<u8>(op | 0xC0); // the display lists' numbering
+        if (!keeps_draw_state(opcode)) draw_state_dirty_ = true;
+
+        if (op >= 0x08 && op <= 0x0F) {
+            rdp_triangle(cmd, op, rdram, rdram_size);
+            continue;
+        }
+        switch (op) {
+            case 0x24: // Texture Rectangle
+            case 0x25: { // Texture Rectangle Flip
+                u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
+                u32 lry = (w0 & 0xFFF) / 4;
+                const u32 tile_idx = (w1 >> 24) & 0x7;
+                u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
+                u32 uly = (w1 & 0xFFF) / 4;
+                if (ulx > lrx) std::swap(ulx, lrx);
+                if (uly > lry) std::swap(uly, lry);
+                const u64 c1 = cmd[1];
+                const f32 s = static_cast<s16>(c1 >> 48) / 32.0f;
+                const f32 t = static_cast<s16>(c1 >> 32) / 32.0f;
+                const f32 dsdx = static_cast<s16>(c1 >> 16) / 1024.0f;
+                const f32 dtdy = static_cast<s16>(c1) / 1024.0f;
+                rasterize_tex_rect(ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, op == 0x25, rdram, rdram_size);
+                break;
+            }
+            case 0x29: // Sync Full: everything drawn is in RDRAM, tell the CPU
+                flush_native();
+                if (hires_) hires_->flush();
+                raw_unbind_ = true;
+                ++display_list_count;
+                mi.raise_interrupt(MIInterrupt::DP);
+                break;
+            default:
+                // Syncs and no-ops do nothing here; everything else is the
+                // same as in a display list.
+                if (op >= 0x26) execute_rdp_op(opcode, w0, w1, rdram, rdram_size, true);
+                break;
+        }
+    }
+    raw_buf_.erase(raw_buf_.begin(), raw_buf_.begin() + static_cast<std::ptrdiff_t>(pos));
+    if (trace_ && trace_->fine_from >= 0 && g_current_frame >= trace_->fine_from) trace_->after(rdram, rdram_size);
+}
+
+// ORBIT64_RDP_TRACE=<file>: records what the RDP's command buffer runs - its
+// commands, and every change to RDRAM made by anything but the RDP in
+// between (4 KB pages; the first record is all of RDRAM) - so that it can be
+// replayed on another RDP implementation and compared with this one.
+//   'M' u32 address, u32 length, bytes      RDRAM contents
+//   'C' u32 words, the command's 32-bit words
+// (u32s little-endian, RDRAM bytes in the console's order).
+RDP::Trace::Trace(const char* path) : f(std::fopen(path, "wb")) {
+    if (const char* e = std::getenv("ORBIT64_RDP_TRACE_FINE")) fine_from = std::atoi(e);
+}
+RDP::Trace::~Trace() {
+    if (f) std::fclose(f);
+}
+void RDP::Trace::put32(u32 v) {
+    const u8 b[4] = {static_cast<u8>(v), static_cast<u8>(v >> 8), static_cast<u8>(v >> 16), static_cast<u8>(v >> 24)};
+    std::fwrite(b, 1, 4, f);
+}
+void RDP::Trace::before(const u8* rdram, size_t size) {
+    if (!f) return;
+    constexpr size_t kPage = 4096;
+    if (shadow.size() != size) {
+        shadow.assign(rdram, rdram + size);
+        std::fputc('M', f);
+        put32(0);
+        put32(static_cast<u32>(size));
+        std::fwrite(rdram, 1, size, f);
+        return;
+    }
+    for (size_t p = 0; p < size; p += kPage) {
+        if (std::memcmp(rdram + p, shadow.data() + p, kPage) == 0) continue;
+        std::memcpy(shadow.data() + p, rdram + p, kPage);
+        std::fputc('M', f);
+        put32(static_cast<u32>(p));
+        put32(static_cast<u32>(kPage));
+        std::fwrite(rdram + p, 1, kPage, f);
+    }
+}
+void RDP::Trace::command(const u64* cmd, u32 len) {
+    if (!f) return;
+    std::fputc('C', f);
+    put32(len * 2);
+    for (u32 i = 0; i < len; ++i) {
+        put32(static_cast<u32>(cmd[i] >> 32));
+        put32(static_cast<u32>(cmd[i]));
+    }
+}
+void RDP::Trace::after(const u8* rdram, size_t size) {
+    if (!f || shadow.size() != size) return;
+    // What the RDP wrote is not recorded: the replay draws it.
+    std::memcpy(shadow.data(), rdram, size);
+    std::fflush(f);
+}
+
+// A triangle command: three edges (the major edge H from YH to YL, M above
+// YM and L below it) and the shade, texture and depth planes, each an
+// attribute's value where H crosses the top scanline plus its change per
+// pixel to the right (DxDx) and per scanline along H (DxDe). It is drawn as
+// the (up to six-cornered) polygon the edges enclose, with every attribute
+// worked out at the corners from its plane, through the same pixel pipeline
+// as everything else.
+void RDP::rdp_triangle(const u64* cmd, u32 op, u8* rdram, size_t rdram_size) {
+    stat_tri_called++;
+    const u64 c0 = cmd[0];
+    auto s14 = [](u64 v) { return static_cast<s32>(static_cast<u32>(v & 0x3FFF) << 18) >> 18; };
+    const u32 level = static_cast<u32>(c0 >> 51) & 7;
+    const u32 tile = static_cast<u32>(c0 >> 48) & 7;
+    const f32 yl = s14(c0 >> 32) / 4.0f, ym = s14(c0 >> 16) / 4.0f, yh = s14(c0) / 4.0f;
+    auto fx = [](u32 v) { return static_cast<s32>(v) / 65536.0f; };
+    const f32 xl = fx(static_cast<u32>(cmd[1] >> 32)), dxldy = fx(static_cast<u32>(cmd[1]));
+    const f32 xh = fx(static_cast<u32>(cmd[2] >> 32)), dxhdy = fx(static_cast<u32>(cmd[2]));
+    const f32 xm = fx(static_cast<u32>(cmd[3] >> 32)), dxmdy = fx(static_cast<u32>(cmd[3]));
+    if (!(yl > yh)) return;
+    // H and M start at the top scanline YH is on; L starts at YM.
+    const f32 y0 = std::floor(yh);
+    const f32 ymc = std::clamp(ym, yh, yl);
+
+    const bool shade = op & 4, tex = op & 2, zbuf = op & 1;
+    if (texture_enabled != tex || active_tile != tile || tex_max_level != level) {
+        texture_enabled = tex;
+        active_tile = tile;
+        tex_max_level = static_cast<u8>(level);
+        draw_state_dirty_ = true;
+    }
+
+    // An attribute plane: value, DxDx, DxDe (s15.16 each).
+    struct Plane {
+        f32 v{0}, dx{0}, de{0};
+        // At pixel (x, y): the rasterizer samples pixel centres, the RDP
+        // the pixel's upper-left corner.
+        f32 at(f32 x, f32 y, f32 xh, f32 dxhdy, f32 y0) const {
+            x -= 0.5f;
+            y -= 0.5f;
+            return v + dx * (x - xh) + (de - dx * dxhdy) * (y - y0);
+        }
+    };
+    // Four attributes of 8 words: integer parts of the values, DxDx; their
+    // fractions; then DxDe, DxDy, their fractions.
+    auto planes4 = [](const u64* w, Plane out[4]) {
+        for (int i = 0; i < 4; ++i) {
+            const int sh = 48 - 16 * i;
+            auto val = [&](u64 hi, u64 lo) {
+                const u32 v = (static_cast<u32>((hi >> sh) & 0xFFFF) << 16) | static_cast<u32>((lo >> sh) & 0xFFFF);
+                return static_cast<s32>(v) / 65536.0f;
+            };
+            out[i].v = val(w[0], w[2]);
+            out[i].dx = val(w[1], w[3]);
+            out[i].de = val(w[4], w[6]);
+        }
+    };
+    Plane rgba[4], stw[4], z;
+    u32 next = 4;
+    if (shade) { planes4(cmd + next, rgba); next += 8; }
+    if (tex) { planes4(cmd + next, stw); next += 8; }
+    if (zbuf) {
+        z.v = fx(static_cast<u32>(cmd[next] >> 32));
+        z.dx = fx(static_cast<u32>(cmd[next]));
+        z.de = fx(static_cast<u32>(cmd[next + 1] >> 32));
+    }
+
+    // The corners, going round: H and M at the top, M and L at YM, L and H
+    // at the bottom.
+    struct P { f32 x, y; };
+    P poly[6] = {
+        {xh + dxhdy * (yh - y0), yh},  {xm + dxmdy * (yh - y0), yh},
+        {xm + dxmdy * (ymc - y0), ymc}, {xl, ymc},
+        {xl + dxldy * (yl - ymc), yl}, {xh + dxhdy * (yl - y0), yl},
+    };
+    if (ym > yl) { // no L part: M runs to the bottom
+        poly[3] = poly[4] = {xm + dxmdy * (yl - y0), yl};
+    }
+    P pts[6];
+    int n = 0;
+    for (const P& p : poly) {
+        if (n > 0 && std::fabs(p.x - pts[n - 1].x) < 0.125f && std::fabs(p.y - pts[n - 1].y) < 0.125f) continue;
+        pts[n++] = p;
+    }
+    while (n > 1 && std::fabs(pts[n - 1].x - pts[0].x) < 0.125f && std::fabs(pts[n - 1].y - pts[0].y) < 0.125f) --n;
+    if (n < 3) return;
+
+    const bool persp = (other_mode_h >> 19) & 1;
+    const bool zprim = (other_mode_l >> 2) & 1; // Z_SOURCE_PRIM
+    Vertex v[6];
+    for (int i = 0; i < n; ++i) {
+        Vertex& o = v[i];
+        const f32 x = pts[i].x, y = pts[i].y;
+        o.sx = x;
+        o.sy = y;
+        if (shade) {
+            auto c = [&](const Plane& p) { return static_cast<u8>(std::clamp(p.at(x, y, xh, dxhdy, y0), 0.0f, 255.0f)); };
+            o.r = c(rgba[0]); o.g = c(rgba[1]); o.b = c(rgba[2]); o.a = c(rgba[3]);
+        } else {
+            o.r = o.g = o.b = o.a = 0;
+        }
+        o.w = 1.0f;
+        if (tex) {
+            const f32 s = stw[0].at(x, y, xh, dxhdy, y0) / 32.0f; // S, T are s10.5 texels
+            const f32 t = stw[1].at(x, y, xh, dxhdy, y0) / 32.0f;
+            if (persp) {
+                // S/W, T/W, with W 1.0 at 0x8000: the rasterizer interpolates
+                // u/w, v/w and 1/w, so w = 1 / W.
+                const f32 wn = std::max(stw[2].at(x, y, xh, dxhdy, y0) / 32768.0f, 1.0f / 32768.0f);
+                o.w = 1.0f / wn;
+                o.u = s / wn;
+                o.v = t / wn;
+            } else {
+                o.u = s;
+                o.v = t;
+            }
+        }
+        // Depth 0..0x7FFF; display lists use z / 1023 of the viewport's
+        // 0..1023, which is the RDP's z / 32.
+        const f32 zi = zprim ? static_cast<f32>(prim_depth & 0x7FFF) : (zbuf ? z.at(x, y, xh, dxhdy, y0) : 0.0f);
+        o.sz = std::clamp(zi / (1023.0f * 32.0f), 0.0f, 1.0f);
+    }
+    for (int i = 1; i + 1 < n; ++i) {
+        const f32 area = raster::triangle_area(v[0], v[i], v[i + 1]);
+        if (std::fabs(area) < 1e-6f) continue;
+        draw_triangle(v[0], v[i], v[i + 1], area, rdram, rdram_size);
     }
 }
 
@@ -1297,6 +1606,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 
     // The CPU may have changed RDRAM (and the microcode) since the last list.
     draw_state_dirty_ = true;
+    raw_mode_ = false;
     if (hires_) hires_->unbind();
     // Whatever this list draws at high resolution can start right away.
     // ... and the queued native draws have to be in RDRAM before the CPU runs on.
@@ -2147,16 +2457,6 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             case 0xE9: // G_RDPFULLSYNC
                 break;
 
-            case 0xED: { // G_SETSCISSOR
-                scissor_ulx = ((w0 >> 12) & 0xFFF) / 4;
-                scissor_uly = (w0 & 0xFFF) / 4;
-                scissor_lrx = ((w1 >> 12) & 0xFFF) / 4;
-                scissor_lry = (w1 & 0xFFF) / 4;
-                if (scissor_lrx <= scissor_ulx) scissor_lrx = 320;
-                if (scissor_lry <= scissor_uly) scissor_lry = 240;
-                break;
-            }
-
             case 0xB4: // G_RDPHALF_1 (Fast3D/F3DEX)
             case 0xE1: // G_RDPHALF_1 (F3DEX2)
                 rdp_half1 = w1;
@@ -2166,216 +2466,6 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             case 0xF1: // G_RDPHALF_2 (F3DEX2)
                 rdp_half2 = w1;
                 break;
-
-            case 0xF0: { // G_LOADTLUT
-                tmem_dirty = true;
-                ++tmem_gen_;
-                u32 tile_idx = (w1 >> 24) & 0x7;
-                // Entries uls..lrs of row ult of the image. Games normally load
-                // from 0,0, but Perfect Dark stores each palette right after its
-                // texture and loads it with an offset from the same image address.
-                u32 uls = ((w0 >> 12) & 0xFFF) >> 2;
-                u32 ult = (w0 & 0xFFF) >> 2;
-                u32 lrs = ((w1 >> 12) & 0xFFF) >> 2;
-                u32 count = lrs >= uls ? lrs - uls + 1 : 1;
-                u32 src = timg_addr + (ult * timg_width + uls) * 2;
-                native_before_read(src, static_cast<u64>(src) + count * 2);
-                u32 start_word = tiles[tile_idx].tmem;
-                // TMEM keeps palettes packed, entry i at 0x800 + 2i
-                // (raster::lookup_tlut); the hardware quadruples each entry
-                // into its own 64-bit word, so the load at word 256 + n
-                // (gDPLoadTLUT_pal16 with palette n / 16) starts at entry n.
-                u32 tmem_dest = start_word >= 256 ? 0x800 + (start_word - 256) * 2 : start_word * 8;
-                start_word = tmem_dest / 8;
-                u32 bytes = count * 2;
-
-                for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src + b < rdram_size); ++b) {
-                    tmem[tmem_dest + b] = rdram[src + b];
-                }
-                u32 num_words = (bytes + 7) / 8;
-                for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
-                    tmem_word_dxt_zero[start_word + w] = false;
-                }
-                break;
-            }
-
-            case 0xF2: { // G_SETTILESIZE
-                u32 tile_idx = (w1 >> 24) & 0x7;
-                Tile& t = tiles[tile_idx];
-                t.sl = (w0 >> 12) & 0xFFF;
-                t.tl = w0 & 0xFFF;
-                t.sh = (w1 >> 12) & 0xFFF;
-                t.th = w1 & 0xFFF;
-                break;
-            }
-
-            case 0xF3: { // G_LOADBLOCK
-                tmem_dirty = true;
-                ++tmem_gen_;
-                u32 tile_idx = (w1 >> 24) & 0x7;
-                u32 lrs = (w1 >> 12) & 0xFFF;
-                u32 dxt = w1 & 0xFFF;
-
-                u32 src_addr = timg_addr;
-                u32 words = lrs + 1;
-                u32 start_word = tiles[tile_idx].tmem;
-                u32 tmem_dest = start_word * 8;
-                native_before_read(src_addr, static_cast<u64>(src_addr) + static_cast<u64>(words) * 4);
-
-                if (timg_size == 3) {
-                    u32 texels = words;
-                    for (u32 i = 0; i < texels; ++i) {
-                        u32 dram_idx = src_addr + i * 4;
-                        u32 rg_dest = tmem_dest + i * 2;
-                        u32 ba_dest = rg_dest + 0x800;
-                        if (dram_idx + 3 < rdram_size && ba_dest + 1 < tmem.size()) {
-                            tmem[rg_dest + 0] = rdram[dram_idx + 0];
-                            tmem[rg_dest + 1] = rdram[dram_idx + 1];
-                            tmem[ba_dest + 0] = rdram[dram_idx + 2];
-                            tmem[ba_dest + 1] = rdram[dram_idx + 3];
-                        }
-                    }
-                    u32 num_words = (texels * 2 + 7) / 8;
-                    bool is_dxt_zero = (dxt == 0);
-                    for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
-                        tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
-                    }
-                    for (u32 w = 0; w < num_words && (start_word + 256 + w < 512); ++w) {
-                        tmem_word_dxt_zero[start_word + 256 + w] = is_dxt_zero;
-                    }
-                } else {
-                    u32 bytes;
-                    switch (timg_size) {
-                        case 0: bytes = (words + 1) / 2; break; // 4-bit
-                        case 1: bytes = words; break;           // 8-bit
-                        case 2: bytes = words * 2; break;       // 16-bit
-                        default: bytes = words; break;
-                    }
-                    for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src_addr + b < rdram_size); ++b) {
-                        tmem[tmem_dest + b] = rdram[src_addr + b];
-                    }
-                    u32 num_words = (bytes + 7) / 8;
-                    bool is_dxt_zero = (dxt == 0);
-                    for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
-                        tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
-                    }
-                }
-                break;
-            }
-
-            case 0xF4: { // G_LOADTILE
-                tmem_dirty = true;
-                ++tmem_gen_;
-                u32 tile_idx = (w1 >> 24) & 0x7;
-                u32 uls = (w0 >> 12) & 0xFFF;
-                u32 ult = w0 & 0xFFF;
-                u32 lrs = (w1 >> 12) & 0xFFF;
-                u32 lrt = w1 & 0xFFF;
-
-                u32 start_s = uls / 4;
-                u32 start_t = ult / 4;
-                u32 end_s = lrs / 4;
-                u32 end_t = lrt / 4;
-
-                u32 num_rows = (end_t >= start_t) ? (end_t - start_t + 1) : 0;
-                u32 num_texels = (end_s >= start_s) ? (end_s - start_s + 1) : 0;
-                {
-                    // Rows start_t .. end_t of a timg_width-wide image, at most 4 bytes a texel.
-                    const u64 stride = static_cast<u64>(timg_width) * 4 + 4;
-                    native_before_read(timg_addr,
-                                       static_cast<u64>(timg_addr) + (static_cast<u64>(end_t) + 1) * stride +
-                                           (static_cast<u64>(start_s) + num_texels) * 4);
-                }
-
-                Tile& tile = tiles[tile_idx];
-                u32 tmem_dest = tile.tmem * 8;
-
-                if (timg_size == 3) {
-                    u32 dram_stride = timg_width * 4;
-                    u32 tmem_stride = tile.line > 0 ? (tile.line * 8) : (num_texels * 2);
-
-                    for (u32 row = 0; row < num_rows; ++row) {
-                        u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + (start_s * 4);
-                        u32 tmem_row_rg = tmem_dest + row * tmem_stride;
-                        u32 tmem_row_ba = tmem_row_rg + 0x800;
-
-                        for (u32 col = 0; col < num_texels; ++col) {
-                            u32 dram_idx = dram_row_start + col * 4;
-                            u32 rg_idx = tmem_row_rg + col * 2;
-                            u32 ba_idx = tmem_row_ba + col * 2;
-
-                            if (dram_idx + 3 < rdram_size && ba_idx + 1 < tmem.size()) {
-                                tmem[rg_idx + 0] = rdram[dram_idx + 0];
-                                tmem[rg_idx + 1] = rdram[dram_idx + 1];
-                                tmem[ba_idx + 0] = rdram[dram_idx + 2];
-                                tmem[ba_idx + 1] = rdram[dram_idx + 3];
-                            }
-                        }
-                        u32 rg_w0 = tmem_row_rg / 8;
-                        u32 rg_w1 = (tmem_row_rg + num_texels * 2 + 7) / 8;
-                        for (u32 w = rg_w0; w < rg_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-                        u32 ba_w0 = tmem_row_ba / 8;
-                        u32 ba_w1 = (tmem_row_ba + num_texels * 2 + 7) / 8;
-                        for (u32 w = ba_w0; w < ba_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-                    }
-                } else {
-                    u32 bpp_shift = (timg_size == 2) ? 1 : 0;
-                    u32 dram_stride = (timg_size == 0) ? ((timg_width + 1) / 2) : (timg_width << bpp_shift);
-                    u32 row_bytes = (timg_size == 0) ? ((num_texels + 1) / 2) : (num_texels << bpp_shift);
-                    u32 tmem_stride = tile.line > 0 ? (tile.line * 8) : row_bytes;
-
-                    for (u32 row = 0; row < num_rows; ++row) {
-                        u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + 
-                                             ((timg_size == 0) ? (start_s / 2) : (start_s << bpp_shift));
-                        u32 tmem_row_start = tmem_dest + row * tmem_stride;
-
-                        for (u32 b = 0; b < row_bytes; ++b) {
-                            if (tmem_row_start + b < tmem.size() && dram_row_start + b < rdram_size) {
-                                tmem[tmem_row_start + b] = rdram[dram_row_start + b];
-                            }
-                        }
-                        u32 w0 = tmem_row_start / 8;
-                        u32 w1 = (tmem_row_start + row_bytes + 7) / 8;
-                        for (u32 w = w0; w < w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-                    }
-                }
-                break;
-            }
-
-            case 0xF5: { // G_SETTILE
-                u32 tile_idx = (w1 >> 24) & 0x7;
-                Tile& t = tiles[tile_idx];
-                t.format = (w0 >> 21) & 0x7;
-                t.size = (w0 >> 19) & 0x3;
-                t.line = (w0 >> 9) & 0x1FF;
-                t.tmem = w0 & 0x1FF;
-                t.palette = (w1 >> 20) & 0xF;
-                t.clamp_t = (w1 >> 19) & 0x1;
-                t.mirror_t = (w1 >> 18) & 0x1;
-                t.mask_t = (w1 >> 14) & 0xF;
-                t.shift_t = (w1 >> 10) & 0xF;
-                t.clamp_s = (w1 >> 9) & 0x1;
-                t.mirror_s = (w1 >> 8) & 0x1;
-                t.mask_s = (w1 >> 4) & 0xF;
-                t.shift_s = w1 & 0xF;
-                break;
-            }
-
-            case 0xF6: { // G_FILLRECT
-                u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
-                u32 lry = (w0 & 0xFFF) / 4;
-                u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
-                u32 uly = (w1 & 0xFFF) / 4;
-                // Only in FILL (and COPY) mode is this a plain fill with the
-                // fill colour. In 1- and 2-cycle mode the rectangle goes
-                // through the combiner and blender like a texture rectangle -
-                // e.g. OoT's fade overlays (PRIM colour, alpha 0 = no change),
-                // which cleared the whole screen to black when taken as fills.
-                const u32 cycle_type = (other_mode_h >> 20) & 0x3;
-                if (cycle_type < 2) rasterize_tex_rect(ulx, uly, lrx, lry, 0, 0.0f, 0.0f, 1.0f, 1.0f, false, rdram, rdram_size);
-                else rasterize_fill_rect(ulx, uly, lrx, lry, rdram, rdram_size);
-                break;
-            }
 
             case 0xE4: // G_TEXRECT
             case 0xE5: { // G_TEXRECTFLIP
@@ -2438,73 +2528,11 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 break;
             }
 
-            case 0xEA: // G_SETKEYGB
-            case 0xEB: // G_SETKEYR
-            case 0xEC: // G_SETCONVERT
+            case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE: case 0xEF:
+            case 0xF0: case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6: case 0xF7:
+            case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC: case 0xFD: case 0xFE: case 0xFF:
+                execute_rdp_op(opcode, w0, w1, rdram, rdram_size, false);
                 break;
-
-            case 0xEE: { // G_SETPRIMDEPTH
-                prim_depth = (w1 >> 16) & 0xFFFF;
-                prim_dz = w1 & 0xFFFF;
-                break;
-            }
-
-            case 0xEF: { // G_RDPSETOTHERMODE
-                other_mode_h = w0 & 0x00FFFFFF;
-                other_mode_l = w1;
-                break;
-            }
-
-            case 0xF7: // G_SETFILLCOLOR
-                fill_color = w1;
-                break;
-
-            case 0xF8: // G_SETFOGCOLOR
-                fog_color = w1;
-                break;
-
-            case 0xF9: // G_SETBLENDCOLOR
-                blend_color = w1;
-                break;
-
-            case 0xFA: // G_SETPRIMCOLOR (and the minimum LOD level / LOD fraction)
-                prim_color = w1;
-                prim_min_level = (w0 >> 8) & 0x1F;
-                prim_lod_frac = w0 & 0xFF;
-                break;
-
-            case 0xFB: // G_SETENVCOLOR
-                env_color = w1;
-                break;
-
-            case 0xFC: // G_SETCOMBINE
-                combine_mode_w0 = w0;
-                combine_mode_w1 = w1;
-                combine_mode_set = true;
-                break;
-
-            case 0xFD: { // G_SETTIMG
-                timg_format = (w0 >> 21) & 0x7;
-                timg_size = (w0 >> 19) & 0x3;
-                timg_width = (w0 & 0xFFF) + 1;
-                timg_addr = segment_to_physical(w1);
-                break;
-            }
-
-            case 0xFE: { // G_SETDEPTHIMAGE
-                depth_image_addr = segment_to_physical(w1);
-                break;
-            }
-
-            case 0xFF: { // G_SETCOLORIMAGE
-                flush_native(); // the queue's bands and depth rows assume one colour image
-                color_image_format = (w0 >> 21) & 0x7;
-                color_image_size = (w0 >> 19) & 0x3;
-                color_image_width = (w0 & 0xFFF) + 1;
-                color_image_addr = segment_to_physical(w1);
-                if (hires_) hires_->unbind();
-                break;
-            }
 
             default: {
                 static std::unordered_set<u8> logged_unknown_opcodes;
@@ -2529,6 +2557,308 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
               << " a_fail=" << stat_pixels.a_fail << "\n";
 
     finish_task(mi);
+}
+
+// The RDP's own commands (0x24-0x3F, here with the display lists' 0xC0 on
+// top): tile and TMEM loads, scissor, colours, modes, images and fill
+// rectangles. Display lists pass them through to the RDP unchanged, apart
+// from segmented image addresses; `raw` commands come from the RDP command
+// buffer (process_rdp_commands()) and carry physical ones.
+bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size, bool raw) {
+    auto image_addr = [&](u32 a) { return raw ? (a & 0x00FFFFFF) : segment_to_physical(a); };
+    switch (opcode) {
+        case 0xED: { // G_SETSCISSOR
+            scissor_ulx = ((w0 >> 12) & 0xFFF) / 4;
+            scissor_uly = (w0 & 0xFFF) / 4;
+            scissor_lrx = ((w1 >> 12) & 0xFFF) / 4;
+            scissor_lry = (w1 & 0xFFF) / 4;
+            if (scissor_lrx <= scissor_ulx) scissor_lrx = 320;
+            if (scissor_lry <= scissor_uly) scissor_lry = 240;
+            break;
+        }
+
+        case 0xF0: { // G_LOADTLUT
+            tmem_dirty = true;
+            ++tmem_gen_;
+            u32 tile_idx = (w1 >> 24) & 0x7;
+            // Entries uls..lrs of row ult of the image. Games normally load
+            // from 0,0, but Perfect Dark stores each palette right after its
+            // texture and loads it with an offset from the same image address.
+            u32 uls = ((w0 >> 12) & 0xFFF) >> 2;
+            u32 ult = (w0 & 0xFFF) >> 2;
+            u32 lrs = ((w1 >> 12) & 0xFFF) >> 2;
+            u32 count = lrs >= uls ? lrs - uls + 1 : 1;
+            u32 src = timg_addr + (ult * timg_width + uls) * 2;
+            native_before_read(src, static_cast<u64>(src) + count * 2);
+            u32 start_word = tiles[tile_idx].tmem;
+            // TMEM keeps palettes packed, entry i at 0x800 + 2i
+            // (raster::lookup_tlut); the hardware quadruples each entry
+            // into its own 64-bit word, so the load at word 256 + n
+            // (gDPLoadTLUT_pal16 with palette n / 16) starts at entry n.
+            u32 tmem_dest = start_word >= 256 ? 0x800 + (start_word - 256) * 2 : start_word * 8;
+            start_word = tmem_dest / 8;
+            u32 bytes = count * 2;
+
+            for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src + b < rdram_size); ++b) {
+                tmem[tmem_dest + b] = rdram[src + b];
+            }
+            u32 num_words = (bytes + 7) / 8;
+            for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
+                tmem_word_dxt_zero[start_word + w] = false;
+            }
+            break;
+        }
+
+        case 0xF2: { // G_SETTILESIZE
+            u32 tile_idx = (w1 >> 24) & 0x7;
+            Tile& t = tiles[tile_idx];
+            t.sl = (w0 >> 12) & 0xFFF;
+            t.tl = w0 & 0xFFF;
+            t.sh = (w1 >> 12) & 0xFFF;
+            t.th = w1 & 0xFFF;
+            break;
+        }
+
+        case 0xF3: { // G_LOADBLOCK
+            tmem_dirty = true;
+            ++tmem_gen_;
+            u32 tile_idx = (w1 >> 24) & 0x7;
+            u32 lrs = (w1 >> 12) & 0xFFF;
+            u32 dxt = w1 & 0xFFF;
+
+            u32 src_addr = timg_addr;
+            u32 words = lrs + 1;
+            u32 start_word = tiles[tile_idx].tmem;
+            u32 tmem_dest = start_word * 8;
+            native_before_read(src_addr, static_cast<u64>(src_addr) + static_cast<u64>(words) * 4);
+
+            if (timg_size == 3) {
+                u32 texels = words;
+                for (u32 i = 0; i < texels; ++i) {
+                    u32 dram_idx = src_addr + i * 4;
+                    u32 rg_dest = tmem_dest + i * 2;
+                    u32 ba_dest = rg_dest + 0x800;
+                    if (dram_idx + 3 < rdram_size && ba_dest + 1 < tmem.size()) {
+                        tmem[rg_dest + 0] = rdram[dram_idx + 0];
+                        tmem[rg_dest + 1] = rdram[dram_idx + 1];
+                        tmem[ba_dest + 0] = rdram[dram_idx + 2];
+                        tmem[ba_dest + 1] = rdram[dram_idx + 3];
+                    }
+                }
+                u32 num_words = (texels * 2 + 7) / 8;
+                bool is_dxt_zero = (dxt == 0);
+                for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
+                    tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
+                }
+                for (u32 w = 0; w < num_words && (start_word + 256 + w < 512); ++w) {
+                    tmem_word_dxt_zero[start_word + 256 + w] = is_dxt_zero;
+                }
+            } else {
+                u32 bytes;
+                switch (timg_size) {
+                    case 0: bytes = (words + 1) / 2; break; // 4-bit
+                    case 1: bytes = words; break;           // 8-bit
+                    case 2: bytes = words * 2; break;       // 16-bit
+                    default: bytes = words; break;
+                }
+                for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src_addr + b < rdram_size); ++b) {
+                    tmem[tmem_dest + b] = rdram[src_addr + b];
+                }
+                u32 num_words = (bytes + 7) / 8;
+                bool is_dxt_zero = (dxt == 0);
+                for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
+                    tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
+                }
+            }
+            break;
+        }
+
+        case 0xF4: { // G_LOADTILE
+            tmem_dirty = true;
+            ++tmem_gen_;
+            u32 tile_idx = (w1 >> 24) & 0x7;
+            u32 uls = (w0 >> 12) & 0xFFF;
+            u32 ult = w0 & 0xFFF;
+            u32 lrs = (w1 >> 12) & 0xFFF;
+            u32 lrt = w1 & 0xFFF;
+
+            u32 start_s = uls / 4;
+            u32 start_t = ult / 4;
+            u32 end_s = lrs / 4;
+            u32 end_t = lrt / 4;
+
+            u32 num_rows = (end_t >= start_t) ? (end_t - start_t + 1) : 0;
+            u32 num_texels = (end_s >= start_s) ? (end_s - start_s + 1) : 0;
+            {
+                // Rows start_t .. end_t of a timg_width-wide image, at most 4 bytes a texel.
+                const u64 stride = static_cast<u64>(timg_width) * 4 + 4;
+                native_before_read(timg_addr,
+                                   static_cast<u64>(timg_addr) + (static_cast<u64>(end_t) + 1) * stride +
+                                       (static_cast<u64>(start_s) + num_texels) * 4);
+            }
+
+            Tile& tile = tiles[tile_idx];
+            u32 tmem_dest = tile.tmem * 8;
+
+            if (timg_size == 3) {
+                u32 dram_stride = timg_width * 4;
+                u32 tmem_stride = tile.line > 0 ? (tile.line * 8) : (num_texels * 2);
+
+                for (u32 row = 0; row < num_rows; ++row) {
+                    u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + (start_s * 4);
+                    u32 tmem_row_rg = tmem_dest + row * tmem_stride;
+                    u32 tmem_row_ba = tmem_row_rg + 0x800;
+
+                    for (u32 col = 0; col < num_texels; ++col) {
+                        u32 dram_idx = dram_row_start + col * 4;
+                        u32 rg_idx = tmem_row_rg + col * 2;
+                        u32 ba_idx = tmem_row_ba + col * 2;
+
+                        if (dram_idx + 3 < rdram_size && ba_idx + 1 < tmem.size()) {
+                            tmem[rg_idx + 0] = rdram[dram_idx + 0];
+                            tmem[rg_idx + 1] = rdram[dram_idx + 1];
+                            tmem[ba_idx + 0] = rdram[dram_idx + 2];
+                            tmem[ba_idx + 1] = rdram[dram_idx + 3];
+                        }
+                    }
+                    u32 rg_w0 = tmem_row_rg / 8;
+                    u32 rg_w1 = (tmem_row_rg + num_texels * 2 + 7) / 8;
+                    for (u32 w = rg_w0; w < rg_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                    u32 ba_w0 = tmem_row_ba / 8;
+                    u32 ba_w1 = (tmem_row_ba + num_texels * 2 + 7) / 8;
+                    for (u32 w = ba_w0; w < ba_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                }
+            } else {
+                u32 bpp_shift = (timg_size == 2) ? 1 : 0;
+                u32 dram_stride = (timg_size == 0) ? ((timg_width + 1) / 2) : (timg_width << bpp_shift);
+                u32 row_bytes = (timg_size == 0) ? ((num_texels + 1) / 2) : (num_texels << bpp_shift);
+                u32 tmem_stride = tile.line > 0 ? (tile.line * 8) : row_bytes;
+
+                for (u32 row = 0; row < num_rows; ++row) {
+                    u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + 
+                                         ((timg_size == 0) ? (start_s / 2) : (start_s << bpp_shift));
+                    u32 tmem_row_start = tmem_dest + row * tmem_stride;
+
+                    for (u32 b = 0; b < row_bytes; ++b) {
+                        if (tmem_row_start + b < tmem.size() && dram_row_start + b < rdram_size) {
+                            tmem[tmem_row_start + b] = rdram[dram_row_start + b];
+                        }
+                    }
+                    u32 w0 = tmem_row_start / 8;
+                    u32 w1 = (tmem_row_start + row_bytes + 7) / 8;
+                    for (u32 w = w0; w < w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                }
+            }
+            break;
+        }
+
+        case 0xF5: { // G_SETTILE
+            u32 tile_idx = (w1 >> 24) & 0x7;
+            Tile& t = tiles[tile_idx];
+            t.format = (w0 >> 21) & 0x7;
+            t.size = (w0 >> 19) & 0x3;
+            t.line = (w0 >> 9) & 0x1FF;
+            t.tmem = w0 & 0x1FF;
+            t.palette = (w1 >> 20) & 0xF;
+            t.clamp_t = (w1 >> 19) & 0x1;
+            t.mirror_t = (w1 >> 18) & 0x1;
+            t.mask_t = (w1 >> 14) & 0xF;
+            t.shift_t = (w1 >> 10) & 0xF;
+            t.clamp_s = (w1 >> 9) & 0x1;
+            t.mirror_s = (w1 >> 8) & 0x1;
+            t.mask_s = (w1 >> 4) & 0xF;
+            t.shift_s = w1 & 0xF;
+            break;
+        }
+
+        case 0xF6: { // G_FILLRECT
+            u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
+            u32 lry = (w0 & 0xFFF) / 4;
+            u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
+            u32 uly = (w1 & 0xFFF) / 4;
+            // Only in FILL (and COPY) mode is this a plain fill with the
+            // fill colour. In 1- and 2-cycle mode the rectangle goes
+            // through the combiner and blender like a texture rectangle -
+            // e.g. OoT's fade overlays (PRIM colour, alpha 0 = no change),
+            // which cleared the whole screen to black when taken as fills.
+            const u32 cycle_type = (other_mode_h >> 20) & 0x3;
+            if (cycle_type < 2) rasterize_tex_rect(ulx, uly, lrx, lry, 0, 0.0f, 0.0f, 1.0f, 1.0f, false, rdram, rdram_size);
+            else rasterize_fill_rect(ulx, uly, lrx, lry, rdram, rdram_size);
+            break;
+        }
+
+        case 0xEA: // G_SETKEYGB
+        case 0xEB: // G_SETKEYR
+        case 0xEC: // G_SETCONVERT
+            break;
+
+        case 0xEE: { // G_SETPRIMDEPTH
+            prim_depth = (w1 >> 16) & 0xFFFF;
+            prim_dz = w1 & 0xFFFF;
+            break;
+        }
+
+        case 0xEF: { // G_RDPSETOTHERMODE
+            other_mode_h = w0 & 0x00FFFFFF;
+            other_mode_l = w1;
+            break;
+        }
+
+        case 0xF7: // G_SETFILLCOLOR
+            fill_color = w1;
+            break;
+
+        case 0xF8: // G_SETFOGCOLOR
+            fog_color = w1;
+            break;
+
+        case 0xF9: // G_SETBLENDCOLOR
+            blend_color = w1;
+            break;
+
+        case 0xFA: // G_SETPRIMCOLOR (and the minimum LOD level / LOD fraction)
+            prim_color = w1;
+            prim_min_level = (w0 >> 8) & 0x1F;
+            prim_lod_frac = w0 & 0xFF;
+            break;
+
+        case 0xFB: // G_SETENVCOLOR
+            env_color = w1;
+            break;
+
+        case 0xFC: // G_SETCOMBINE
+            combine_mode_w0 = w0;
+            combine_mode_w1 = w1;
+            combine_mode_set = true;
+            break;
+
+        case 0xFD: { // G_SETTIMG
+            timg_format = (w0 >> 21) & 0x7;
+            timg_size = (w0 >> 19) & 0x3;
+            timg_width = (w0 & 0xFFF) + 1;
+            timg_addr = image_addr(w1);
+            break;
+        }
+
+        case 0xFE: { // G_SETDEPTHIMAGE
+            depth_image_addr = image_addr(w1);
+            break;
+        }
+
+        case 0xFF: { // G_SETCOLORIMAGE
+            flush_native(); // the queue's bands and depth rows assume one colour image
+            color_image_format = (w0 >> 21) & 0x7;
+            color_image_size = (w0 >> 19) & 0x3;
+            color_image_width = (w0 & 0xFFF) + 1;
+            color_image_addr = image_addr(w1);
+            if (hires_) hires_->unbind();
+            break;
+        }
+
+        default:
+            return false;
+    }
+    return true;
 }
 
 void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size) {
@@ -2847,7 +3177,10 @@ void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v
     if (cull_back && area >= 0.0f) { stat_cull_back++; return; }
     if (cull_front && area <= 0.0f) { stat_cull_front++; return; }
     if (std::abs(area) < 0.001f) return;
+    draw_triangle(v0, v1, v2, area, rdram, rdram_size);
+}
 
+void RDP::draw_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area, u8* rdram, size_t rdram_size) {
     const DrawState& live = draw_state();
     HiResTarget* hr = hires_target(rdram, rdram_size);
     f32 min_x, max_x, min_y, max_y;

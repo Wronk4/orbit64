@@ -12,7 +12,8 @@
 // copies, worker threads, composing) against the native renderer.
 //
 //   bin/rdp_check rom.z64 [--frames N] [--scale S] [--warm N] [--int]
-//                 [--mash btn] [--press frame:btn] [--shot frame:out.png]
+//                 [--mash btn] [--mash-from frame] [--press frame:btn] [--shot frame:out.png]
+//                 [--shot-every n:dir]
 //                 [--frame-log out.txt] [--timing] [--dump-ram out.bin] [--raw frame:out.argb]
 //
 // --timing skips the per-frame hashing (it costs several ms per frame at
@@ -48,7 +49,8 @@ static void save_png(const std::string& path, const std::vector<u32>& px, int w,
 }
 
 int main(int argc, char** argv) {
-    std::string rom, mash, frame_log, dump_ram;
+    std::string rom, mash, frame_log, dump_ram, shot_dir;
+    int mash_from = 0, shot_every = 0;
     int frames = 900, scale = 1, warm = 300;
     bool interp = false, timing = false;
     std::vector<std::pair<int, std::string>> presses, shots, raws;
@@ -61,6 +63,14 @@ int main(int argc, char** argv) {
         else if (a == "--int") interp = true;
         else if (a == "--timing") timing = true;
         else if (a == "--mash") mash = next();
+        else if (a == "--mash-from") mash_from = std::stoi(next());
+        else if (a == "--shot-every") {
+            std::string v = next();
+            size_t c = v.find(':');
+            if (c == std::string::npos) continue;
+            shot_every = std::stoi(v.substr(0, c));
+            shot_dir = v.substr(c + 1);
+        }
         else if (a == "--frame-log") frame_log = next();
         else if (a == "--dump-ram") dump_ram = next();
         else if (a == "--press" || a == "--shot" || a == "--raw") {
@@ -94,7 +104,7 @@ int main(int argc, char** argv) {
             if (f == p.first) emu.get_controller(0).press_named_button(p.second, true);
             else if (f == p.first + 10) emu.get_controller(0).press_named_button(p.second, false);
         }
-        if (!mash.empty()) emu.get_controller(0).press_named_button(mash, ((f / 6) % 2) == 0);
+        if (!mash.empty() && f >= mash_from) emu.get_controller(0).press_named_button(mash, ((f / 6) % 2) == 0);
         emu.step_frame();
         emu.render_frame(px, w, h);
         if (!timing) {
@@ -105,6 +115,11 @@ int main(int argc, char** argv) {
         if (flog) std::fprintf(flog, "%d %016llx\n", f, (unsigned long long)fnv(1469598103934665603ull, px.data(), px.size() * 4));
         for (const auto& s : shots)
             if (f == s.first) save_png(s.second, px, w, h);
+        if (shot_every > 0 && f % shot_every == 0) {
+            char name[64];
+            std::snprintf(name, sizeof name, "/f%06d.png", f);
+            save_png(shot_dir + name, px, w, h);
+        }
         for (const auto& r : raws)
             if (f == r.first)
                 if (FILE* rf = std::fopen(r.second.c_str(), "wb")) {

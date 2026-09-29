@@ -3,10 +3,12 @@
 #include "common.hpp"
 #include "hires.hpp"
 #include "raster.hpp"
+#include "rdp_exact.hpp"
 #include <vector>
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <cstdio>
 
 struct Matrix4x4 {
     float m[4][4]{};
@@ -128,6 +130,22 @@ public:
     u32 read_dps_reg(u32 addr) const;
     void write_dps_reg(u32 addr, u32 val);
 
+    // The RSP's data memory, where the RDP reads its commands from when
+    // DPC_STATUS says XBUS (microcodes that keep the RDP's buffer in DMEM).
+    void set_rsp_dmem(const u8* dmem) { rsp_dmem_ = dmem; }
+    // RDP command-buffer commands run so far (low-level graphics).
+    u64 get_rdp_command_count() const { return raw_cmd_count_; }
+    bool drawing_rdp_commands() const { return raw_mode_; }
+    // Low-level graphics: draw the RDP's commands bit-exactly (rdp_exact.hpp,
+    // native resolution only) instead of through the high-level renderer.
+    // ORBIT64_RDP=exact or fast overrides it.
+    void set_exact(bool on) { exact_mode_ = env_exact_ >= 0 ? env_exact_ != 0 : on; }
+    bool exact() const { return exact_mode_; }
+    // Whether the frame being shown was drawn by the bit-exact RDP.
+    bool exact_drawing() const { return exact_mode_ && raw_mode_; }
+    // The ninth bits the bit-exact RDP keeps (null before it drew anything).
+    const ExactRdp* exact_rdp() const { return &exact_.primary(); }
+
     // Process a display list starting at segmented address in RDRAM
     void process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi);
 
@@ -168,8 +186,48 @@ public:
         if (modelview_stack.empty() || modelview_stack.size() > 32) s.fail("the RDP matrix stack is invalid");
     }
     void state_loaded();
+    // The command buffer's state (its own save state section, added later).
+    template <class S> void serialize_commands(S& s) {
+        s(raw_buf_, raw_mode_, raw_unbind_, raw_cmd_count_);
+        exact_.serialize(s);
+    }
+    // Draws everything queued so far (into RDRAM and the high-resolution buffers).
+    void flush_pending() {
+        flush_native();
+        exact_.flush();
+        if (hires_) hires_->flush();
+    }
 
 private:
+    // ---- The RDP's own command buffer (DPC_START / DPC_END) ------------
+    // What the low-level RSP (a real microcode) sends: the RDP commands
+    // themselves, triangles as edge and attribute coefficients.
+    const u8* rsp_dmem_{nullptr};
+    std::vector<u64> raw_buf_;      // commands read but not run yet (a command can straddle two buffers)
+    bool raw_mode_{false};          // drawing RDP commands, not a display list
+    bool raw_unbind_{true};         // the CPU may have touched RDRAM since the last full sync
+    u64 raw_cmd_count_{0};
+    struct Trace {
+        std::FILE* f;
+        std::vector<u8> shadow; // RDRAM as the replay has it
+        int fine_from{-1};
+        explicit Trace(const char* path);
+        ~Trace();
+        void put32(u32 v);
+        void before(const u8* rdram, size_t size);
+        void command(const u64* cmd, u32 len);
+        void after(const u8* rdram, size_t size);
+    };
+    std::unique_ptr<Trace> trace_;
+    bool trace_checked_{false};
+    bool exact_mode_{true};
+    int env_exact_{-1};
+    ExactRdpLanes exact_;
+    void process_rdp_commands(MI& mi, u8* rdram, size_t rdram_size);
+    void rdp_triangle(const u64* cmd, u32 op, u8* rdram, size_t rdram_size);
+    // Shared by display lists and the command buffer, see its definition.
+    bool execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size, bool raw);
+
     // DPC registers
     u32 dpc_start{0};
     u32 dpc_end{0};
@@ -405,6 +463,8 @@ private:
     void rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size);
     void rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t, f32 dsdx, f32 dtdy, bool flip, u8* rdram, size_t rdram_size);
     void rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size);
+    // Draws a triangle as it is (no culling); `area` is triangle_area().
+    void draw_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area, u8* rdram, size_t rdram_size);
 
     struct NativeSink;
     // Draws one pixel through the current colour image's blending/depth/

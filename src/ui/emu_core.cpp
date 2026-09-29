@@ -47,7 +47,7 @@ struct EmuCore::FrameClock {
     int window_frames = 0;
     double window_work_ms = 0.0;
     std::uint64_t frame_counter = 0;
-    std::uint64_t last_gfx = 0, last_audio = 0, last_dl = 0;
+    std::uint64_t last_gfx = 0, last_audio = 0, last_dl = 0, last_lle = 0;
     double uptime = 0.0;
     bool normal_speed = true;
     double pacing = 0.0; // last audio pacing trim (relative frame period change)
@@ -492,6 +492,8 @@ void EmuCore::run_one_frame(FrameClock& fc) {
         ucode_dirty_ = false;
     }
     emu_->set_cpu_core(cpu_core_.load() == 0 ? CpuCore::Interpreter : CpuCore::Recompiler);
+    emu_->get_rsp().set_mode(static_cast<RspMode>(std::clamp(rsp_mode_.load(), 0, 2)));
+    emu_->get_rdp().set_exact(rdp_exact_.load());
     {
         std::lock_guard<std::mutex> lk(factory_mutex_);
         if (factory_dirty_) {
@@ -560,9 +562,11 @@ void EmuCore::run_one_frame(FrameClock& fc) {
         stats_.fps = static_cast<float>(fc.window_frames / window_s);
         stats_.speed_pct = stats_.fps / vi_hz * 100.0f;
         stats_.frame_ms = static_cast<float>(fc.window_work_ms / fc.window_frames);
-        stats_.rsp_active = gfx != fc.last_gfx || aud != fc.last_audio;
+        stats_.rsp_active = gfx != fc.last_gfx || aud != fc.last_audio || rsp.get_lle_task_count() != fc.last_lle;
+        fc.last_lle = rsp.get_lle_task_count();
         stats_.rdp_active = dl != fc.last_dl;
         stats_.ucode = rdp.has_processed_display_list() ? static_cast<int>(rdp.get_active_ucode()) : -1;
+        stats_.gfx_lle = rsp.gfx_lle();
         stats_.audio_abi = aud > 0 ? rsp.get_audio_hle().get_abi_index() : -1;
         stats_.vi_hz = vi_hz;
         stats_.ai_rate = emu_->get_ai().get_native_sample_rate();

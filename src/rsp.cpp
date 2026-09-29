@@ -50,9 +50,13 @@ void RSP::reset() {
     lle_running = false;
     lle_cycle_debt = 0;
     ahle.reset();
+    gfx_lle_ = false;
     if (const char* e = std::getenv("ORBIT64_RSP")) {
-        force_lle_ = std::strcmp(e, "lle") == 0;
-        force_lle_audio_ = std::strcmp(e, "lle-audio") == 0;
+        const RspMode m = std::strcmp(e, "lle") == 0       ? RspMode::LLE
+                          : std::strcmp(e, "lle-gfx") == 0   ? RspMode::LLEGraphics
+                          : std::strcmp(e, "lle-audio") == 0 ? RspMode::LLEAudio
+                                                             : RspMode::HLE;
+        env_mode_ = static_cast<int>(m);
     }
 }
 
@@ -131,13 +135,25 @@ void RSP::write_reg(u32 addr, u32 val, MI& mi, RDP& rdp, u8* rdram, size_t rdram
 }
 
 // The CPU has just let the RSP run. libultra's tasks (an OSTask at DMEM
-// 0xFC0) of the graphics and audio microcodes are emulated at a high level;
-// anything else runs on the low-level RSP.
+// 0xFC0) of the graphics and audio microcodes are emulated at a high level,
+// unless the mode says otherwise; anything else - including graphics
+// microcodes the high-level emulation doesn't recognize - runs on the
+// low-level RSP, and the RDP draws the commands it sends.
 void RSP::start(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
-    (void)mi; (void)rdp; (void)rdram; (void)rdram_size;
+    (void)mi;
     const u32 task_type = (static_cast<u32>(dmem[0xFC0]) << 24) | (static_cast<u32>(dmem[0xFC1]) << 16) |
                           (static_cast<u32>(dmem[0xFC2]) << 8) | static_cast<u32>(dmem[0xFC3]);
-    if (force_lle_ || (force_lle_audio_ && task_type == 2) || (task_type != 1 && task_type != 2)) {
+    const RspMode m = mode();
+    bool lle;
+    if (task_type == 1) {
+        lle = m == RspMode::LLE || m == RspMode::LLEGraphics || !detect_gfx_ucode(0xFC0, rdp, rdram, rdram_size);
+        gfx_lle_ = lle;
+    } else if (task_type == 2) {
+        lle = m == RspMode::LLE || m == RspMode::LLEAudio;
+    } else {
+        lle = true;
+    }
+    if (lle) {
         lle_running = true;
         lle_cycle_debt = 0;
         ++lle_task_count;
@@ -256,6 +272,88 @@ void RSP::step(u32 cycles, MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
     }
 }
 
+bool RSP::detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_size) {
+    const u32 ucode_ptr = (static_cast<u32>(dmem[offset + 0x10]) << 24) | (static_cast<u32>(dmem[offset + 0x11]) << 16) |
+                          (static_cast<u32>(dmem[offset + 0x12]) << 8) | static_cast<u32>(dmem[offset + 0x13]);
+    const u32 ucode_data_ptr = (static_cast<u32>(dmem[offset + 0x18]) << 24) | (static_cast<u32>(dmem[offset + 0x19]) << 16) |
+                               (static_cast<u32>(dmem[offset + 0x1A]) << 8) | static_cast<u32>(dmem[offset + 0x1B]);
+    auto detect_banner = [&](u32 ptr) -> bool {
+        u32 phys = ptr & (rdram_size - 1);
+        size_t check_len = std::min<size_t>(2048, rdram_size > phys ? rdram_size - phys : 0);
+        if (check_len < 16) return false;
+        std::string header(reinterpret_cast<const char*>(&rdram[phys]), check_len);
+        {
+            static int count = 0;
+            if (count < 4) {
+                count++;
+                std::string clean;
+                for (char c : header) clean += (c >= 32 && c < 127) ? c : '.';
+                std::cout << "[UCODE-BANNER-RAW] ptr=0x" << std::hex << ptr << std::dec << " text=\"" << clean.substr(0, 200) << "\"\n";
+            }
+        }
+        if (const MicrocodeType t = identify_ucode_banner(&rdram[phys], check_len); t != MicrocodeType::Auto) {
+            rdp.set_ucode_type(t);
+            rdp.set_cbfd(ucode_banner_is_cbfd(&rdram[phys], check_len));
+            rdp.set_no_near_clip(ucode_banner_is_non(&rdram[phys], check_len));
+            return true;
+        }
+        // Require the longer "ucode S2DEX" anchor (part of the real credit
+        // string "RSP Gfx ucode S2DEX ...") rather than a bare "S2DEX"/
+        // "S2DEX2" substring: this region isn't always a text banner (it can
+        // be an unrelated task's data), and a short ASCII pattern like
+        // "S2DEX2" can appear by pure chance in binary/opcode bytes, which
+        // was mis-detecting plain F3DEX2 games (e.g. Dr. Mario 64) as S2DEX2
+        // and permanently wrecking their rendering.
+        size_t s2dex_anchor = header.find("ucode S2DEX");
+        if (s2dex_anchor != std::string::npos) {
+            // Determine GBI-1 vs GBI-2 from text local to *this* banner match
+            // only (e.g. "...S2DEX       fifo 2.04..." vs "...S2DEX  1.06...").
+            // Searching the whole 2048-byte window for "fifo 2" independently
+            // can pick up an unrelated, adjacent ucode's banner (ROMs often
+            // bundle several microcodes together) and misclassify a real
+            // GBI-1 S2DEX banner as S2DEX2.
+            std::string local = header.substr(s2dex_anchor, 40);
+            bool is_gbi2 = local.find("S2DEX2") != std::string::npos || local.find("fifo 2") != std::string::npos;
+            rdp.set_ucode_type(is_gbi2 ? MicrocodeType::S2DEX2 : MicrocodeType::S2DEX);
+            return true;
+        } else if (header.find("F3DEX 2") != std::string::npos ||
+            header.find("F3DEX2") != std::string::npos ||
+            header.find("fifo 2") != std::string::npos ||
+            header.find("F3DZEX") != std::string::npos) {
+            rdp.set_ucode_type(MicrocodeType::F3DEX2);
+            return true;
+        } else if (header.find("F3DEX") != std::string::npos ||
+                   header.find("F3DLX") != std::string::npos) {
+            rdp.set_ucode_type(MicrocodeType::F3DEX);
+            return true;
+        } else if (header.find("2.0G") != std::string::npos) {
+            rdp.set_ucode_type(MicrocodeType::F3DGOLDEN);
+            return true;
+        } else if (header.find("Fast3D") != std::string::npos ||
+                   header.find("RSP SW Version") != std::string::npos ||
+                   header.find("SGI U64 GFX") != std::string::npos) {
+            rdp.set_ucode_type(MicrocodeType::Fast3D);
+            return true;
+        }
+        return false;
+    };
+
+    // Microcodes known by their code come first: some share another's
+    // banner (Wave Race 64's reads like Super Mario 64's Fast3D).
+    if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
+        rdp.set_ucode_type(t);
+        return true;
+    }
+    if (detect_banner(ucode_data_ptr) || detect_banner(ucode_ptr)) return true;
+    static int dbg_fail = 0;
+    if (dbg_fail < 5) {
+        dbg_fail++;
+        std::cout << "[UCODE-DETECT-FAIL] data_ptr=0x" << std::hex << ucode_data_ptr << " code_ptr=0x" << ucode_ptr
+                  << std::dec << ": running it on the low-level RSP\n";
+    }
+    return false;
+}
+
 void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
     // Look for OSTask at 0xFC0 or 0x000 in DMEM
     u32 task_offsets[] = { 0xFC0, 0x000 };
@@ -265,93 +363,7 @@ void RSP::check_and_run_task(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
                         (static_cast<u32>(dmem[offset + 2]) << 8)  |
                          static_cast<u32>(dmem[offset + 3]);
 
-        if (task_type == 1) { // M_GFXTASK
-            u32 ucode_ptr = (static_cast<u32>(dmem[offset + 0x10]) << 24) |
-                            (static_cast<u32>(dmem[offset + 0x11]) << 16) |
-                            (static_cast<u32>(dmem[offset + 0x12]) << 8)  |
-                             static_cast<u32>(dmem[offset + 0x13]);
-            u32 ucode_data_ptr = (static_cast<u32>(dmem[offset + 0x18]) << 24) |
-                                 (static_cast<u32>(dmem[offset + 0x19]) << 16) |
-                                 (static_cast<u32>(dmem[offset + 0x1A]) << 8)  |
-                                  static_cast<u32>(dmem[offset + 0x1B]);
-
-            auto detect_banner = [&](u32 ptr) -> bool {
-                u32 phys = ptr & (rdram_size - 1);
-                size_t check_len = std::min<size_t>(2048, rdram_size > phys ? rdram_size - phys : 0);
-                if (check_len < 16) return false;
-                std::string header(reinterpret_cast<const char*>(&rdram[phys]), check_len);
-                {
-                    static int count = 0;
-                    if (count < 4) {
-                        count++;
-                        std::string clean;
-                        for (char c : header) clean += (c >= 32 && c < 127) ? c : '.';
-                        std::cout << "[UCODE-BANNER-RAW] ptr=0x" << std::hex << ptr << std::dec << " text=\"" << clean.substr(0, 200) << "\"\n";
-                    }
-                }
-                if (const MicrocodeType t = identify_ucode_banner(&rdram[phys], check_len); t != MicrocodeType::Auto) {
-                    rdp.set_ucode_type(t);
-                    rdp.set_cbfd(ucode_banner_is_cbfd(&rdram[phys], check_len));
-                    rdp.set_no_near_clip(ucode_banner_is_non(&rdram[phys], check_len));
-                    return true;
-                }
-                // Require the longer "ucode S2DEX" anchor (part of the real credit
-                // string "RSP Gfx ucode S2DEX ...") rather than a bare "S2DEX"/
-                // "S2DEX2" substring: this region isn't always a text banner (it can
-                // be an unrelated task's data), and a short ASCII pattern like
-                // "S2DEX2" can appear by pure chance in binary/opcode bytes, which
-                // was mis-detecting plain F3DEX2 games (e.g. Dr. Mario 64) as S2DEX2
-                // and permanently wrecking their rendering.
-                size_t s2dex_anchor = header.find("ucode S2DEX");
-                if (s2dex_anchor != std::string::npos) {
-                    // Determine GBI-1 vs GBI-2 from text local to *this* banner match
-                    // only (e.g. "...S2DEX       fifo 2.04..." vs "...S2DEX  1.06...").
-                    // Searching the whole 2048-byte window for "fifo 2" independently
-                    // can pick up an unrelated, adjacent ucode's banner (ROMs often
-                    // bundle several microcodes together) and misclassify a real
-                    // GBI-1 S2DEX banner as S2DEX2.
-                    std::string local = header.substr(s2dex_anchor, 40);
-                    bool is_gbi2 = local.find("S2DEX2") != std::string::npos || local.find("fifo 2") != std::string::npos;
-                    rdp.set_ucode_type(is_gbi2 ? MicrocodeType::S2DEX2 : MicrocodeType::S2DEX);
-                    return true;
-                } else if (header.find("F3DEX 2") != std::string::npos ||
-                    header.find("F3DEX2") != std::string::npos ||
-                    header.find("fifo 2") != std::string::npos ||
-                    header.find("F3DZEX") != std::string::npos) {
-                    rdp.set_ucode_type(MicrocodeType::F3DEX2);
-                    return true;
-                } else if (header.find("F3DEX") != std::string::npos ||
-                           header.find("F3DLX") != std::string::npos) {
-                    rdp.set_ucode_type(MicrocodeType::F3DEX);
-                    return true;
-                } else if (header.find("2.0G") != std::string::npos) {
-                    rdp.set_ucode_type(MicrocodeType::F3DGOLDEN);
-                    return true;
-                } else if (header.find("Fast3D") != std::string::npos ||
-                           header.find("RSP SW Version") != std::string::npos ||
-                           header.find("SGI U64 GFX") != std::string::npos) {
-                    rdp.set_ucode_type(MicrocodeType::Fast3D);
-                    return true;
-                }
-                return false;
-            };
-
-            // Microcodes known by their code come first: some share another's
-            // banner (Wave Race 64's reads like Super Mario 64's Fast3D).
-            if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
-                rdp.set_ucode_type(t);
-            } else if (!detect_banner(ucode_data_ptr)) {
-                if (!detect_banner(ucode_ptr)) {
-                    static int dbg_fail = 0;
-                    if (dbg_fail < 5) {
-                        dbg_fail++;
-                        u32 phys = ucode_data_ptr & (rdram_size - 1);
-                        std::string header(reinterpret_cast<const char*>(&rdram[phys]), std::min<size_t>(256, rdram_size - phys));
-                        std::cout << "[UCODE-DETECT-FAIL] data_ptr=0x" << std::hex << ucode_data_ptr
-                                  << " code_ptr=0x" << ucode_ptr << std::dec << " header=\"" << header << "\"\n";
-                    }
-                }
-            }
+        if (task_type == 1) { // M_GFXTASK (its microcode was identified by start())
             {
                 static MicrocodeType last_ucode = MicrocodeType::Auto;
                 if (rdp.get_ucode_type() != last_ucode) {

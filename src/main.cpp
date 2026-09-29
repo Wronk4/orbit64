@@ -88,6 +88,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::pair<int, std::string>> scheduled_presses;
     std::vector<std::pair<int, std::string>> scheduled_screenshots;
     std::string cpu_core_arg;
+    std::string rsp_arg;
     bool jit_stats = false;
     std::string profile_path;
     bool use_save_file = true;
@@ -116,6 +117,8 @@ int main(int argc, char* argv[]) {
             dump_ram_path = argv[++i];
         } else if (arg == "--cpu" && i + 1 < argc) {
             cpu_core_arg = argv[++i]; // "interp" or "jit"
+        } else if (arg == "--rsp" && i + 1 < argc) {
+            rsp_arg = argv[++i]; // "hle", "lle-gfx" or "lle"
         } else if (arg == "--jit-stats") {
             jit_stats = true;
         } else if (arg == "--no-save") {
@@ -163,7 +166,7 @@ int main(int argc, char* argv[]) {
             if (!found_roms.empty()) break;
         }
         if (found_roms.empty()) {
-            std::cerr << "Usage: n64 [rom_file] [--headless <frames>] [--scale <1-8>] [--screenshot <path.bmp>] [--mash <btn>] [--press <frame:btn>]\n";
+            std::cerr << "Usage: n64 [rom_file] [--headless <frames>] [--scale <1-8>] [--rsp hle|lle-gfx|lle] [--screenshot <path.bmp>] [--mash <btn>] [--press <frame:btn>]\n";
             return 1;
         }
         std::sort(found_roms.begin(), found_roms.end());
@@ -182,6 +185,10 @@ int main(int argc, char* argv[]) {
     emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
     if (cpu_core_arg == "interp") emu.set_cpu_core(CpuCore::Interpreter);
     else if (cpu_core_arg == "jit") emu.set_cpu_core(CpuCore::Recompiler);
+    if (rsp_arg == "hle") emu.get_rsp().set_mode(RspMode::HLE);
+    else if (rsp_arg == "lle-gfx") emu.get_rsp().set_mode(RspMode::LLEGraphics);
+    else if (rsp_arg == "lle") emu.get_rsp().set_mode(RspMode::LLE);
+    emu.get_rdp().set_exact(true); // low-level graphics: bit-exact
     emu.get_jit().set_stats_enabled(jit_stats);
     emu.set_profiling(jit_stats);
     std::vector<s16> wav_samples;

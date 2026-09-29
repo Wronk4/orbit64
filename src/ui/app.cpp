@@ -782,6 +782,8 @@ void App::launch(const fs::path& rom) {
         }
         core_.set_ucode_override(settings_.ucode_override);
         core_.set_cpu_core(settings_.cpu_core);
+        core_.set_rsp_mode(settings_.rsp_mode);
+        core_.set_rdp_exact(settings_.rdp_exact);
         std::string err;
         if (!core_.start(rom, err)) {
             error_title_ = "Failed to start emulation";

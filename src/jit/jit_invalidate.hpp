@@ -35,4 +35,16 @@ void clear_invalidate_hook_if(void* owner);
 // `paddr`/`len` describe the bytes just written.
 void notify_code_write(u32 paddr, u32 len);
 
+// RDRAM the RDP keeps ninth bits for (rdp_exact.hpp): the recompiler's
+// compiled stores to watched memory take the slow path, so every CPU (and
+// DMA) write to it reaches the write hook, which gives the bytes written the
+// ninth bits a CPU write leaves.
+using WatchFn = void (*)(void* owner, u32 paddr, u32 len);
+void set_watch_hook(void* owner, WatchFn fn); // who marks watched memory (the recompiler)
+void clear_watch_hook_if(void* owner);
+void watch_rdram(u32 paddr, u32 len);
+using WriteFn = void (*)(void* owner, u32 paddr, u32 len);
+void set_write_hook(void* owner, WriteFn fn); // who is told about writes (the RDP)
+void clear_write_hook_if(void* owner);
+
 } // namespace jit
