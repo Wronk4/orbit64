@@ -103,7 +103,7 @@ void Emulator::reset() {
         rdram[a + 2] = (v >> 8) & 0xFF;
         rdram[a + 3] = v & 0xFF;
     };
-    write_u32(0x300, 1);          // osTvType (1 = NTSC)
+    write_u32(0x300, cart.tv_type()); // osTvType (0 = PAL, 1 = NTSC, 2 = MPAL), from the header's country code
     write_u32(0x304, 0);          // osRomType (0 = cartridge)
     write_u32(0x308, 0xB0000000); // osRomBase: the cartridge via KSEG1, as IPL3 sets it (Turok reads through it)
     write_u32(0x30C, 0);          // osResetType
@@ -145,8 +145,10 @@ int g_current_frame = 0;
 
 void Emulator::step_frame() {
     g_current_frame++;
-    constexpr u32 scanlines = 525;
-    constexpr u32 cycles_per_scanline = CYCLES_PER_FRAME / scanlines;
+    // A PAL game (VI_V_SYNC 625 lines) runs at 50 Hz, an NTSC one at 60 Hz.
+    const bool pal = vi.get_v_sync() >= 600;
+    const u32 scanlines = pal ? 625 : 525;
+    const u32 cycles_per_scanline = pal ? static_cast<u32>(CPU_CLOCK_RATE / (50 * 625)) : static_cast<u32>(CYCLES_PER_FRAME / 525);
 
     using Clock = std::chrono::steady_clock;
     for (u32 line = 0; line < scanlines; ++line) {
