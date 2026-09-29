@@ -1,0 +1,39 @@
+# ROMs that don't get into the game (BLACK_SCREEN / CRASH_ERROR), as of the 2026-09-29 sweep.
+# Re-check them after a fix, without touching the rest of the results:
+#   python tools/game_status.py --redo-list tools/fix_list.txt --publish
+# Put a '#' in front of a game once it works and the page shows it.
+
+A Bug_s Life (U) [!].z64   # BLACK_SCREEN / no display list
+Banjo-Tooie (U) [!].z64   # BLACK_SCREEN / no display list
+Body Harvest (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
+Cruis_n USA (U) (V1.2) [!].z64   # CRASH_ERROR / freeze
+Cruis_n World (U) [!].z64   # BLACK_SCREEN / no display list
+F1_World_Grand_Prix2(E).v64   # BLACK_SCREEN / no display list
+FIFA - Road to World Cup 98 (U) [!].z64   # CRASH_ERROR / freeze
+FIFA Soccer 64 (U) (M3) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
+Flying Dragon (U) [!].z64   # BLACK_SCREEN / black picture, game reacts
+Gauntlet Legends (U) (!).n64   # BLACK_SCREEN / nothing drawn
+GT 64 Championship Edition (U) [!].z64   # BLACK_SCREEN / no display list
+Hydro Thunder (U) [!].z64   # CRASH_ERROR / freeze
+Ken Griffey Jr._s Slugfest (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
+Madden 2000 (U) [!].z64   # CRASH_ERROR / emulator timeout
+Madden Football 64 (U) [!].z64   # CRASH_ERROR / emulator timeout
+Madden NFL 2001 (U) [!].z64   # CRASH_ERROR / emulator timeout
+Madden NFL 2002 (U) [!].z64   # CRASH_ERROR / emulator timeout
+Madden NFL 99 (U) [!].z64   # CRASH_ERROR / emulator timeout
+Major League Baseball Featuring Ken Griffey Jr. (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
+Micro Machines 64 Turbo (U) [!].z64   # CRASH_ERROR / freeze
+Midway_s Greatest Arcade Hits Volume 1 (U) [!].z64   # BLACK_SCREEN / black picture, game reacts
+Mike Piazza_s Strike Zone (U) [!].z64   # BLACK_SCREEN / no display list
+Mortal Kombat 4 (U) [!].z64   # BLACK_SCREEN / black picture, game reacts
+Namco Museum 64 (U) [!].z64   # BLACK_SCREEN / no display list
+NBA Showtime - NBA on NBC (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped
+Nightmare Creatures (U) [!].z64   # BLACK_SCREEN / no display list
+Rat Attack (U) [!].z64   # BLACK_SCREEN / no display list
+Ready 2 Rumble Boxing Round 2 (U) [!].z64   # CRASH_ERROR / freeze
+Rush 2 - Extreme Racing USA (U) [!].z64   # BLACK_SCREEN / went black
+Shadow Man (U) [!].z64   # CRASH_ERROR / freeze
+Toy Story 2 (U) [!].z64   # BLACK_SCREEN / no display list
+Vigilante 8 - 2nd Offense (U) [!].v64   # BLACK_SCREEN / nothing drawn, game stopped
+Waialae Country Club-True Golf Classics (U) [!].z64   # BLACK_SCREEN / went black
+Wipeout 64 (U) [!].z64   # BLACK_SCREEN / nothing drawn, game stopped

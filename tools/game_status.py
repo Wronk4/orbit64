@@ -239,9 +239,10 @@ def classify(r):
     content = [t for t in tl if t.get("colors", 0) >= 6] + ([1] if p["boot"]["colors"] >= 6 else [])
     black = fin["lit"] < 0.01 and fin["colors"] <= 4
     still = fin["moving"] == 0
-    frozen = not reacts and still and fin["gfx_tasks"] == 0
+    frozen = not reacts and still and fin["gfx_tasks"] == 0 and fin.get("vi_swaps", 0) == 0
 
-    if p["display_lists"] == 0:
+    # No display list at all: black, unless the game draws with the CPU (Namco Museum 64).
+    if p["display_lists"] == 0 and not content:
         return "BLACK_SCREEN", "no display list", "high", why + ["the game never sent a display list"]
     if not content and (black or fin["colors"] < 6):
         d = "nothing drawn, game stopped" if frozen else "nothing drawn"
@@ -504,6 +505,8 @@ def main():
     ap.add_argument("--both", action="store_true", help="run every game in LLE too (default: only those HLE doesn't get into the game)")
     ap.add_argument("--redo", default="", help="repeat the HLE runs of games whose status is one of these, e.g. MENU,INTRO_TITLE; "
                     "CUT = games (not in-game) whose run hit the time limit")
+    ap.add_argument("--redo-list", help="run the games named in this file again, in every mode (tools/fix_list.txt: the games "
+                    "that didn't get into the game, after a fix); the rest of the results stay as they are")
     ap.add_argument("--hle-only", action="store_true", help="skip the LLE runs")
     ap.add_argument("--publish", action="store_true", help="write the page to site/compatibility/ (GitHub Pages) instead of test_output")
     ap.add_argument("--report-only", action="store_true", help="don't run anything, rebuild the reports")
@@ -522,6 +525,18 @@ def main():
         if not os.path.exists(EXE):
             sys.exit(f"{EXE} is missing: make game_probe")
         t0 = time.time()
+        if args.redo_list:
+            with open(args.redo_list, encoding="utf-8") as f:
+                names = {l.split("#", 1)[0].strip() for l in f if l.split("#", 1)[0].strip()}
+            again_n = 0
+            for e in roms:
+                if names & {os.path.basename(x) for x in e["files"]}:
+                    for m in MODES:
+                        rj = os.path.join(args.out, "games", e["slug"], m, "run.json")
+                        if os.path.exists(rj):
+                            os.remove(rj)
+                    again_n += 1
+            print(f"--redo-list: {again_n} of {len(names)} listed games will run again", flush=True)
         wanted = {x.strip().upper() for x in args.redo.split(",") if x.strip()}
         if wanted:
             redone = 0

@@ -446,8 +446,9 @@ int main(int argc, char** argv) {
             chosen = &wn;
             ++presses_nav;
         }
-        // Dead: no graphics task, no change on screen and no reaction.
-        const bool dead = w0.gfx_tasks == 0 && w0.moving_samples == 0 && !react_a && !react_s && !react_k;
+        // Dead: no graphics task (and no frame buffer flips: some games, like
+        // Namco Museum 64, draw with the CPU), no change on screen and no reaction.
+        const bool dead = w0.gfx_tasks == 0 && w0.vi_swaps == 0 && w0.moving_samples == 0 && !react_a && !react_s && !react_k;
         dead_steps = dead ? dead_steps + 1 : 0;
         if ((react_a || react_s || react_k) && first_react_frame < 0) first_react_frame = pr.frame;
         if (react_a || react_s || react_k) ++reacted_steps;
