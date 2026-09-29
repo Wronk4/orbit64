@@ -1111,6 +1111,22 @@ void CPU::set_fpr64(size_t reg, u64 val) {
 // relations that make the compare true (bit0 = unordered, bit1 = equal,
 // bit2 = less); bit 3 only picks the signalling variant and does not change the
 // predicate. Spelling the cases out one by one is what dropped C.LT/C.LE before.
+// SQRT.S/SQRT.D as the host's square root instruction, which is what the JIT
+// emits (fsqrt / sqrtss / sqrtsd). std::sqrt can be a C library call instead:
+// MinGW-w64's on Windows ARM64 returns -NaN for a negative input where fsqrt
+// gives +NaN, so the interpreter and the JIT disagreed there.
+template <typename T>
+static inline T host_sqrt(T x) {
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    T r;
+    if constexpr (sizeof(T) == 4) asm("fsqrt %s0, %s1" : "=w"(r) : "w"(x));
+    else asm("fsqrt %d0, %d1" : "=w"(r) : "w"(x));
+    return r;
+#else
+    return std::sqrt(x);
+#endif
+}
+
 static inline bool fp_condition(double a, double b, u32 cond) {
     if (std::isnan(a) || std::isnan(b)) return (cond & 1) != 0;
     return (((cond & 4) != 0) && a < b) || (((cond & 2) != 0) && a == b);
@@ -1154,7 +1170,7 @@ void CPU::execute_fpu_op(u32 instr) {
             case 0x01: d_val = s_val - t_val; break; // SUB.S
             case 0x02: d_val = s_val * t_val; break; // MUL.S
             case 0x03: d_val = (t_val != 0.0f) ? (s_val / t_val) : 0.0f; break; // DIV.S
-            case 0x04: d_val = std::sqrt(s_val); break; // SQRT.S
+            case 0x04: d_val = host_sqrt(s_val); break; // SQRT.S
             case 0x05: d_val = std::abs(s_val); break; // ABS.S
             case 0x06: d_val = s_val; break; // MOV.S
             case 0x07: d_val = -s_val; break; // NEG.S
@@ -1242,7 +1258,7 @@ void CPU::execute_fpu_op(u32 instr) {
             case 0x01: d_val = s_val - t_val; break; // SUB.D
             case 0x02: d_val = s_val * t_val; break; // MUL.D
             case 0x03: d_val = (t_val != 0.0) ? (s_val / t_val) : 0.0; break; // DIV.D
-            case 0x04: d_val = std::sqrt(s_val); break; // SQRT.D
+            case 0x04: d_val = host_sqrt(s_val); break; // SQRT.D
             case 0x05: d_val = std::abs(s_val); break; // ABS.D
             case 0x06: d_val = s_val; break; // MOV.D
             case 0x07: d_val = -s_val; break; // NEG.D
