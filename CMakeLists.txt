@@ -124,6 +124,11 @@ add_executable(game_probe EXCLUDE_FROM_ALL tools/game_probe.cpp ${CHECK_SOURCES}
 target_include_directories(game_probe PRIVATE src third_party/stb)
 target_link_libraries(game_probe PRIVATE Threads::Threads)
 
+# Interpreter-vs-JIT differential test (src/jit/jit_selftest_main.cpp), not built by default.
+add_executable(jit_selftest EXCLUDE_FROM_ALL src/jit/jit_selftest_main.cpp ${CHECK_SOURCES})
+target_include_directories(jit_selftest PRIVATE src third_party/stb)
+target_link_libraries(jit_selftest PRIVATE Threads::Threads)
+
 # GPU renderer vs CPU renderer, frame by frame (tools/gpu_check.cpp), not built by default.
 add_executable(gpu_check EXCLUDE_FROM_ALL tools/gpu_check.cpp ${CHECK_SOURCES} ${GPU_SOURCES})
 target_include_directories(gpu_check PRIVATE src third_party/stb)

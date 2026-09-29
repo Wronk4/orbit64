@@ -25,8 +25,8 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 
 Every push to GitHub is built for Windows, macOS and Linux by `.github/workflows/build.yml`. Each push to `main`
 publishes a new release on the Releases page (`v1.0.<commits on main>`, the first two numbers come from
-`project(VERSION)` in `CMakeLists.txt`) with `orbit64-windows-x64.zip`, `orbit64-macos-universal.zip` and
-`orbit64-linux-x64.tar.gz`; pushing a tag such as `v2.0.0` publishes that version. Day-to-day work goes to the
+`project(VERSION)` in `CMakeLists.txt`) with `orbit64-windows-x64.zip`, `orbit64-windows-arm64.zip`, `orbit64-macos-universal.zip`,
+`orbit64-linux-x64.tar.gz` and `orbit64-linux-arm64.tar.gz`; pushing a tag such as `v2.0.0` publishes that version. Day-to-day work goes to the
 `nightly` branch, whose builds (like those of any other branch) are only kept as artifacts of their run in the Actions
 tab. The macOS binary is not notarized: run `xattr -dr com.apple.quarantine orbit64` once after unpacking.
 

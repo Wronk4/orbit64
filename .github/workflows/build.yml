@@ -1,4 +1,4 @@
-# Builds Orbit64 for macOS, Linux and Windows on every push.
+# Builds Orbit64 for macOS, Linux and Windows (x64 and ARM64) on every push.
 #
 #   push to main     -> a new release v<major>.<minor>.<commits on main>; major.minor
 #                       come from project(VERSION) in CMakeLists.txt
@@ -51,6 +51,15 @@ jobs:
               -DCMAKE_CXX_COMPILER=g++-12
               "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
             exe: out/orbit64
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+            shell: bash
+            configure: >-
+              -G Ninja
+              -DCMAKE_C_COMPILER=gcc-12
+              -DCMAKE_CXX_COMPILER=g++-12
+              "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+            exe: out/orbit64
           # MinGW-w64 (GCC) as with the Makefile: the core uses GCC builtins MSVC lacks.
           - name: windows-x64
             os: windows-2022
@@ -59,6 +68,25 @@ jobs:
               -G Ninja
               -DCMAKE_EXE_LINKER_FLAGS=-static
             exe: out/orbit64.exe
+            msystem: UCRT64
+            packages: >-
+              mingw-w64-ucrt-x86_64-gcc
+              mingw-w64-ucrt-x86_64-cmake
+              mingw-w64-ucrt-x86_64-ninja
+          # MSYS2 has no GCC for Windows on ARM; its CLANGARM64 environment
+          # (clang + libc++, still MinGW-w64 headers and GCC builtins) is used.
+          - name: windows-arm64
+            os: windows-11-arm
+            shell: msys2 {0}
+            configure: >-
+              -G Ninja
+              -DCMAKE_EXE_LINKER_FLAGS=-static
+            exe: out/orbit64.exe
+            msystem: CLANGARM64
+            packages: >-
+              mingw-w64-clang-aarch64-clang
+              mingw-w64-clang-aarch64-cmake
+              mingw-w64-clang-aarch64-ninja
 
     steps:
       - uses: actions/checkout@v4
@@ -71,12 +99,9 @@ jobs:
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: UCRT64
+          msystem: ${{ matrix.msystem }}
           update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
+          install: ${{ matrix.packages }}
 
       - name: Install SDL3 build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -99,6 +124,14 @@ jobs:
 
       - name: Build
         run: cmake --build out --config Release --parallel
+
+      # Runs the same guest programs through the interpreter and the JIT and
+      # diffs the results, so a recompiler broken on one host (e.g. ARM64
+      # Linux/Windows, where the W^X path differs from macOS) fails the build.
+      - name: JIT self-test
+        run: |
+          cmake --build out --config Release --target jit_selftest
+          ./out/jit_selftest
 
       - name: Package
         run: |
@@ -166,8 +199,10 @@ jobs:
             echo "| Platform | File |"
             echo "|---|---|"
             echo "| Windows 10/11 x64 | \`orbit64-windows-x64.zip\` |"
+            echo "| Windows 11 ARM64 (e.g. Snapdragon X) | \`orbit64-windows-arm64.zip\` |"
             echo "| macOS 11+ (Apple Silicon and Intel) | \`orbit64-macos-universal.zip\` |"
             echo "| Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | \`orbit64-linux-x64.tar.gz\` |"
+            echo "| Linux ARM64 (glibc 2.35+, e.g. Ubuntu 22.04+, Raspberry Pi OS 64-bit bookworm+) | \`orbit64-linux-arm64.tar.gz\` |"
             echo
             echo "macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`"
             echo "(or right-click the executable, Open) before starting it the first time."
