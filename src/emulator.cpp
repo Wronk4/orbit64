@@ -57,12 +57,22 @@ void Emulator::reset() {
         // Copy header and IPL3 into RSP DMEM (0xA4000000)
         std::memcpy(rsp.get_dmem(), rom.data(), 0x1000);
 
-        // 6105's IPL3 copies the tail of itself (DMEM 0x554-0x887) to RDRAM
-        // 0x4 and finishes running from there; Perfect Dark checks one of
-        // those words (0x2E8) and hangs on purpose if it isn't there. The OS
-        // parameters written below land on top of it, as they do on hardware.
-        if (cart.get_cic_type() == CICType::CIC_6105)
-            std::memcpy(rdram + 0x4, rom.data() + 0x554, 0x888 - 0x554);
+        // IPL3 copies the tail of itself to the start of RDRAM and finishes
+        // running from there, and games check that it is still there:
+        // Perfect Dark hangs on purpose without 6105's word at 0x2E8, and
+        // Diddy Kong Racing culls front faces instead of back faces (its
+        // world is drawn inside out) without 6103's `sw t1, 0(at)` at 0x200.
+        // The OS parameters written below land on top of 6105's copy, as
+        // they do on hardware. (6101's range isn't known.)
+        struct IplTail { CICType cic; u32 begin, end, dest; };
+        static const IplTail ipl_tails[] = {
+            {CICType::CIC_6102, 0x4C0, 0x774, 0x0},
+            {CICType::CIC_6103, 0x4C0, 0x768, 0x0},
+            {CICType::CIC_6105, 0x554, 0x888, 0x4},
+            {CICType::CIC_6106, 0x4F0, 0x7AC, 0x0},
+        };
+        for (const IplTail& t : ipl_tails)
+            if (t.cic == cart.get_cic_type()) std::memcpy(rdram + t.dest, rom.data() + t.begin, t.end - t.begin);
 
         // Just before jumping to the game, the 6101/6102 IPL3 clears SP DMEM
         // and IMEM, and the 6103/6106 ones fill them with 0xFF and store
