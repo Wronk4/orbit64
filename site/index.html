@@ -135,6 +135,11 @@
   .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
   .pill { font-size: 0.85rem; padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--fg); }
 
+  .compat-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--bg2); margin: 4px 0 14px; max-width: 680px; }
+  .compat-bar span { display: block; height: 100%; }
+  .compat-legend { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 0 0 20px; padding: 0; list-style: none; font-size: 0.95rem; }
+  .compat-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; }
+  .compat-legend b { font-variant-numeric: tabular-nums; }
   section { padding: 36px 0; }
   section + section { border-top: 1px solid var(--line); }
   h2 { font-size: 1.6rem; margin: 0 0 8px; letter-spacing: -0.01em; }
@@ -182,6 +187,7 @@
     <a class="brand" href="#top"><img src="logo.svg" alt="" width="32" height="32">Orbit64</a>
     <nav aria-label="Sections">
       <a href="#features">Features</a>
+      <a class="opt" href="compatibility/">Compatibility</a>
       <a class="opt" href="#download">Download</a>
       <a class="opt" href="#faq">FAQ</a>
       <a href="https://github.com/Wronk4/orbit64">GitHub</a>
@@ -287,6 +293,16 @@
         </ul>
       </div>
     </div>
+  </section>
+
+  <section id="compat">
+    <h2>Game compatibility</h2>
+    <p class="sub" id="compat-sub">Orbit64 is tested on a library of Nintendo 64 games: every game is started and played
+      automatically, with a screenshot and a status. The results are automatic and not 100% certain, and are still
+      being checked by hand.</p>
+    <div class="compat-bar" id="compat-bar" hidden></div>
+    <ul class="compat-legend" id="compat-legend" hidden></ul>
+    <a class="btn" href="compatibility/">Browse all games</a>
   </section>
 
   <section id="download">
@@ -403,5 +419,21 @@ cmake --build out</code></pre>
     <span>Not affiliated with or endorsed by Nintendo. Nintendo 64 is a trademark of Nintendo.</span>
   </div>
 </footer>
+<script>
+// The counts come from the compatibility page's data, so this section never goes stale.
+fetch("compatibility/compat.json").then(r => r.ok ? r.json() : Promise.reject()).then(d => {
+  const rows = [["INGAME", "In-game", "#2fa84f"], ["MENU", "Menu", "#3f7fe0"], ["INTRO_TITLE", "Intro / title", "#9066e0"],
+                ["BLACK_SCREEN", "Black screen", "#8a879c"], ["CRASH_ERROR", "Crash / error", "#d64545"]];
+  const n = d.games.length;
+  document.getElementById("compat-bar").innerHTML = rows.map(r =>
+    `<span style="width:${100 * d.counts[r[0]] / n}%;background:${r[2]}" title="${r[1]}: ${d.counts[r[0]]}"></span>`).join("");
+  document.getElementById("compat-legend").innerHTML = rows.map(r =>
+    `<li><i style="background:${r[2]}"></i>${r[1]} <b>${d.counts[r[0]]}</b></li>`).join("");
+  document.getElementById("compat-bar").hidden = document.getElementById("compat-legend").hidden = false;
+  document.getElementById("compat-sub").textContent = `${n} Nintendo 64 games were started and played automatically: ` +
+    `${d.counts.INGAME} reached gameplay. The results are automatic and not 100% certain (a game listed as a menu may work fine), ` +
+    `and are still being checked by hand.`;
+}).catch(() => {});
+</script>
 </body>
 </html>
