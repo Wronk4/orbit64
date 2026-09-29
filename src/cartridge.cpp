@@ -34,6 +34,7 @@ bool Cartridge::load_rom(const std::string& filepath) {
     }
 
     rom.resize(size);
+    rom_latched_ = false;
     if (!file.read(reinterpret_cast<char*>(rom.data()), size)) {
         std::cerr << "[Cartridge] Failed to read ROM data\n";
         return false;

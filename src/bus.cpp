@@ -110,6 +110,7 @@ u8 Bus::read8(u32 paddr) {
     } else if (paddr >= 0x08000000 && paddr < 0x08800000) {
         return cart.read_sram(paddr - 0x08000000);
     } else if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
+        if (u32 w; cart.take_rom_latch(w)) return static_cast<u8>(w >> ((3 - (paddr & 3)) * 8));
         return cart.read_rom(paddr - 0x10000000);
     } else if (paddr >= 0x1FC00000 && paddr < 0x1FC007C0) {
         return pif.read_rom(paddr - 0x1FC00000);
@@ -126,6 +127,10 @@ u8 Bus::read8(u32 paddr) {
 u16 Bus::read16(u32 paddr) {
     if (paddr + 1 < ram_limit_) {
         return (static_cast<u16>(rdram[paddr]) << 8) | static_cast<u16>(rdram[paddr + 1]);
+    }
+    if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
+        if (u32 w; cart.take_rom_latch(w)) return static_cast<u16>(w >> ((paddr & 2) ? 0 : 16));
+        return cart.read_rom16(paddr - 0x10000000);
     }
     return (static_cast<u16>(read8(paddr)) << 8) | static_cast<u16>(read8(paddr + 1));
 }
@@ -185,6 +190,7 @@ u32 Bus::read32(u32 paddr) {
     } else if (paddr >= 0x08000000 && paddr < 0x10000000) {
         return cart.read_bus32(paddr - 0x08000000); // SRAM / FlashRAM status
     } else if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
+        if (u32 w; cart.take_rom_latch(w)) return w;
         return cart.read_rom32(paddr - 0x10000000);
     } else if (paddr >= 0x1FC007C0 && paddr < 0x1FC00800) {
         u32 off = paddr - 0x1FC007C0;
@@ -209,6 +215,8 @@ void Bus::write8(u32 paddr, u8 val) {
         rsp.write_dmem(paddr & 0xFFF, val);
     } else if (paddr >= 0x04001000 && paddr < 0x04002000) {
         rsp.write_imem(paddr & 0xFFF, val);
+    } else if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
+        cart.latch_rom_write(paddr - 0x10000000, static_cast<u32>(val) << ((3 - (paddr & 3)) * 8));
     } else if (paddr >= 0x1FC007C0 && paddr < 0x1FC00800) {
         pif.write_ram(paddr - 0x1FC007C0, val);
     }
@@ -219,6 +227,8 @@ void Bus::write16(u32 paddr, u16 val) {
         rdram[paddr + 0] = (val >> 8) & 0xFF;
         rdram[paddr + 1] = val & 0xFF;
         jit::notify_code_write(paddr, 2);
+    } else if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
+        cart.latch_rom_write(paddr - 0x10000000, static_cast<u32>(val) << ((paddr & 2) ? 0 : 16));
     } else {
         write8(paddr + 0, (val >> 8) & 0xFF);
         write8(paddr + 1, val & 0xFF);
@@ -278,6 +288,8 @@ void Bus::write32(u32 paddr, u32 val) {
         si.write_reg(paddr, val, mi, pif, controllers, cart, rdram.data(), rdram.size());
     } else if (paddr >= 0x08000000 && paddr < 0x10000000) {
         cart.write_bus32(paddr - 0x08000000, val); // SRAM / FlashRAM commands
+    } else if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
+        cart.latch_rom_write(paddr - 0x10000000, val);
     } else if (paddr >= 0x1FC007C0 && paddr < 0x1FC00800) {
         u32 off = paddr - 0x1FC007C0;
         pif.write_ram(off + 0, (val >> 24) & 0xFF);

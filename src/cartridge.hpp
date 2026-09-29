@@ -37,6 +37,25 @@ public:
     u16 read_rom16(u32 addr) const;
     u32 read_rom32(u32 addr) const;
 
+    // A CPU store into the ROM area goes out on the PI bus and is remembered:
+    // the next CPU load from the ROM area returns it once instead of the ROM
+    // (the hardware's bus latch). Activision's audio code (A Bug's Life,
+    // Toy Story 2) writes flags into a ROM address and reads them back. The
+    // word is in bus order, the stored lane in its place, the rest 0. Only
+    // stores inside the ROM count: libultra's IS-Viewer probe writes "IS64"
+    // to 0x13FF0000, far beyond any ROM, and that must not reach the next load.
+    void latch_rom_write(u32 rom_offset, u32 word) {
+        if (rom_offset >= rom.size()) return;
+        rom_latch_ = word;
+        rom_latched_ = true;
+    }
+    bool take_rom_latch(u32& word) {
+        if (!rom_latched_) return false;
+        word = rom_latch_;
+        rom_latched_ = false;
+        return true;
+    }
+
     u8 read_sram(u32 addr) const;
     void write_sram(u32 addr, u8 val);
 
@@ -77,6 +96,17 @@ public:
     u32 get_crc1() const { return crc1; }
     u32 get_crc2() const { return crc2; }
     std::string get_title() const { return title; }
+    // osTvType as IPL3 leaves it at 0x80000300, from the header's country
+    // code (0x3E): 0 = PAL, 1 = NTSC, 2 = MPAL (Brazil). Some games check it
+    // and hang when it doesn't fit the cartridge (F1 World Grand Prix 2).
+    u32 tv_type() const {
+        const u8 c = rom.size() > 0x3E ? rom[0x3E] : 0;
+        switch (c) {
+            case 'D': case 'F': case 'H': case 'I': case 'P': case 'S': case 'U': case 'W': case 'X': case 'Y': return 0;
+            case 'B': return 2;
+            default: return 1;
+        }
+    }
     std::string get_game_code() const { return game_code; }
 
     // Save states (savestate.hpp): the save memory, so the game finds what it
@@ -110,6 +140,8 @@ private:
     std::string save_filepath;
     bool use_save_file_{true};
     std::vector<u8> rom;
+    u32 rom_latch_{0};
+    bool rom_latched_{false};
     std::vector<u8> sram;
     std::vector<u8> eeprom;
     bool sram_dirty{false};
