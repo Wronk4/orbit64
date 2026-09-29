@@ -717,10 +717,11 @@ void App::settings_emulation() {
 
     row_begin("Low-level RDP",
               "How low-level graphics are drawn. Bit-exact reproduces the console's RDP pixel for pixel (dithering, "
-              "coverage, depth precision) at native resolution. Fast draws them through the high-level renderer, "
-              "which supports higher internal resolutions but is not exact.", cw);
+              "coverage, depth precision); at a higher internal resolution the game still sees the exact picture "
+              "and the screen shows the same pipeline drawn at that resolution. Fast draws them through the "
+              "high-level renderer, which is quicker but not exact.", cw);
     {
-        const char* items[] = {"Bit-exact (native resolution)", "Fast (supports upscaling)"};
+        const char* items[] = {"Bit-exact", "Fast"};
         int cur = settings_.rdp_exact ? 0 : 1;
         if (combo("rdpexact", &cur, items, 2, cw)) {
             settings_.rdp_exact = cur == 0;

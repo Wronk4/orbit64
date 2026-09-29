@@ -33,6 +33,11 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 namespace {
 
@@ -56,6 +61,30 @@ constexpr u8 TILE_MIRROR_T = 1u << 3;
 constexpr int TF_RGBA = 0, TF_YUV = 1, TF_CI = 2, TF_IA = 3, TF_I = 4;
 
 inline s32 w32(s64 v) { return static_cast<s32>(v); }
+// Division and remainder rounding towards minus infinity (the arithmetic
+// shifts they replace for scales that are powers of two).
+inline s32 fdiv(s32 a, s32 b) { return a >= 0 ? a / b : -((-static_cast<s64>(a) + b - 1) / b); }
+inline s32 fmod_(s32 a, s32 b) { return a - fdiv(a, b) * b; }
+inline s64 fdiv64(s64 a, s64 b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
+
+// Zeroed memory whose pages the OS only backs once they are touched.
+void* lazy_alloc(size_t n) {
+#ifdef _WIN32
+    return VirtualAlloc(nullptr, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* p = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    return p == MAP_FAILED ? nullptr : p;
+#endif
+}
+void lazy_free(void* p, size_t n) {
+    if (!p) return;
+#ifdef _WIN32
+    (void)n;
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    munmap(p, n);
+#endif
+}
 inline s32 sext(s32 v, int bits) { return static_cast<s32>(static_cast<u32>(v) << (32 - bits)) >> (32 - bits); }
 inline int find_msb(s32 v) { return v <= 0 ? (v == 0 ? -1 : 31) : 31 - __builtin_clz(static_cast<u32>(v)); }
 inline int find_lsb(u32 v) { return v ? __builtin_ctz(v) : -1; }
@@ -301,6 +330,77 @@ void ExactRdp::cpu_wrote(u32 paddr, u32 len) {
     }
 }
 
+void ExactRdp::rebuild_watched() {
+    HiddenStore& st = *hs_;
+    st.watched.assign(st.bits.size() / 32, 0);
+    for (size_t h = 0; h < st.bits.size(); ++h) {
+        if (st.bits[h] & 4) continue;
+        u8& w = st.watched[h >> 5];
+        if (!w) {
+            w = 1;
+            jit::watch_rdram(static_cast<u32>(h >> 5) << 6, 64);
+        }
+    }
+}
+
+UpStore::UpStore(u32 scale_, size_t rdram_size) : scale(scale_), size(rdram_size) {
+    const size_t slices = static_cast<size_t>(scale) * scale;
+    color_bytes_ = slices * size;
+    hidden_bytes_ = slices * (size / 2);
+    ref_bytes_ = size;
+    color_ = static_cast<u8*>(lazy_alloc(color_bytes_));
+    hidden_ = static_cast<u8*>(lazy_alloc(hidden_bytes_));
+    ref = static_cast<u8*>(lazy_alloc(ref_bytes_));
+    if (!color_ || !hidden_ || !ref) {
+        std::fprintf(stderr, "ExactRdp: can't reserve %zu MB for %ux internal resolution\n",
+                     (color_bytes_ + hidden_bytes_ + ref_bytes_) >> 20, scale);
+        std::abort();
+    }
+}
+
+UpStore::~UpStore() {
+    lazy_free(color_, color_bytes_);
+    lazy_free(hidden_, hidden_bytes_);
+    lazy_free(ref, ref_bytes_);
+}
+
+UpStore* ExactRdp::upscaled(size_t rdram_size) {
+    if (scale_ <= 1) return nullptr;
+    if (!up_ || up_->size != rdram_size) up_ = std::make_shared<UpStore>(scale_, rdram_size);
+    return up_.get();
+}
+
+void ExactRdp::up_sync_before(u64 lo, u64 hi, const u8* rdram, size_t rdram_size) {
+    UpStore* up = upscaled(rdram_size);
+    if (!up) return;
+    lo &= ~static_cast<u64>(63);
+    hi = std::min<u64>((hi + 63) & ~static_cast<u64>(63), rdram_size);
+    const u32 slices = up->scale * up->scale;
+    for (u64 a = lo; a < hi; a += 64) {
+        if (std::memcmp(rdram + a, up->ref + a, 64) == 0) continue;
+        for (u64 b = a; b < a + 64; b += 2) {
+            if (rdram[b] == up->ref[b] && rdram[b + 1] == up->ref[b + 1]) continue;
+            const size_t i = static_cast<size_t>(b >> 1);
+            const u16 w = static_cast<u16>((rdram[b] << 8) | rdram[b + 1]);
+            const u8 bits = hidden_at(i, w);
+            for (u32 sl = 0; sl < slices; ++sl) {
+                u8* c = up->color(sl) + b;
+                c[0] = rdram[b];
+                c[1] = rdram[b + 1];
+                up->hidden(sl)[i] = bits;
+            }
+        }
+        std::memcpy(up->ref + a, rdram + a, 64);
+    }
+}
+
+void ExactRdp::up_sync_after(u64 lo, u64 hi, const u8* rdram, size_t rdram_size) {
+    UpStore* up = upscaled(rdram_size);
+    if (!up) return;
+    hi = std::min<u64>(hi, rdram_size);
+    if (lo < hi) std::memcpy(up->ref + lo, rdram + lo, static_cast<size_t>(hi - lo));
+}
+
 ExactRdp::ExactRdp() {
     reset();
 }
@@ -334,6 +434,10 @@ void ExactRdp::reset() {
     ci_fmt_ = FB_RGBA5551;
     zi_addr_ = 0;
     std::fill(std::begin(prev_mem_), std::end(prev_mem_), 0);
+    std::fill(std::begin(prev_mem_up_), std::end(prev_mem_up_), 0);
+    mirror_ = false;
+    // (The high-resolution copy stays: it is brought up to date with RDRAM
+    // before anything is drawn over it.)
 }
 
 u32 ExactRdp::command_words(u32 op) {
@@ -1093,7 +1197,10 @@ void ExactRdp::fill_rectangle(const u32* w, u8* rdram, size_t rdram_size) {
     s.yl = static_cast<s32>(yl);
     s.yh = static_cast<s32>(yh);
     s.flags = SETUP_FLIP;
+    // At internal resolution, drawn natively and repeated (as parallel-rdp does).
+    mirror_ = true;
     draw(s, Attr{}, rdram, rdram_size);
+    mirror_ = false;
     // The next stale reader sees this rectangle's pre-image: the
     // predecessor's output saved above.
     if (stale)
@@ -1142,20 +1249,28 @@ namespace {
 
 // The scanline's span: the attributes where the major edge enters it, and
 // where each of its four sub-scanlines starts and ends (x in 1/8 pixels).
-void span_setup(const ExactRdp* /*unused*/, int y, s32 xh0, s32 xm0, s32 xl0, s32 yh, s32 ym, s32 yl, s32 dxhdy,
+// At a scale S > 1 (internal resolution, after parallel-rdp) y and the
+// result are in S times finer lines and pixels; attributes are stepped by
+// whole derivatives at native pixels and by 1/S of them in between.
+void span_setup(s32 S, int y, s32 xh0, s32 xm0, s32 xl0, s32 yh, s32 ym, s32 yl, s32 dxhdy,
                 s32 dxmdy, s32 dxldy, u32 flags, const s32 rgba0[4], const s32 drgba_dx[4], const s32 drgba_de[4],
                 const s32 drgba_dy[4], const s32 stzw0[4], const s32 dstzw_dx[4], const s32 dstzw_de[4],
                 const s32 dstzw_dy[4], s32 sc_xlo, s32 sc_ylo, s32 sc_xhi, s32 sc_yhi, Span& sp) {
     const bool flip = flags & SETUP_FLIP;
     const bool do_offset = flags & SETUP_DO_OFFSET;
     const bool skip_xfrac = flags & SETUP_SKIP_XFRAC;
+    // dy steps of `d`: whole ones per native line, 1/S of one in between.
+    auto snapped = [S](s32 d, s32 dy) -> s64 {
+        if (S == 1) return static_cast<s64>(dy) * d;
+        return static_cast<s64>(fdiv(dy, S)) * d + static_cast<s64>(fmod_(dy, S)) * fdiv(d, S);
+    };
     {
-        const s32 ybase = yh >> 2;
+        const s32 ybase = (yh >> 2) * S;
         const s32 dy = y - ybase;
-        s32 xh = w32(static_cast<s64>(xh0) + static_cast<s64>(dy) * w32(static_cast<s64>(dxhdy) << 2));
+        s32 xh = w32(static_cast<s64>(xh0) * S + static_cast<s64>(dy) * w32(static_cast<s64>(dxhdy) << 2));
         s32 drgba_diff[4]{}, dstzw_diff[4]{};
         if (do_offset) {
-            xh = w32(static_cast<s64>(xh) + 3ll * dxhdy);
+            xh = w32(static_cast<s64>(xh) + 3ll * S * dxhdy);
             for (int i = 0; i < 4; ++i) {
                 const s32 deh = drgba_de[i] & ~0x1ff, dyh = drgba_dy[i] & ~0x1ff;
                 drgba_diff[i] = w32(static_cast<s64>(deh) - (deh >> 2) - dyh + (dyh >> 2));
@@ -1166,30 +1281,31 @@ void span_setup(const ExactRdp* /*unused*/, int y, s32 xh0, s32 xm0, s32 xl0, s3
         sp.base_x = xh >> 15;
         const s32 xfrac = skip_xfrac ? 0 : ((xh >> 7) & 0xff);
         for (int i = 0; i < 4; ++i) {
-            s32 c = w32(static_cast<s64>(rgba0[i]) + static_cast<s64>(dy) * drgba_de[i]);
-            c = w32(static_cast<s64>(c & ~0x1ff) + drgba_diff[i] - static_cast<s64>(xfrac) * ((drgba_dx[i] >> 8) & ~1)) & ~0x3ff;
+            s32 c = w32(static_cast<s64>(rgba0[i]) + snapped(drgba_de[i], dy));
+            c = w32(static_cast<s64>(c & ~0x1ff) + drgba_diff[i] - snapped((drgba_dx[i] >> 8) & ~1, xfrac)) & ~0x3ff;
             sp.rgba[i] = c;
-            s32 t = w32(static_cast<s64>(stzw0[i]) + static_cast<s64>(dy) * dstzw_de[i]);
-            t = w32(static_cast<s64>(t & ~0x1ff) + dstzw_diff[i] - static_cast<s64>(xfrac) * ((dstzw_dx[i] >> 8) & ~1)) & ~0x3ff;
+            s32 t = w32(static_cast<s64>(stzw0[i]) + snapped(dstzw_de[i], dy));
+            t = w32(static_cast<s64>(t & ~0x1ff) + dstzw_diff[i] - snapped((dstzw_dx[i] >> 8) & ~1, xfrac)) & ~0x3ff;
             sp.stzw[i] = t;
         }
     }
 
-    const s32 yh_base = yh & ~3;
-    const s32 ylo = std::max(yh, sc_ylo), yhi = std::min(yl, sc_yhi);
-    const s32 lo_sc = sc_xlo << 1, hi_sc = sc_xhi << 1;
+    const s32 yh_base = (yh & ~3) * S, ym_base = ym * S;
+    const s32 ylo = std::max(yh, sc_ylo) * S, yhi = std::min(yl, sc_yhi) * S;
+    const s32 lo_sc = S * (sc_xlo << 1), hi_sc = S * (sc_xhi << 1);
+    const int xbits = 27 + (S > 1 ? 32 - __builtin_clz(static_cast<u32>(S - 1)) : 0);
     bool invalid[4];
     s32 xleft[4], xright[4];
     bool all_over = true, all_under = true;
     for (int i = 0; i < 4; ++i) {
         const s32 ys = y * 4 + i;
         const bool clip_y = ys < ylo || ys >= yhi;
-        s32 xh = w32(static_cast<s64>(xh0) + static_cast<s64>(ys - yh_base) * dxhdy);
-        const s32 xm = w32(static_cast<s64>(xm0) + static_cast<s64>(ys - yh_base) * dxmdy);
-        s32 xl = w32(static_cast<s64>(xl0) + static_cast<s64>(ys - ym) * dxldy);
-        if (ys < ym) xl = xm;
-        xl = sext(xl, 27);
-        xh = sext(xh, 27);
+        s32 xh = w32(static_cast<s64>(xh0) * S + static_cast<s64>(ys - yh_base) * dxhdy);
+        const s32 xm = w32(static_cast<s64>(xm0) * S + static_cast<s64>(ys - yh_base) * dxmdy);
+        s32 xl = w32(static_cast<s64>(xl0) * S + static_cast<s64>(ys - ym_base) * dxldy);
+        if (ys < ym * S) xl = xm;
+        xl = sext(xl, xbits);
+        xh = sext(xh, xbits);
         auto quantize = [](s32 x) { return (x >> 12) | ((x & 0xfff) ? 1 : 0); };
         const s32 xhs = quantize(xh), xls = quantize(xl);
         s32 l = flip ? xhs : xls, r = flip ? xls : xhs;
@@ -1215,7 +1331,7 @@ void span_setup(const ExactRdp* /*unused*/, int y, s32 xh0, s32 xm0, s32 xl0, s3
     sp.end_x = mx >> 3;
     sp.valid = !(invalid[0] && invalid[1] && invalid[2] && invalid[3]) && !all_over && !all_under;
     if (flags & SETUP_INTERLACE_FIELD)
-        if ((y & 1) != ((flags & SETUP_INTERLACE_KEEP_ODD) ? 1 : 0)) sp.valid = false;
+        if ((fdiv(y, S) & 1) != ((flags & SETUP_INTERLACE_KEEP_ODD) ? 1 : 0)) sp.valid = false;
     sp.lodlength = flip ? sp.end_x - sp.base_x : sp.base_x - sp.start_x;
 }
 
@@ -1360,8 +1476,20 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
     const s32 max_line = std::min(setup.yl - 1, sc_yhi - 1) >> 2;
     if (max_line < min_line) return;
 
+    // Internal resolution: after the native pass (psc = 1, RDRAM), a second
+    // one at psc = scale_ into the high-resolution copy - or, for primitives
+    // that are repeated rather than upscaled, their native writes copied to
+    // every sample (`mirror`).
+    UpStore* const up = scale_ > 1 ? upscaled(rdram_size) : nullptr;
+    const bool mirror = up && (mirror_ || p.cycle >= 2);
+    const int passes = up && !mirror ? 2 : 1;
+    s32 psc = 1;
+    bool hires = false;     // in the high-resolution pass
+    u8* fbm = rdram;        // the memory drawn into: RDRAM, or the current pixel's sample
+    u8* hbits = nullptr;    // and that sample's ninth bits
+
     auto make_span = [&](int y, Span& sp) {
-        span_setup(this, y, setup.xh, setup.xm, setup.xl, setup.yh, setup.ym, setup.yl, setup.dxhdy, setup.dxmdy,
+        span_setup(psc, y, setup.xh, setup.xm, setup.xl, setup.yh, setup.ym, setup.yl, setup.dxhdy, setup.dxmdy,
                    setup.dxldy, setup.flags, attr.rgba, attr.drgba_dx, attr.drgba_de, attr.drgba_dy, attr.stzw,
                    attr.dstzw_dx, attr.dstzw_de, attr.dstzw_dy, static_cast<s32>(scissor_xlo_), sc_ylo,
                    static_cast<s32>(scissor_xhi_), sc_yhi, sp);
@@ -1374,8 +1502,13 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
     const u32 max_level = setup_tile >> 3;
     const BlenderDivider& bdiv = blender_divider();
 
-    auto hidden_get = [&](size_t hidx, u16 word) -> u8 { return hidden_at(hidx, word); };
+    auto hidden_get = [&](size_t hidx, u16 word) -> u8 { return hires ? hbits[hidx] : hidden_at(hidx, word); };
+    // Every store ends with this, once per halfword it wrote.
     auto hidden_set = [&](size_t hidx, u8 bits) {
+        if (hires) {
+            hbits[hidx] = bits;
+            return;
+        }
         hs_->bits[hidx] = bits;
         hs_->word[hidx] = static_cast<u16>((rdram[hidx * 2] << 8) | rdram[hidx * 2 + 1]);
         u8& w = hs_->watched[hidx >> 5];
@@ -1383,11 +1516,20 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
             w = 1;
             jit::watch_rdram(static_cast<u32>(hidx >> 5) << 6, 64);
         }
+        if (mirror) {
+            const u32 slices = up->scale * up->scale;
+            for (u32 sl = 0; sl < slices; ++sl) {
+                u8* c = up->color(sl) + hidx * 2;
+                c[0] = rdram[hidx * 2];
+                c[1] = rdram[hidx * 2 + 1];
+                up->hidden(sl)[hidx] = bits;
+            }
+        }
     };
-    auto rd16 = [&](size_t hidx) -> u16 { return static_cast<u16>((rdram[hidx * 2] << 8) | rdram[hidx * 2 + 1]); };
+    auto rd16 = [&](size_t hidx) -> u16 { return static_cast<u16>((fbm[hidx * 2] << 8) | fbm[hidx * 2 + 1]); };
     auto wr16 = [&](size_t hidx, u16 v) {
-        rdram[hidx * 2] = static_cast<u8>(v >> 8);
-        rdram[hidx * 2 + 1] = static_cast<u8>(v);
+        fbm[hidx * 2] = static_cast<u8>(v >> 8);
+        fbm[hidx * 2 + 1] = static_cast<u8>(v);
     };
 
     // A pixel's colour as read from the colour image (col) and as the
@@ -1397,7 +1539,7 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
         switch (p.fb_fmt) {
             case FB_I4: case FB_I8: {
                 cidx &= mask8;
-                col[0] = col[1] = col[2] = rdram[cidx];
+                col[0] = col[1] = col[2] = fbm[cidx];
                 col[3] = hidden_get(cidx >> 1, rd16(cidx >> 1));
                 break;
             }
@@ -1419,7 +1561,7 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
             }
             default: {
                 cidx &= mask32;
-                const u8* q = rdram + cidx * 4;
+                const u8* q = fbm + cidx * 4;
                 col[0] = q[0];
                 col[1] = q[1];
                 col[2] = q[2];
@@ -1513,674 +1655,690 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
         }
     }
 
-    Span cur, next;
-    for (s32 y = min_line; y <= max_line; ++y) {
-        if (!all_rows && static_cast<u32>(y) % lanes_ != lane_) continue;
-        make_span(y, cur);
-        make_span(y + 1, next);
-        if (cur.valid) {
-            const s32 x0 = cur.start_x, x1 = cur.end_x;
-            // The inputs of the pixel at x: shade, texels, LOD fraction, depth.
-            struct PixIn {
-                s32 shade[4];
-                T4 texel0, texel1;
-                s32 lod_frac;
-                s32 z;
-            };
-            const s32 idir = flip ? 1 : -1;
-            auto pixel_inputs = [&](s32 x, u32 coverage, PixIn& in) {
-                    const s32 dx = x - cur.base_x;
-                    // The first covered sample; a pixel with none (past the end
-                    // of the span) is taken at its corner.
-                    const int first = coverage ? find_lsb(coverage) : 0;
-                    const s32 yoff = first >> 1, xoff = coverage ? ((first & 1) << 1) + (yoff & 1) : 0;
-                    s32* shade = in.shade;
+    for (int pass = 0; pass < passes; ++pass) {
+        hires = pass == 1;
+        psc = hires ? static_cast<s32>(scale_) : 1;
+        s32* const pm = hires ? prev_mem_up_ : prev_mem_; // this pass's delayed memory colour
+        fbm = rdram;
+        Span cur, next;
+        for (s32 y = min_line * psc; y <= max_line * psc + psc - 1; ++y) {
+            if (!all_rows && static_cast<u32>(fdiv(y, psc)) % lanes_ != lane_) continue;
+            make_span(y, cur);
+            make_span(y + 1, next);
+            if (cur.valid) {
+                const s32 x0 = cur.start_x, x1 = cur.end_x;
+                // The inputs of the pixel at x: shade, texels, LOD fraction, depth.
+                struct PixIn {
+                    s32 shade[4];
+                    T4 texel0, texel1;
+                    s32 lod_frac;
+                    s32 z;
+                };
+                const s32 idir = flip ? 1 : -1;
+                auto pixel_inputs = [&](s32 x, u32 coverage, PixIn& in) {
+                        const s32 dx = x - cur.base_x;
+                        // The first covered sample; a pixel with none (past the end
+                        // of the span) is taken at its corner.
+                        const int first = coverage ? find_lsb(coverage) : 0;
+                        const s32 yoff = first >> 1, xoff = coverage ? ((first & 1) << 1) + (yoff & 1) : 0;
+                        s32* shade = in.shade;
 
-                    // Shade
-                    for (int i = 0; i < 4; ++i) {
-                        const s32 c = w32(static_cast<s64>(cur.rgba[i]) + static_cast<s64>(attr.drgba_dx[i] & ~0x1f) * dx);
-                        s32 sn = c >> 14;
-                        sn <<= 2;
-                        sn += xoff * (attr.drgba_dx[i] >> 14) + yoff * (attr.drgba_dy[i] >> 14);
-                        sn >>= 4;
-                        shade[i] = clamp_9bit(sn);
-                    }
+                        // Shade
+                        for (int i = 0; i < 4; ++i) {
+                            const s32 c = w32(static_cast<s64>(cur.rgba[i]) + static_cast<s64>(fdiv(attr.drgba_dx[i] & ~0x1f, psc)) * dx);
+                            s32 sn = c >> 14;
+                            sn *= 4 * psc;
+                            sn += xoff * (attr.drgba_dx[i] >> 14) + yoff * (attr.drgba_dy[i] >> 14);
+                            sn = fdiv(sn, 16 * psc);
+                            shade[i] = clamp_9bit(sn);
+                        }
 
-                    // S, T, Z
-                    s32 stw[3], stw_dx[3], stw_dy[3];
-                    static const int kC[3] = {0, 1, 3};
-                    for (int k = 0; k < 3; ++k) {
-                        const int c = kC[k];
-                        stw[k] = w32(static_cast<s64>(cur.stzw[c]) + static_cast<s64>(attr.dstzw_dx[c] & ~0x1f) * dx);
-                        if (p.uses_lod) {
-                            stw_dx[k] = w32(static_cast<s64>(stw[k]) + static_cast<s64>(idir) * (attr.dstzw_dx[c] & ~0x1f));
-                            stw_dy[k] = w32(static_cast<s64>(stw[k]) + (attr.dstzw_dy[c] & ~0x7fff));
-                        }
-                    }
-                    s32 st_s, st_t, sdx = 0, tdx = 0, sdy = 0, tdy = 0;
-                    bool povf = false;
-                    if (p.persp) {
-                        perspective_divide(stw[0] >> 16, stw[1] >> 16, stw[2] >> 16, st_s, st_t, povf);
-                        if (p.uses_lod) {
-                            perspective_divide(stw_dx[0] >> 16, stw_dx[1] >> 16, stw_dx[2] >> 16, sdx, tdx, povf);
-                            perspective_divide(stw_dy[0] >> 16, stw_dy[1] >> 16, stw_dy[2] >> 16, sdy, tdy, povf);
-                        }
-                    } else {
-                        st_s = stw[0] >> 16;
-                        st_t = stw[1] >> 16;
-                        if (p.uses_lod) {
-                            sdx = stw_dx[0] >> 16;
-                            tdx = stw_dx[1] >> 16;
-                            sdy = stw_dy[0] >> 16;
-                            tdy = stw_dy[1] >> 16;
-                        }
-                    }
-                    {
-                        s32 zz = w32(static_cast<s64>(cur.stzw[2]) + static_cast<s64>(attr.dstzw_dx[2]) * dx);
-                        s32 sz = zz >> 10;
-                        sz = w32(static_cast<s64>(sz) << 2);
-                        sz = w32(static_cast<s64>(sz) + static_cast<s64>(xoff) * (attr.dstzw_dx[2] >> 10) +
-                                 static_cast<s64>(yoff) * (attr.dstzw_dy[2] >> 10));
-                        sz >>= 5;
-                        in.z = clamp_z(sz);
-                    }
-
-                    // Textures
-                    u32 tile0 = setup_tile & 7, tile1 = (tile0 + 1) & 7;
-                    s32& lod_frac = in.lod_frac;
-                    lod_frac = 0;
-                    if (p.uses_lod && !multi) {
-                        // In 1-cycle mode the LOD unit measures the pipelined pair
-                        // along the span - the next pixel and the one after - or,
-                        // at the second-to-last pixel of a long span whose four
-                        // sublines are all valid, the centred pair (P - 1, P + 1).
-                        // No sample from the scanline below. (Hardware verified,
-                        // diagnostic cartridge cases 11:23 and 11:46.)
-                        const s32 span_last_x = flip ? cur.end_x : cur.start_x;
-                        const bool all_valid = cur.xleft[0] != 0xffff && cur.xleft[1] != 0xffff &&
-                                               cur.xleft[2] != 0xffff && cur.xleft[3] != 0xffff;
-                        const bool centred = x + idir == span_last_x && cur.lodlength >= 8 && all_valid;
-                        s32 ln[3], lf[3];
+                        // S, T, Z
+                        s32 stw[3], stw_dx[3], stw_dy[3];
+                        static const int kC[3] = {0, 1, 3};
                         for (int k = 0; k < 3; ++k) {
-                            const s64 d = attr.dstzw_dx[kC[k]] & ~0x1f;
-                            ln[k] = w32(static_cast<s64>(stw[k]) + d * idir);
-                            lf[k] = w32(static_cast<s64>(stw[k]) + d * (centred ? -idir : 2 * idir));
+                            const int c = kC[k];
+                            stw[k] = w32(static_cast<s64>(cur.stzw[c]) + static_cast<s64>(fdiv(attr.dstzw_dx[c] & ~0x1f, psc)) * dx);
+                            if (p.uses_lod) {
+                                stw_dx[k] = w32(static_cast<s64>(stw[k]) + static_cast<s64>(idir) * (attr.dstzw_dx[c] & ~0x1f));
+                                stw_dy[k] = w32(static_cast<s64>(stw[k]) + (attr.dstzw_dy[c] & ~0x7fff));
+                            }
                         }
-                        s32 ns, nt, fs, ft;
-                        bool lov = false;
+                        s32 st_s, st_t, sdx = 0, tdx = 0, sdy = 0, tdy = 0;
+                        bool povf = false;
                         if (p.persp) {
-                            perspective_divide(ln[0] >> 16, ln[1] >> 16, ln[2] >> 16, ns, nt, lov);
-                            perspective_divide(lf[0] >> 16, lf[1] >> 16, lf[2] >> 16, fs, ft, lov);
-                        } else {
-                            ns = ln[0] >> 16;
-                            nt = ln[1] >> 16;
-                            fs = lf[0] >> 16;
-                            ft = lf[1] >> 16;
-                        }
-                        compute_lod(tile0, tile1, lod_frac, max_level, p.min_lod, ns, nt, fs, ft, ns, nt, lov,
-                                    p.tex_lod, p.sharpen, p.detail);
-                    } else if (p.uses_lod) {
-                        compute_lod(tile0, tile1, lod_frac, max_level, p.min_lod, st_s, st_t, sdx, tdx, sdy, tdy, povf,
-                                    p.tex_lod, p.sharpen, p.detail);
-                    }
-                    T4& texel0 = in.texel0;
-                    T4& texel1 = in.texel1;
-                    texel0 = T4{};
-                    texel1 = T4{};
-                    if (p.uses_texel0)
-                        texel0 = sample_texture(tx, tiles_[tile0], st_s, st_t, p.tlut, p.tlut_type, p.sample_quad,
-                                                p.mid_texel, false, p.bilerp0, p.factors, T4{});
-                    bool uses_texel1 = p.uses_texel1;
-                    s32 s1 = st_s, t1 = st_t;
-                    if (p.uses_pipelined_texel1) {
-                        const bool long_span = cur.lodlength >= 8;
-                        const bool end_span = x == (flip ? cur.end_x : cur.start_x);
-                        if (end_span && long_span && next.valid) {
-                            const s32 ns = next.stzw[0] >> 16, nt = next.stzw[1] >> 16, nw = next.stzw[3] >> 16;
-                            if (p.persp) {
-                                bool ov = false;
-                                perspective_divide(ns, nt, nw, s1, t1, ov);
-                            } else {
-                                s1 = ns;
-                                t1 = nt;
+                            perspective_divide(stw[0] >> 16, stw[1] >> 16, stw[2] >> 16, st_s, st_t, povf);
+                            if (p.uses_lod) {
+                                perspective_divide(stw_dx[0] >> 16, stw_dx[1] >> 16, stw_dx[2] >> 16, sdx, tdx, povf);
+                                perspective_divide(stw_dy[0] >> 16, stw_dy[1] >> 16, stw_dy[2] >> 16, sdy, tdy, povf);
                             }
                         } else {
-                            const s32 d2 = dx + idir;
-                            const s32 a0 = w32(static_cast<s64>(cur.stzw[0]) + static_cast<s64>(attr.dstzw_dx[0] & ~0x1f) * d2) >> 16;
-                            const s32 a1 = w32(static_cast<s64>(cur.stzw[1]) + static_cast<s64>(attr.dstzw_dx[1] & ~0x1f) * d2) >> 16;
-                            const s32 a3 = w32(static_cast<s64>(cur.stzw[3]) + static_cast<s64>(attr.dstzw_dx[3] & ~0x1f) * d2) >> 16;
-                            if (p.persp) {
-                                bool ov = false;
-                                perspective_divide(a0, a1, a3, s1, t1, ov);
-                            } else {
-                                s1 = a0;
-                                t1 = a1;
+                            st_s = stw[0] >> 16;
+                            st_t = stw[1] >> 16;
+                            if (p.uses_lod) {
+                                sdx = stw_dx[0] >> 16;
+                                tdx = stw_dx[1] >> 16;
+                                sdy = stw_dy[0] >> 16;
+                                tdy = stw_dy[1] >> 16;
                             }
                         }
-                        tile1 = tile0;
-                        uses_texel1 = true;
-                    }
-                    if (uses_texel1) {
-                        if (p.convert_one && !p.bilerp1) texel1 = texture_convert_factors(texel0, p.factors);
-                        else
-                            texel1 = sample_texture(tx, tiles_[tile1], s1, t1, p.tlut, p.tlut_type, p.sample_quad,
-                                                    p.mid_texel, p.convert_one, p.bilerp1, p.factors, texel0);
-                    }
+                        {
+                            const s32 zz = w32(static_cast<s64>(cur.stzw[2]) + static_cast<s64>(attr.dstzw_dx[2]) * fdiv(dx, psc) +
+                                               static_cast<s64>(fdiv(attr.dstzw_dx[2], psc)) * fmod_(dx, psc));
+                            s32 sz = zz >> 10;
+                            sz = w32(static_cast<s64>(sz) * 4 * psc);
+                            sz = w32(static_cast<s64>(sz) + static_cast<s64>(xoff) * (attr.dstzw_dx[2] >> 10) +
+                                     static_cast<s64>(yoff) * (attr.dstzw_dy[2] >> 10));
+                            sz = w32(fdiv64(sz, 32 * psc));
+                            in.z = clamp_z(sz);
+                        }
 
-            };
-            // Pixels are walked from the major edge towards the minor one.
-            for (s32 x = flip ? x0 : x1; flip ? x <= x1 : x >= x0; x += idir) {
-                // 2-cycle mode: the first blender cycle sees the memory colour
-                // of the pixel walked before this one (pipelining; the state
-                // carries over between spans and primitives), the second
-                // cycle this pixel's.
-                s32 delayed_mem[4] = {prev_mem_[0], prev_mem_[1], prev_mem_[2], prev_mem_[3]};
-                if (p.cycle < 2) memory_colour(x, y, prev_mem_); // 1-cycle pixels read it too
-                // ---- Shade the pixel
-                Noise noise;
-                if (p.need_noise) noise.reseed(static_cast<u32>(x), static_cast<u32>(y), p.prim_serial);
+                        // Textures
+                        u32 tile0 = setup_tile & 7, tile1 = (tile0 + 1) & 7;
+                        s32& lod_frac = in.lod_frac;
+                        lod_frac = 0;
+                        if (p.uses_lod && !multi) {
+                            // In 1-cycle mode the LOD unit measures the pipelined pair
+                            // along the span - the next pixel and the one after - or,
+                            // at the second-to-last pixel of a long span whose four
+                            // sublines are all valid, the centred pair (P - 1, P + 1).
+                            // No sample from the scanline below. (Hardware verified,
+                            // diagnostic cartridge cases 11:23 and 11:46.)
+                            const s32 span_last_x = flip ? cur.end_x : cur.start_x;
+                            const bool all_valid = cur.xleft[0] != 0xffff && cur.xleft[1] != 0xffff &&
+                                                   cur.xleft[2] != 0xffff && cur.xleft[3] != 0xffff;
+                            const bool centred = x + idir * psc == span_last_x && cur.lodlength >= 8 * psc && all_valid;
+                            s32 ln[3], lf[3];
+                            for (int k = 0; k < 3; ++k) {
+                                const s64 d = attr.dstzw_dx[kC[k]] & ~0x1f;
+                                ln[k] = w32(static_cast<s64>(stw[k]) + d * idir);
+                                lf[k] = w32(static_cast<s64>(stw[k]) + d * (centred ? -idir : 2 * idir));
+                            }
+                            s32 ns, nt, fs, ft;
+                            bool lov = false;
+                            if (p.persp) {
+                                perspective_divide(ln[0] >> 16, ln[1] >> 16, ln[2] >> 16, ns, nt, lov);
+                                perspective_divide(lf[0] >> 16, lf[1] >> 16, lf[2] >> 16, fs, ft, lov);
+                            } else {
+                                ns = ln[0] >> 16;
+                                nt = ln[1] >> 16;
+                                fs = lf[0] >> 16;
+                                ft = lf[1] >> 16;
+                            }
+                            compute_lod(tile0, tile1, lod_frac, max_level, p.min_lod, ns, nt, fs, ft, ns, nt, lov,
+                                        p.tex_lod, p.sharpen, p.detail);
+                        } else if (p.uses_lod) {
+                            compute_lod(tile0, tile1, lod_frac, max_level, p.min_lod, st_s, st_t, sdx, tdx, sdy, tdy, povf,
+                                        p.tex_lod, p.sharpen, p.detail);
+                        }
+                        T4& texel0 = in.texel0;
+                        T4& texel1 = in.texel1;
+                        texel0 = T4{};
+                        texel1 = T4{};
+                        if (p.uses_texel0)
+                            texel0 = sample_texture(tx, tiles_[tile0], st_s, st_t, p.tlut, p.tlut_type, p.sample_quad,
+                                                    p.mid_texel, false, p.bilerp0, p.factors, T4{});
+                        bool uses_texel1 = p.uses_texel1;
+                        s32 s1 = st_s, t1 = st_t;
+                        if (p.uses_pipelined_texel1) {
+                            const bool long_span = cur.lodlength >= 8 * psc;
+                            const bool end_span = x == (flip ? cur.end_x : cur.start_x);
+                            if (end_span && long_span && next.valid) {
+                                const s32 ns = next.stzw[0] >> 16, nt = next.stzw[1] >> 16, nw = next.stzw[3] >> 16;
+                                if (p.persp) {
+                                    bool ov = false;
+                                    perspective_divide(ns, nt, nw, s1, t1, ov);
+                                } else {
+                                    s1 = ns;
+                                    t1 = nt;
+                                }
+                            } else {
+                                const s32 d2 = dx + idir * psc; // the next (native) pixel
+                                const s32 a0 = w32(static_cast<s64>(cur.stzw[0]) + static_cast<s64>(fdiv(attr.dstzw_dx[0] & ~0x1f, psc)) * d2) >> 16;
+                                const s32 a1 = w32(static_cast<s64>(cur.stzw[1]) + static_cast<s64>(fdiv(attr.dstzw_dx[1] & ~0x1f, psc)) * d2) >> 16;
+                                const s32 a3 = w32(static_cast<s64>(cur.stzw[3]) + static_cast<s64>(fdiv(attr.dstzw_dx[3] & ~0x1f, psc)) * d2) >> 16;
+                                if (p.persp) {
+                                    bool ov = false;
+                                    perspective_divide(a0, a1, a3, s1, t1, ov);
+                                } else {
+                                    s1 = a0;
+                                    t1 = a1;
+                                }
+                            }
+                            tile1 = tile0;
+                            uses_texel1 = true;
+                        }
+                        if (uses_texel1) {
+                            if (p.convert_one && !p.bilerp1) texel1 = texture_convert_factors(texel0, p.factors);
+                            else
+                                texel1 = sample_texture(tx, tiles_[tile1], s1, t1, p.tlut, p.tlut_type, p.sample_quad,
+                                                        p.mid_texel, p.convert_one, p.bilerp1, p.factors, texel0);
+                        }
 
-                enum { K_NONE, K_FILL, K_COPY, K_NORMAL } kind = K_NONE;
-                u32 copy_word = 0;
-                s32 comb[4]{}, z = 0, dith = 0, cov_count = 0, shade_a = 0;
+                };
+                // Pixels are walked from the major edge towards the minor one.
+                for (s32 x = flip ? x0 : x1; flip ? x <= x1 : x >= x0; x += idir) {
+                    // The frame buffer pixel (and, at internal resolution, its sample).
+                    s32 nx = x, ny = y;
+                    if (hires) {
+                        nx = fdiv(x, psc);
+                        ny = fdiv(y, psc);
+                        const u32 slice = static_cast<u32>((y - ny * psc) * psc + (x - nx * psc));
+                        fbm = up->color(slice);
+                        hbits = up->hidden(slice);
+                    }
+                    // 2-cycle mode: the first blender cycle sees the memory colour
+                    // of the pixel walked before this one (pipelining; the state
+                    // carries over between spans and primitives), the second
+                    // cycle this pixel's.
+                    s32 delayed_mem[4] = {pm[0], pm[1], pm[2], pm[3]};
+                    if (p.cycle < 2) memory_colour(nx, ny, pm); // 1-cycle pixels read it too
+                    // ---- Shade the pixel
+                    Noise noise;
+                    if (p.need_noise) noise.reseed(static_cast<u32>(x), static_cast<u32>(y), p.prim_serial);
 
-                if (p.cycle == 2) { // copy
-                    if (x < cur.start_x || x > cur.end_x) continue;
-                    s32 dx = flip ? (x - cur.start_x) : (cur.end_x - x);
-                    int dx_shift = 0;
-                    s32 dx_mask = 0;
-                    int fb_size = 0;
-                    switch (p.fb_fmt) {
-                        case FB_I4: fb_size = 0; dx_mask = 0; dx_shift = 0; break;
-                        case FB_I8: fb_size = 1; dx_mask = ~7; dx_shift = 3; break;
-                        case FB_RGBA5551: case FB_IA88: fb_size = 2; dx_mask = ~3; dx_shift = 2; break;
-                        default: fb_size = 4; dx_mask = 0; dx_shift = 1; break;
-                    }
-                    const s32 snapped = dx & dx_mask;
-                    const s32 s_offset = dx - snapped;
-                    const s32 lerp_dx = (dx >> dx_shift) * (flip ? 1 : -1);
-                    s32 ss = w32(static_cast<s64>(cur.stzw[0]) + static_cast<s64>(attr.dstzw_dx[0] & ~0x1f) * lerp_dx) >> 16;
-                    s32 tt = w32(static_cast<s64>(cur.stzw[1]) + static_cast<s64>(attr.dstzw_dx[1] & ~0x1f) * lerp_dx) >> 16;
-                    const s32 ww = w32(static_cast<s64>(cur.stzw[3]) + static_cast<s64>(attr.dstzw_dx[3] & ~0x1f) * lerp_dx) >> 16;
-                    if (p.persp) {
-                        bool ov = false;
-                        perspective_divide(ss, tt, ww, ss, tt, ov, true);
-                    }
-                    const Tile& tile = tiles_[setup_tile & 7];
-                    s32 cs = shift_coord(ss, static_cast<s32>(tile.slo), tile.shift_s) >> 5;
-                    s32 ct = shift_coord(tt, static_cast<s32>(tile.tlo), tile.shift_t) >> 5;
-                    auto copy_word_at = [&](s32 so) -> s32 {
-                        const bool high_word = so < 2;
-                        const bool replicate = high_word && tile.size != 2 && !p.tlut;
-                        const int s_shamt = std::min<int>(tile.size, 2);
-                        const u32 idx_mask = (tile.size == 3 || p.tlut) ? 0x3ff : 0x7ff;
+                    enum { K_NONE, K_FILL, K_COPY, K_NORMAL } kind = K_NONE;
+                    u32 copy_word = 0;
+                    s32 comb[4]{}, z = 0, dith = 0, cov_count = 0, shade_a = 0;
+
+                    if (p.cycle == 2) { // copy
+                        if (x < cur.start_x || x > cur.end_x) continue;
+                        s32 dx = flip ? (x - cur.start_x) : (cur.end_x - x);
+                        int dx_shift = 0;
+                        s32 dx_mask = 0;
+                        int fb_size = 0;
+                        switch (p.fb_fmt) {
+                            case FB_I4: fb_size = 0; dx_mask = 0; dx_shift = 0; break;
+                            case FB_I8: fb_size = 1; dx_mask = ~7; dx_shift = 3; break;
+                            case FB_RGBA5551: case FB_IA88: fb_size = 2; dx_mask = ~3; dx_shift = 2; break;
+                            default: fb_size = 4; dx_mask = 0; dx_shift = 1; break;
+                        }
+                        const s32 snapped = dx & dx_mask;
+                        const s32 s_offset = dx - snapped;
+                        const s32 lerp_dx = (dx >> dx_shift) * (flip ? 1 : -1);
+                        s32 ss = w32(static_cast<s64>(cur.stzw[0]) + static_cast<s64>(attr.dstzw_dx[0] & ~0x1f) * lerp_dx) >> 16;
+                        s32 tt = w32(static_cast<s64>(cur.stzw[1]) + static_cast<s64>(attr.dstzw_dx[1] & ~0x1f) * lerp_dx) >> 16;
+                        const s32 ww = w32(static_cast<s64>(cur.stzw[3]) + static_cast<s64>(attr.dstzw_dx[3] & ~0x1f) * lerp_dx) >> 16;
+                        if (p.persp) {
+                            bool ov = false;
+                            perspective_divide(ss, tt, ww, ss, tt, ov, true);
+                        }
+                        const Tile& tile = tiles_[setup_tile & 7];
+                        s32 cs = shift_coord(ss, static_cast<s32>(tile.slo), tile.shift_s) >> 5;
+                        s32 ct = shift_coord(tt, static_cast<s32>(tile.tlo), tile.shift_t) >> 5;
+                        auto copy_word_at = [&](s32 so) -> s32 {
+                            const bool high_word = so < 2;
+                            const bool replicate = high_word && tile.size != 2 && !p.tlut;
+                            const int s_shamt = std::min<int>(tile.size, 2);
+                            const u32 idx_mask = (tile.size == 3 || p.tlut) ? 0x3ff : 0x7ff;
+                            s32 samp;
+                            if (replicate) {
+                                const s32 sx = cs + 2 * so;
+                                const s32 sA = mask_s(tile, sx), sB = mask_s(tile, sx + 1);
+                                const s32 t = mask_t(tile, ct);
+                                const u32 tbase = tile.offset + tile.stride * static_cast<u32>(t);
+                                u32 noA = (tbase * 2 + (static_cast<u32>(sA) << s_shamt)) & 0x1fff;
+                                u32 noB = (tbase * 2 + (static_cast<u32>(sB) << s_shamt)) & 0x1fff;
+                                noA ^= (static_cast<u32>(t) & 1) * 8;
+                                noB ^= (static_cast<u32>(t) & 1) * 8;
+                                s32 a0 = tx.half((noA >> 2) & idx_mask), a1 = tx.half((noB >> 2) & idx_mask);
+                                if (tile.size == 1) {
+                                    a0 = (a0 >> (8 - 4 * static_cast<int>(noA & 2))) & 0xff;
+                                    a1 = (a1 >> (8 - 4 * static_cast<int>(noB & 2))) & 0xff;
+                                } else if (tile.size == 0) {
+                                    a0 = ((a0 >> (12 - 4 * static_cast<int>(noA & 3))) & 0xf) * 0x11;
+                                    a1 = ((a1 >> (12 - 4 * static_cast<int>(noB & 3))) & 0xf) * 0x11;
+                                } else {
+                                    a0 >>= 8;
+                                    a1 >>= 8;
+                                }
+                                samp = (a0 << 8) | a1;
+                            } else {
+                                const s32 sx = mask_s(tile, cs + so);
+                                const s32 t = mask_t(tile, ct);
+                                const u32 tbase = tile.offset + tile.stride * static_cast<u32>(t);
+                                u32 no = (tbase * 2 + (static_cast<u32>(sx) << s_shamt)) & 0x1fff;
+                                no ^= (static_cast<u32>(t) & 1) * 8;
+                                samp = tx.half((no >> 2) & idx_mask);
+                                if (p.tlut) {
+                                    if (tile.size == 0) {
+                                        samp >>= 12 - 4 * static_cast<int>(no & 3);
+                                        samp &= 0xf;
+                                        samp |= tile.palette << 4;
+                                    } else {
+                                        samp >>= 8 - 4 * static_cast<int>(no & 2);
+                                        samp &= 0xff;
+                                    }
+                                    samp <<= 2;
+                                    samp += so;
+                                    samp = tx.half(static_cast<u32>(samp | 0x400) & 0x7ff);
+                                }
+                            }
+                            return samp;
+                        };
                         s32 samp;
-                        if (replicate) {
-                            const s32 sx = cs + 2 * so;
-                            const s32 sA = mask_s(tile, sx), sB = mask_s(tile, sx + 1);
-                            const s32 t = mask_t(tile, ct);
-                            const u32 tbase = tile.offset + tile.stride * static_cast<u32>(t);
-                            u32 noA = (tbase * 2 + (static_cast<u32>(sA) << s_shamt)) & 0x1fff;
-                            u32 noB = (tbase * 2 + (static_cast<u32>(sB) << s_shamt)) & 0x1fff;
-                            noA ^= (static_cast<u32>(t) & 1) * 8;
-                            noB ^= (static_cast<u32>(t) & 1) * 8;
-                            s32 a0 = tx.half((noA >> 2) & idx_mask), a1 = tx.half((noB >> 2) & idx_mask);
-                            if (tile.size == 1) {
-                                a0 = (a0 >> (8 - 4 * static_cast<int>(noA & 2))) & 0xff;
-                                a1 = (a1 >> (8 - 4 * static_cast<int>(noB & 2))) & 0xff;
-                            } else if (tile.size == 0) {
-                                a0 = ((a0 >> (12 - 4 * static_cast<int>(noA & 3))) & 0xf) * 0x11;
-                                a1 = ((a1 >> (12 - 4 * static_cast<int>(noB & 3))) & 0xf) * 0x11;
-                            } else {
-                                a0 >>= 8;
-                                a1 >>= 8;
-                            }
-                            samp = (a0 << 8) | a1;
+                        if (fb_size == 0) samp = 0;
+                        else if (fb_size == 1) {
+                            samp = copy_word_at(s_offset >> 1);
+                            samp >>= 8 - 8 * (s_offset & 1);
+                            samp &= 0xff;
                         } else {
-                            const s32 sx = mask_s(tile, cs + so);
-                            const s32 t = mask_t(tile, ct);
-                            const u32 tbase = tile.offset + tile.stride * static_cast<u32>(t);
-                            u32 no = (tbase * 2 + (static_cast<u32>(sx) << s_shamt)) & 0x1fff;
-                            no ^= (static_cast<u32>(t) & 1) * 8;
-                            samp = tx.half((no >> 2) & idx_mask);
-                            if (p.tlut) {
-                                if (tile.size == 0) {
-                                    samp >>= 12 - 4 * static_cast<int>(no & 3);
-                                    samp &= 0xf;
-                                    samp |= tile.palette << 4;
-                                } else {
-                                    samp >>= 8 - 4 * static_cast<int>(no & 2);
-                                    samp &= 0xff;
+                            samp = copy_word_at(s_offset);
+                        }
+                        if (p.alpha_test && fb_size == 2 && (samp & 1) == 0) continue;
+                        copy_word = static_cast<u32>(samp);
+                        kind = K_COPY;
+                    } else if (p.cycle == 3) { // fill
+                        if (x < cur.start_x || x > cur.end_x) continue;
+                        kind = K_FILL;
+                    } else {
+                        const u32 coverage = compute_coverage(cur.xleft, cur.xright, x);
+                        if (coverage == 0) continue;
+                        s32 coverage_count = __builtin_popcount(coverage);
+                        if (!p.aa && (coverage & 1) == 0) continue;
+
+                        PixIn in{};
+                        pixel_inputs(x, coverage, in);
+                        const s32* shade = in.shade;
+                        const T4& texel0 = in.texel0;
+                        const T4& texel1 = in.texel1;
+                        const s32 lod_frac = in.lod_frac;
+                        z = in.z;
+
+                        s32 rgb_dith, alpha_dith;
+                        dither_coefficients(x, y >> (p.interlace ? 1 : 0), p.dither >> 2, p.dither & 3, noise, rgb_dith,
+                                            alpha_dith);
+
+                        // Combiner
+                        auto byte_of = [](u32 c, int i) { return static_cast<s32>((c >> (24 - 8 * i)) & 0xff); };
+                        // Chroma key: the RGB inputs A and the unrounded sums, per channel.
+                        s32 key_a[3]{}, key_sum[3]{};
+                        auto run_cycle = [&](int cyc, const PixIn& pin, const s32 combined[4], const T4& t0, const T4& t1, s32 noise_v,
+                                             s32 out[4]) {
+                            for (int i = 0; i < 4; ++i) {
+                                csrc[S_COMB][i] = combined[i];
+                                csrc[S_T0][i] = t0.v[i];
+                                csrc[S_T1][i] = t1.v[i];
+                                csrc[S_SHADE][i] = pin.shade[i];
+                                csrc[S_NOISE][i] = noise_v;
+                                csrc[S_COMBA][i] = combined[3];
+                                csrc[S_T0A][i] = t0.v[3];
+                                csrc[S_T1A][i] = t1.v[3];
+                                csrc[S_SHADEA][i] = pin.shade[3];
+                                csrc[S_LOD][i] = pin.lod_frac;
+                            }
+                            const u8 (*sel)[4] = csel[cyc];
+                            for (int i = 0; i < 4; ++i) {
+                                const s32 va = csrc[sel[0][i]][i], vb = csrc[sel[1][i]][i];
+                                const s32 vc = csrc[sel[2][i]][i], vd = csrc[sel[3][i]][i];
+                                out[i] = combiner_equation(va, vb, vc, vd);
+                                if (i < 3 && p.key_en) {
+                                    key_a[i] = va;
+                                    key_sum[i] = w32(static_cast<s64>(special_expand(va) - special_expand(vb)) * sext(vc, 9) +
+                                                     (static_cast<s64>(special_expand(vd)) << 8) + 0x80) & 0x1ffff;
                                 }
-                                samp <<= 2;
-                                samp += so;
-                                samp = tx.half(static_cast<u32>(samp | 0x400) & 0x7ff);
-                            }
-                        }
-                        return samp;
-                    };
-                    s32 samp;
-                    if (fb_size == 0) samp = 0;
-                    else if (fb_size == 1) {
-                        samp = copy_word_at(s_offset >> 1);
-                        samp >>= 8 - 8 * (s_offset & 1);
-                        samp &= 0xff;
-                    } else {
-                        samp = copy_word_at(s_offset);
-                    }
-                    if (p.alpha_test && fb_size == 2 && (samp & 1) == 0) continue;
-                    copy_word = static_cast<u32>(samp);
-                    kind = K_COPY;
-                } else if (p.cycle == 3) { // fill
-                    if (x < cur.start_x || x > cur.end_x) continue;
-                    kind = K_FILL;
-                } else {
-                    const u32 coverage = compute_coverage(cur.xleft, cur.xright, x);
-                    if (coverage == 0) continue;
-                    s32 coverage_count = __builtin_popcount(coverage);
-                    if (!p.aa && (coverage & 1) == 0) continue;
-
-                    PixIn in{};
-                    pixel_inputs(x, coverage, in);
-                    const s32* shade = in.shade;
-                    const T4& texel0 = in.texel0;
-                    const T4& texel1 = in.texel1;
-                    const s32 lod_frac = in.lod_frac;
-                    z = in.z;
-
-                    s32 rgb_dith, alpha_dith;
-                    dither_coefficients(x, y >> (p.interlace ? 1 : 0), p.dither >> 2, p.dither & 3, noise, rgb_dith,
-                                        alpha_dith);
-
-                    // Combiner
-                    auto byte_of = [](u32 c, int i) { return static_cast<s32>((c >> (24 - 8 * i)) & 0xff); };
-                    // Chroma key: the RGB inputs A and the unrounded sums, per channel.
-                    s32 key_a[3]{}, key_sum[3]{};
-                    auto run_cycle = [&](int cyc, const PixIn& pin, const s32 combined[4], const T4& t0, const T4& t1, s32 noise_v,
-                                         s32 out[4]) {
-                        for (int i = 0; i < 4; ++i) {
-                            csrc[S_COMB][i] = combined[i];
-                            csrc[S_T0][i] = t0.v[i];
-                            csrc[S_T1][i] = t1.v[i];
-                            csrc[S_SHADE][i] = pin.shade[i];
-                            csrc[S_NOISE][i] = noise_v;
-                            csrc[S_COMBA][i] = combined[3];
-                            csrc[S_T0A][i] = t0.v[3];
-                            csrc[S_T1A][i] = t1.v[3];
-                            csrc[S_SHADEA][i] = pin.shade[3];
-                            csrc[S_LOD][i] = pin.lod_frac;
-                        }
-                        const u8 (*sel)[4] = csel[cyc];
-                        for (int i = 0; i < 4; ++i) {
-                            const s32 va = csrc[sel[0][i]][i], vb = csrc[sel[1][i]][i];
-                            const s32 vc = csrc[sel[2][i]][i], vd = csrc[sel[3][i]][i];
-                            out[i] = combiner_equation(va, vb, vc, vd);
-                            if (i < 3 && p.key_en) {
-                                key_a[i] = va;
-                                key_sum[i] = w32(static_cast<s64>(special_expand(va) - special_expand(vb)) * sext(vc, 9) +
-                                                 (static_cast<s64>(special_expand(vd)) << 8) + 0x80) & 0x1ffff;
-                            }
-                        }
-                    };
-
-                    s32 alpha_reference = 0;
-                    const s32 noise_v = noise.combiner();
-                    auto finish_cycle1 = [&](s32 out[4]) {
-                        for (int i = 0; i < 4; ++i) out[i] = clamp_9bit(out[i]);
-                        s32 key_alpha = 0;
-                        if (p.key_en) {
-                            // The colour bypasses the combiner (input A); how close its
-                            // result is to the key centre becomes the alpha.
-                            key_alpha = 0x7fffffff;
-                            for (int i = 0; i < 3; ++i) {
-                                s32 k = sext(key_sum[i], 17);
-                                if (k > 0) k = (k & 0xf) == 8 ? -k + 0x10 : -k;
-                                k += p.key_width[i] << 4;
-                                key_alpha = std::min(key_alpha, k);
-                                out[i] = clamp_9bit(key_a[i]);
-                            }
-                            key_alpha = std::clamp(key_alpha, 0, 0xff);
-                        }
-                        const s32 expanded = out[3] + ((out[3] + 1) >> 8);
-                        s32 modulated;
-                        if (p.cvg_times_alpha) {
-                            modulated = (expanded * coverage_count + 4) >> 3;
-                            coverage_count = modulated >> 5;
-                        } else {
-                            modulated = coverage_count << 5;
-                        }
-                        const s32 e = p.alpha_cvg_select ? modulated : p.key_en ? key_alpha : expanded + alpha_dith;
-                        out[3] = std::clamp(e, 0, 0xff);
-                    };
-                    if (multi) {
-                        const s32 zero[4] = {0, 0, 0, 0};
-                        s32 c0[4];
-                        run_cycle(0, in, zero, texel0, texel1, noise_v, c0);
-                        if (p.alpha_test) {
-                            // Pipelining: a pixel's alpha compare sees the first
-                            // cycle of the pixel after it (in the direction the
-                            // span is walked; past its end, a pixel with no
-                            // coverage), with this pixel's alpha dither.
-                            const s32 xn = x + idir;
-                            const bool last = x == (flip ? cur.end_x : cur.start_x);
-                            const u32 cov_n = last ? 0u : compute_coverage(cur.xleft, cur.xright, xn);
-                            PixIn nin{};
-                            pixel_inputs(xn, cov_n, nin);
-                            s32 n0[4];
-                            run_cycle(0, nin, zero, nin.texel0, nin.texel1, noise_v, n0);
-                            const s32 cnt_n = __builtin_popcount(cov_n);
-                            const s32 ca = clamp_9bit(n0[3]);
-                            s32 ea = ca + ((ca + 1) >> 8);
-                            if (p.alpha_cvg_select) ea = p.cvg_times_alpha ? (ea * cnt_n + 4) >> 3 : cnt_n << 5;
-                            else ea += alpha_dith;
-                            alpha_reference = std::clamp(ea, 0, 0xff);
-                        }
-                        s32 nv = noise_v;
-                        if (p.need_noise_dual) {
-                            Noise n2;
-                            n2.reseed(static_cast<u32>(x + 1023), static_cast<u32>(y + 7), p.prim_serial + 11);
-                            nv = n2.combiner();
-                        }
-                        // The second cycle sees the texels swapped (pipelining).
-                        run_cycle(1, in, c0, texel1, texel0, nv, comb);
-                        finish_cycle1(comb);
-                    } else {
-                        const s32 zero[4] = {0, 0, 0, 0};
-                        run_cycle(1, in, zero, texel0, texel1, noise_v, comb);
-                        finish_cycle1(comb);
-                        alpha_reference = comb[3];
-                    }
-
-                    if (p.aa && coverage_count == 0) continue;
-                    if (p.alpha_test) {
-                        const s32 threshold = p.alpha_test_dither ? noise.blend_threshold() : static_cast<s32>(p.blend_color & 0xff);
-                        if (alpha_reference < threshold) continue;
-                    }
-                    dith = rgb_dith;
-                    cov_count = coverage_count;
-                    shade_a = std::min(shade[3] + alpha_dith, 0xff);
-                    kind = K_NORMAL;
-                }
-                if (kind == K_NONE) continue;
-                static const long dbg_addr = [] {
-                    const char* e = std::getenv("ORBIT64_EXACT_PIX");
-                    return e ? std::strtol(e, nullptr, 16) : -1L;
-                }();
-
-                // ---- Memory: load the pixel's colour and depth
-                s32 col[4]{};
-                const size_t cidx = read_colour(x, y, col);
-                u16 cur_depth = 0;
-                u8 cur_dz = 0;
-                bool color_dirty = false, depth_dirty = false;
-                size_t zidx = (p.z_index + static_cast<size_t>(p.fb_width) * static_cast<u32>(y) + static_cast<u32>(x)) & mask16;
-                {
-                    const u16 wv = rd16(zidx);
-                    cur_depth = wv >> 2;
-                    cur_dz = static_cast<u8>(hidden_get(zidx, wv) | ((wv & 3) << 2));
-                }
-
-                auto write_color = [&](s32 r, s32 g, s32 b, s32 a) {
-                    if (p.fb_fmt == FB_I4) {
-                        col[0] = r;
-                        col[1] = g;
-                        col[2] = b;
-                    } else {
-                        col[0] = r;
-                        col[1] = g;
-                        col[2] = b;
-                        col[3] = a;
-                    }
-                    color_dirty = true;
-                };
-                auto alias_color_to_depth = [&]() {
-                    if (p.fb_fmt == FB_RGBA5551) {
-                        cur_dz = static_cast<u8>(((col[3] & 0xff) >> 3) | (col[2] & 8));
-                        u32 wv = (static_cast<u32>(col[0]) & 0xf8) << 6;
-                        wv |= (static_cast<u32>(col[1]) & 0xf8) << 1;
-                        wv |= (static_cast<u32>(col[2]) & 0xf8) >> 4;
-                        cur_depth = static_cast<u16>(wv);
-                    } else if (p.fb_fmt == FB_IA88) {
-                        const u32 wv = (static_cast<u32>(col[0]) << 8) | static_cast<u32>(col[3]);
-                        cur_depth = static_cast<u16>(wv >> 2);
-                        cur_dz = static_cast<u8>(((wv & 3) << 2) | ((wv & 1) * 3));
-                    }
-                };
-                auto alias_depth_to_color = [&]() {
-                    const u32 wv = (static_cast<u32>(cur_depth) << 4) | cur_dz;
-                    if (p.fb_fmt == FB_RGBA5551) {
-                        col[0] = (wv >> 10) & 0xf8;
-                        col[1] = (wv >> 5) & 0xf8;
-                        col[2] = wv & 0xf8;
-                        col[3] = (wv & 7) << 5;
-                    } else if (p.fb_fmt == FB_IA88) {
-                        col[0] = (wv >> 10) & 0xff;
-                        col[3] = (wv >> 2) & 0xff;
-                    }
-                    color_dirty = true;
-                };
-
-                if (kind == K_FILL) {
-                    u32 c = p.fill_color;
-                    switch (p.fb_fmt) {
-                        case FB_RGBA8888: write_color((c >> 24) & 0xff, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff); break;
-                        case FB_RGBA5551:
-                            c >>= ((cidx & 1) ^ 1) * 16;
-                            write_color((c >> 8) & 0xf8, (c >> 3) & 0xf8, (c << 2) & 0xf8, (c & 1) * 0xe0);
-                            break;
-                        case FB_IA88:
-                            c >>= ((cidx & 1) ^ 1) * 16;
-                            c &= 0xffff;
-                            write_color((c >> 8) & 0xff, (c >> 8) & 0xff, (c >> 8) & 0xff, c & 0xff);
-                            break;
-                        case FB_I8:
-                            c >>= ((cidx & 3) ^ 3) * 8;
-                            c &= 0xff;
-                            write_color(c, c, c, c);
-                            break;
-                        default: break;
-                    }
-                    if (p.alias) alias_color_to_depth();
-                } else if (kind == K_COPY) {
-                    const u32 wv = copy_word;
-                    switch (p.fb_fmt) {
-                        case FB_I4:
-                            col[0] = col[1] = col[2] = col[3] = 0;
-                            color_dirty = true;
-                            break;
-                        case FB_I8: write_color(wv & 0xff, wv & 0xff, wv & 0xff, wv & 0xff); break;
-                        case FB_RGBA5551:
-                            write_color((wv >> 8) & 0xf8, (wv >> 3) & 0xf8, (wv << 2) & 0xf8, (wv & 1) * 0xe0);
-                            break;
-                        default: break;
-                    }
-                    if (p.alias) alias_color_to_depth();
-                } else {
-                    // ---- Depth test
-                    // Memory colour as the blender sees it.
-                    s32 mem[4];
-                    decode_memory(col, mem);
-                    const s32 memory_coverage = mem[3] >> 5;
-
-                    bool blend_en, coverage_wrap, z_pass;
-                    s32 shift_a, shift_b;
-                    if (p.z_compare) {
-                        const s32 memory_z = z_decompress(cur_depth);
-                        s32 memory_dz = dz_decompress(cur_dz);
-                        const s32 precision = (cur_depth >> 11) & 0xf;
-                        bool coplanar = false;
-                        shift_a = std::clamp(p.dz_compressed - static_cast<s32>(cur_dz), 0, 4);
-                        shift_b = std::clamp(static_cast<s32>(cur_dz) - p.dz_compressed, 0, 4);
-                        if (precision < 3) {
-                            if (memory_dz != 0x8000) {
-                                memory_dz = std::max(memory_dz << 1, 16 >> precision);
-                            } else {
-                                coplanar = true;
-                                memory_dz = 0xffff;
-                            }
-                        }
-                        s32 combined_dz = combine_dz(p.dz | memory_dz);
-                        const s32 combined_dz_ip = combined_dz;
-                        combined_dz <<= 3;
-                        const bool farther = coplanar || (z + combined_dz) >= memory_z;
-                        const bool overflow = (cov_count + memory_coverage) >= 8;
-                        blend_en = p.force_blend || (!overflow && p.aa && farther);
-                        coverage_wrap = overflow;
-                        const bool max_z = memory_z == 0x3ffff;
-                        const bool front = z < memory_z;
-                        const bool nearer = coplanar || (z - combined_dz) <= memory_z;
-                        switch (p.z_mode) {
-                            case 0: z_pass = max_z || (overflow ? front : nearer); break;
-                            case 1:
-                                if (!front || !farther || !overflow) {
-                                    z_pass = max_z || (overflow ? front : nearer);
-                                } else {
-                                    const s32 cdz = dz_compress(combined_dz_ip & 0xffff);
-                                    const s32 coeff = ((memory_z >> cdz) - (z >> cdz)) & 0xf;
-                                    cov_count = std::min((coeff * cov_count) >> 3, 8);
-                                    z_pass = true;
-                                }
-                                break;
-                            case 2: z_pass = front || max_z; break;
-                            default: z_pass = farther && nearer && !max_z; break;
-                        }
-                    } else {
-                        shift_a = 0;
-                        shift_b = std::min(0xf - p.dz_compressed, 4);
-                        const bool overflow = (cov_count + memory_coverage) >= 8;
-                        blend_en = p.force_blend || (!overflow && p.aa);
-                        coverage_wrap = overflow;
-                        z_pass = true;
-                    }
-
-                    if (z_pass && (!p.aa || cov_count != 0)) {
-                        s32 pixel[4] = {comb[0], comb[1], comb[2], comb[3]};
-                        const s32 fog[4] = {static_cast<s32>(p.fog_color >> 24), static_cast<s32>((p.fog_color >> 16) & 0xff),
-                                            static_cast<s32>((p.fog_color >> 8) & 0xff), static_cast<s32>(p.fog_color & 0xff)};
-                        const s32 bcol[4] = {static_cast<s32>(p.blend_color >> 24), static_cast<s32>((p.blend_color >> 16) & 0xff),
-                                             static_cast<s32>((p.blend_color >> 8) & 0xff), static_cast<s32>(p.blend_color & 0xff)};
-                        auto blender = [&](const u8 m[4], bool final_cycle, s32 out[3]) {
-                            const s32* memc = (multi && !final_cycle) ? delayed_mem : mem;
-                            const s32* src1 = m[2] == 0 ? pixel : m[2] == 1 ? memc : m[2] == 2 ? bcol : fog;
-                            if (final_cycle && p.color_on_cvg && !coverage_wrap) {
-                                for (int i = 0; i < 3; ++i) out[i] = src1[i];
-                                return;
-                            }
-                            const s32* src0 = m[0] == 0 ? pixel : m[0] == 1 ? memc : m[0] == 2 ? bcol : fog;
-                            if (final_cycle && (!blend_en || (m[1] == 0 && m[3] == 0 && pixel[3] == 0xff))) {
-                                for (int i = 0; i < 3; ++i) out[i] = src0[i];
-                                return;
-                            }
-                            s32 a0, a1;
-                            switch (m[1]) {
-                                case 0: a0 = pixel[3]; break;
-                                case 1: a0 = fog[3]; break;
-                                case 2: a0 = shade_a; break;
-                                default: a0 = 0; break;
-                            }
-                            switch (m[3]) {
-                                case 0: a1 = ~a0 & 0xff; break;
-                                case 1: a1 = memc[3]; break;
-                                case 2: a1 = 0xff; break;
-                                default: a1 = 0; break;
-                            }
-                            a0 >>= 3;
-                            a1 >>= 3;
-                            if (m[3] == 1) {
-                                a0 = (a0 >> shift_a) & 0x3c;
-                                a1 = (a1 >> shift_b) | 3;
-                            }
-                            s32 bl[3];
-                            for (int i = 0; i < 3; ++i) bl[i] = src0[i] * a0 + src1[i] * (a1 + 1);
-                            if (!final_cycle || p.force_blend) {
-                                for (int i = 0; i < 3; ++i) out[i] = (bl[i] >> 5) & 0xff;
-                            } else {
-                                const s32 sum = (a0 >> 2) + (a1 >> 2) + 1;
-                                for (int i = 0; i < 3; ++i) out[i] = bdiv.lut[((sum << 11) | ((bl[i] >> 2) & 0x7ff)) & 0x7fff];
                             }
                         };
-                        s32 rgb[3];
-                        if (multi) {
-                            s32 first_out[3];
-                            blender(p.blend[0], false, first_out);
-                            pixel[0] = first_out[0];
-                            pixel[1] = first_out[1];
-                            pixel[2] = first_out[2];
-                            blender(p.blend[1], true, rgb);
-                        } else {
-                            blender(p.blend[0], true, rgb);
-                        }
-                        if (p.dither_en) rgb_dither(rgb, dith);
-                        const s32 new_cov = blend_coverage(cov_count, memory_coverage, blend_en, p.coverage_mode);
-                        write_color(rgb[0], rgb[1], rgb[2], new_cov << 5);
-                        if (p.z_update) {
-                            cur_depth = z_compress(z);
-                            cur_dz = static_cast<u8>(p.dz_compressed);
-                            depth_dirty = true;
-                            if (p.alias) alias_depth_to_color();
-                        } else if (p.alias) {
-                            alias_color_to_depth();
-                        }
-                    }
-                }
 
-                if (dbg_addr >= 0) {
-                    const size_t bpp = p.fb_fmt == FB_RGBA8888 ? 4 : p.fb_fmt <= FB_I8 ? 1 : 2;
-                    if (static_cast<long>(cidx * bpp) == (dbg_addr & ~static_cast<long>(bpp - 1)))
-                        std::fprintf(stderr, "PIX x=%d y=%d kind=%d comb=%d,%d,%d,%d cvg=%d dith=%03x z=%05x -> col=%d,%d,%d,%d\n", x,
-                                     y, kind, comb[0], comb[1], comb[2], comb[3], cov_count, dith, z, col[0], col[1],
-                                     col[2], col[3]);
-                }
-                // ---- Store
-                if (color_dirty) {
-                    switch (p.fb_fmt) {
-                        case FB_I4: case FB_I8: {
-                            // The ninth bits go with the odd byte; writing the even
-                            // one leaves them as they were.
-                            const u8 before = hidden_get(cidx >> 1, rd16(cidx >> 1));
-                            const s32 c = p.fb_fmt == FB_I4 ? 0 : (cidx & 1) ? col[1] : col[0];
-                            rdram[cidx] = static_cast<u8>(c);
-                            const u8 bits = p.fb_fmt == FB_I4 ? static_cast<u8>(col[3] & 3) : static_cast<u8>((c & 1) * 3);
-                            hidden_set(cidx >> 1, (cidx & 1) ? bits : before);
-                            break;
+                        s32 alpha_reference = 0;
+                        const s32 noise_v = noise.combiner();
+                        auto finish_cycle1 = [&](s32 out[4]) {
+                            for (int i = 0; i < 4; ++i) out[i] = clamp_9bit(out[i]);
+                            s32 key_alpha = 0;
+                            if (p.key_en) {
+                                // The colour bypasses the combiner (input A); how close its
+                                // result is to the key centre becomes the alpha.
+                                key_alpha = 0x7fffffff;
+                                for (int i = 0; i < 3; ++i) {
+                                    s32 k = sext(key_sum[i], 17);
+                                    if (k > 0) k = (k & 0xf) == 8 ? -k + 0x10 : -k;
+                                    k += p.key_width[i] << 4;
+                                    key_alpha = std::min(key_alpha, k);
+                                    out[i] = clamp_9bit(key_a[i]);
+                                }
+                                key_alpha = std::clamp(key_alpha, 0, 0xff);
+                            }
+                            const s32 expanded = out[3] + ((out[3] + 1) >> 8);
+                            s32 modulated;
+                            if (p.cvg_times_alpha) {
+                                modulated = (expanded * coverage_count + 4) >> 3;
+                                coverage_count = modulated >> 5;
+                            } else {
+                                modulated = coverage_count << 5;
+                            }
+                            const s32 e = p.alpha_cvg_select ? modulated : p.key_en ? key_alpha : expanded + alpha_dith;
+                            out[3] = std::clamp(e, 0, 0xff);
+                        };
+                        if (multi) {
+                            const s32 zero[4] = {0, 0, 0, 0};
+                            s32 c0[4];
+                            run_cycle(0, in, zero, texel0, texel1, noise_v, c0);
+                            if (p.alpha_test) {
+                                // Pipelining: a pixel's alpha compare sees the first
+                                // cycle of the pixel after it (in the direction the
+                                // span is walked; past its end, a pixel with no
+                                // coverage), with this pixel's alpha dither.
+                                const s32 xn = x + idir;
+                                const bool last = x == (flip ? cur.end_x : cur.start_x);
+                                const u32 cov_n = last ? 0u : compute_coverage(cur.xleft, cur.xright, xn);
+                                PixIn nin{};
+                                pixel_inputs(xn, cov_n, nin);
+                                s32 n0[4];
+                                run_cycle(0, nin, zero, nin.texel0, nin.texel1, noise_v, n0);
+                                const s32 cnt_n = __builtin_popcount(cov_n);
+                                const s32 ca = clamp_9bit(n0[3]);
+                                s32 ea = ca + ((ca + 1) >> 8);
+                                if (p.alpha_cvg_select) ea = p.cvg_times_alpha ? (ea * cnt_n + 4) >> 3 : cnt_n << 5;
+                                else ea += alpha_dith;
+                                alpha_reference = std::clamp(ea, 0, 0xff);
+                            }
+                            s32 nv = noise_v;
+                            if (p.need_noise_dual) {
+                                Noise n2;
+                                n2.reseed(static_cast<u32>(x + 1023), static_cast<u32>(y + 7), p.prim_serial + 11);
+                                nv = n2.combiner();
+                            }
+                            // The second cycle sees the texels swapped (pipelining).
+                            run_cycle(1, in, c0, texel1, texel0, nv, comb);
+                            finish_cycle1(comb);
+                        } else {
+                            const s32 zero[4] = {0, 0, 0, 0};
+                            run_cycle(1, in, zero, texel0, texel1, noise_v, comb);
+                            finish_cycle1(comb);
+                            alpha_reference = comb[3];
                         }
-                        case FB_RGBA5551: {
-                            const u32 r = static_cast<u32>(col[0]) & 0xf8, g = static_cast<u32>(col[1]) & 0xf8,
-                                      b = static_cast<u32>(col[2]) & 0xf8;
-                            const u32 cov = (static_cast<u32>(col[3]) & 0xff) >> 5;
-                            wr16(cidx, static_cast<u16>((r << 8) | (g << 3) | (b >> 2) | (cov >> 2)));
-                            hidden_set(cidx, static_cast<u8>(cov & 3));
-                            break;
+
+                        if (p.aa && coverage_count == 0) continue;
+                        if (p.alpha_test) {
+                            const s32 threshold = p.alpha_test_dither ? noise.blend_threshold() : static_cast<s32>(p.blend_color & 0xff);
+                            if (alpha_reference < threshold) continue;
                         }
-                        case FB_IA88: {
-                            const u32 wv = ((static_cast<u32>(col[0]) & 0xff) << 8) | (static_cast<u32>(col[3]) & 0xff);
-                            wr16(cidx, static_cast<u16>(wv));
-                            hidden_set(cidx, static_cast<u8>((col[3] & 1) * 3));
-                            break;
+                        dith = rgb_dith;
+                        cov_count = coverage_count;
+                        shade_a = std::min(shade[3] + alpha_dith, 0xff);
+                        kind = K_NORMAL;
+                    }
+                    if (kind == K_NONE) continue;
+                    static const long dbg_addr = [] {
+                        const char* e = std::getenv("ORBIT64_EXACT_PIX");
+                        return e ? std::strtol(e, nullptr, 16) : -1L;
+                    }();
+
+                    // ---- Memory: load the pixel's colour and depth
+                    s32 col[4]{};
+                    const size_t cidx = read_colour(nx, ny, col);
+                    u16 cur_depth = 0;
+                    u8 cur_dz = 0;
+                    bool color_dirty = false, depth_dirty = false;
+                    size_t zidx = (p.z_index + static_cast<size_t>(p.fb_width) * static_cast<u32>(ny) + static_cast<u32>(nx)) & mask16;
+                    {
+                        const u16 wv = rd16(zidx);
+                        cur_depth = wv >> 2;
+                        cur_dz = static_cast<u8>(hidden_get(zidx, wv) | ((wv & 3) << 2));
+                    }
+
+                    auto write_color = [&](s32 r, s32 g, s32 b, s32 a) {
+                        if (p.fb_fmt == FB_I4) {
+                            col[0] = r;
+                            col[1] = g;
+                            col[2] = b;
+                        } else {
+                            col[0] = r;
+                            col[1] = g;
+                            col[2] = b;
+                            col[3] = a;
                         }
-                        default: {
-                            u8* q = rdram + cidx * 4;
-                            q[0] = static_cast<u8>(col[0]);
-                            q[1] = static_cast<u8>(col[1]);
-                            q[2] = static_cast<u8>(col[2]);
-                            q[3] = static_cast<u8>(col[3]);
-                            hidden_set(2 * cidx, static_cast<u8>((col[1] & 1) * 3));
-                            hidden_set(2 * cidx + 1, static_cast<u8>((col[3] & 1) * 3));
-                            break;
+                        color_dirty = true;
+                    };
+                    auto alias_color_to_depth = [&]() {
+                        if (p.fb_fmt == FB_RGBA5551) {
+                            cur_dz = static_cast<u8>(((col[3] & 0xff) >> 3) | (col[2] & 8));
+                            u32 wv = (static_cast<u32>(col[0]) & 0xf8) << 6;
+                            wv |= (static_cast<u32>(col[1]) & 0xf8) << 1;
+                            wv |= (static_cast<u32>(col[2]) & 0xf8) >> 4;
+                            cur_depth = static_cast<u16>(wv);
+                        } else if (p.fb_fmt == FB_IA88) {
+                            const u32 wv = (static_cast<u32>(col[0]) << 8) | static_cast<u32>(col[3]);
+                            cur_depth = static_cast<u16>(wv >> 2);
+                            cur_dz = static_cast<u8>(((wv & 3) << 2) | ((wv & 1) * 3));
+                        }
+                    };
+                    auto alias_depth_to_color = [&]() {
+                        const u32 wv = (static_cast<u32>(cur_depth) << 4) | cur_dz;
+                        if (p.fb_fmt == FB_RGBA5551) {
+                            col[0] = (wv >> 10) & 0xf8;
+                            col[1] = (wv >> 5) & 0xf8;
+                            col[2] = wv & 0xf8;
+                            col[3] = (wv & 7) << 5;
+                        } else if (p.fb_fmt == FB_IA88) {
+                            col[0] = (wv >> 10) & 0xff;
+                            col[3] = (wv >> 2) & 0xff;
+                        }
+                        color_dirty = true;
+                    };
+
+                    if (kind == K_FILL) {
+                        u32 c = p.fill_color;
+                        switch (p.fb_fmt) {
+                            case FB_RGBA8888: write_color((c >> 24) & 0xff, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff); break;
+                            case FB_RGBA5551:
+                                c >>= ((cidx & 1) ^ 1) * 16;
+                                write_color((c >> 8) & 0xf8, (c >> 3) & 0xf8, (c << 2) & 0xf8, (c & 1) * 0xe0);
+                                break;
+                            case FB_IA88:
+                                c >>= ((cidx & 1) ^ 1) * 16;
+                                c &= 0xffff;
+                                write_color((c >> 8) & 0xff, (c >> 8) & 0xff, (c >> 8) & 0xff, c & 0xff);
+                                break;
+                            case FB_I8:
+                                c >>= ((cidx & 3) ^ 3) * 8;
+                                c &= 0xff;
+                                write_color(c, c, c, c);
+                                break;
+                            default: break;
+                        }
+                        if (p.alias) alias_color_to_depth();
+                    } else if (kind == K_COPY) {
+                        const u32 wv = copy_word;
+                        switch (p.fb_fmt) {
+                            case FB_I4:
+                                col[0] = col[1] = col[2] = col[3] = 0;
+                                color_dirty = true;
+                                break;
+                            case FB_I8: write_color(wv & 0xff, wv & 0xff, wv & 0xff, wv & 0xff); break;
+                            case FB_RGBA5551:
+                                write_color((wv >> 8) & 0xf8, (wv >> 3) & 0xf8, (wv << 2) & 0xf8, (wv & 1) * 0xe0);
+                                break;
+                            default: break;
+                        }
+                        if (p.alias) alias_color_to_depth();
+                    } else {
+                        // ---- Depth test
+                        // Memory colour as the blender sees it.
+                        s32 mem[4];
+                        decode_memory(col, mem);
+                        const s32 memory_coverage = mem[3] >> 5;
+
+                        bool blend_en, coverage_wrap, z_pass;
+                        s32 shift_a, shift_b;
+                        if (p.z_compare) {
+                            const s32 memory_z = z_decompress(cur_depth);
+                            s32 memory_dz = dz_decompress(cur_dz);
+                            const s32 precision = (cur_depth >> 11) & 0xf;
+                            bool coplanar = false;
+                            shift_a = std::clamp(p.dz_compressed - static_cast<s32>(cur_dz), 0, 4);
+                            shift_b = std::clamp(static_cast<s32>(cur_dz) - p.dz_compressed, 0, 4);
+                            if (precision < 3) {
+                                if (memory_dz != 0x8000) {
+                                    memory_dz = std::max(memory_dz << 1, 16 >> precision);
+                                } else {
+                                    coplanar = true;
+                                    memory_dz = 0xffff;
+                                }
+                            }
+                            s32 combined_dz = combine_dz(p.dz | memory_dz);
+                            const s32 combined_dz_ip = combined_dz;
+                            combined_dz <<= 3;
+                            const bool farther = coplanar || (z + combined_dz) >= memory_z;
+                            const bool overflow = (cov_count + memory_coverage) >= 8;
+                            blend_en = p.force_blend || (!overflow && p.aa && farther);
+                            coverage_wrap = overflow;
+                            const bool max_z = memory_z == 0x3ffff;
+                            const bool front = z < memory_z;
+                            const bool nearer = coplanar || (z - combined_dz) <= memory_z;
+                            switch (p.z_mode) {
+                                case 0: z_pass = max_z || (overflow ? front : nearer); break;
+                                case 1:
+                                    if (!front || !farther || !overflow) {
+                                        z_pass = max_z || (overflow ? front : nearer);
+                                    } else {
+                                        const s32 cdz = dz_compress(combined_dz_ip & 0xffff);
+                                        const s32 coeff = ((memory_z >> cdz) - (z >> cdz)) & 0xf;
+                                        cov_count = std::min((coeff * cov_count) >> 3, 8);
+                                        z_pass = true;
+                                    }
+                                    break;
+                                case 2: z_pass = front || max_z; break;
+                                default: z_pass = farther && nearer && !max_z; break;
+                            }
+                        } else {
+                            shift_a = 0;
+                            shift_b = std::min(0xf - p.dz_compressed, 4);
+                            const bool overflow = (cov_count + memory_coverage) >= 8;
+                            blend_en = p.force_blend || (!overflow && p.aa);
+                            coverage_wrap = overflow;
+                            z_pass = true;
+                        }
+
+                        if (z_pass && (!p.aa || cov_count != 0)) {
+                            s32 pixel[4] = {comb[0], comb[1], comb[2], comb[3]};
+                            const s32 fog[4] = {static_cast<s32>(p.fog_color >> 24), static_cast<s32>((p.fog_color >> 16) & 0xff),
+                                                static_cast<s32>((p.fog_color >> 8) & 0xff), static_cast<s32>(p.fog_color & 0xff)};
+                            const s32 bcol[4] = {static_cast<s32>(p.blend_color >> 24), static_cast<s32>((p.blend_color >> 16) & 0xff),
+                                                 static_cast<s32>((p.blend_color >> 8) & 0xff), static_cast<s32>(p.blend_color & 0xff)};
+                            auto blender = [&](const u8 m[4], bool final_cycle, s32 out[3]) {
+                                const s32* memc = (multi && !final_cycle) ? delayed_mem : mem;
+                                const s32* src1 = m[2] == 0 ? pixel : m[2] == 1 ? memc : m[2] == 2 ? bcol : fog;
+                                if (final_cycle && p.color_on_cvg && !coverage_wrap) {
+                                    for (int i = 0; i < 3; ++i) out[i] = src1[i];
+                                    return;
+                                }
+                                const s32* src0 = m[0] == 0 ? pixel : m[0] == 1 ? memc : m[0] == 2 ? bcol : fog;
+                                if (final_cycle && (!blend_en || (m[1] == 0 && m[3] == 0 && pixel[3] == 0xff))) {
+                                    for (int i = 0; i < 3; ++i) out[i] = src0[i];
+                                    return;
+                                }
+                                s32 a0, a1;
+                                switch (m[1]) {
+                                    case 0: a0 = pixel[3]; break;
+                                    case 1: a0 = fog[3]; break;
+                                    case 2: a0 = shade_a; break;
+                                    default: a0 = 0; break;
+                                }
+                                switch (m[3]) {
+                                    case 0: a1 = ~a0 & 0xff; break;
+                                    case 1: a1 = memc[3]; break;
+                                    case 2: a1 = 0xff; break;
+                                    default: a1 = 0; break;
+                                }
+                                a0 >>= 3;
+                                a1 >>= 3;
+                                if (m[3] == 1) {
+                                    a0 = (a0 >> shift_a) & 0x3c;
+                                    a1 = (a1 >> shift_b) | 3;
+                                }
+                                s32 bl[3];
+                                for (int i = 0; i < 3; ++i) bl[i] = src0[i] * a0 + src1[i] * (a1 + 1);
+                                if (!final_cycle || p.force_blend) {
+                                    for (int i = 0; i < 3; ++i) out[i] = (bl[i] >> 5) & 0xff;
+                                } else {
+                                    const s32 sum = (a0 >> 2) + (a1 >> 2) + 1;
+                                    for (int i = 0; i < 3; ++i) out[i] = bdiv.lut[((sum << 11) | ((bl[i] >> 2) & 0x7ff)) & 0x7fff];
+                                }
+                            };
+                            s32 rgb[3];
+                            if (multi) {
+                                s32 first_out[3];
+                                blender(p.blend[0], false, first_out);
+                                pixel[0] = first_out[0];
+                                pixel[1] = first_out[1];
+                                pixel[2] = first_out[2];
+                                blender(p.blend[1], true, rgb);
+                            } else {
+                                blender(p.blend[0], true, rgb);
+                            }
+                            if (p.dither_en) rgb_dither(rgb, dith);
+                            const s32 new_cov = blend_coverage(cov_count, memory_coverage, blend_en, p.coverage_mode);
+                            write_color(rgb[0], rgb[1], rgb[2], new_cov << 5);
+                            if (p.z_update) {
+                                cur_depth = z_compress(z);
+                                cur_dz = static_cast<u8>(p.dz_compressed);
+                                depth_dirty = true;
+                                if (p.alias) alias_depth_to_color();
+                            } else if (p.alias) {
+                                alias_color_to_depth();
+                            }
                         }
                     }
-                }
-                if (!p.alias && depth_dirty) {
-                    wr16(zidx, static_cast<u16>((cur_depth << 2) | (cur_dz >> 2)));
-                    hidden_set(zidx, static_cast<u8>(cur_dz & 3));
+
+                    if (dbg_addr >= 0 && !hires) {
+                        const size_t bpp = p.fb_fmt == FB_RGBA8888 ? 4 : p.fb_fmt <= FB_I8 ? 1 : 2;
+                        if (static_cast<long>(cidx * bpp) == (dbg_addr & ~static_cast<long>(bpp - 1)))
+                            std::fprintf(stderr, "PIX x=%d y=%d kind=%d comb=%d,%d,%d,%d cvg=%d dith=%03x z=%05x -> col=%d,%d,%d,%d\n", x,
+                                         y, kind, comb[0], comb[1], comb[2], comb[3], cov_count, dith, z, col[0], col[1],
+                                         col[2], col[3]);
+                    }
+                    // ---- Store
+                    if (color_dirty) {
+                        switch (p.fb_fmt) {
+                            case FB_I4: case FB_I8: {
+                                // The ninth bits go with the odd byte; writing the even
+                                // one leaves them as they were.
+                                const u8 before = hidden_get(cidx >> 1, rd16(cidx >> 1));
+                                const s32 c = p.fb_fmt == FB_I4 ? 0 : (cidx & 1) ? col[1] : col[0];
+                                fbm[cidx] = static_cast<u8>(c);
+                                const u8 bits = p.fb_fmt == FB_I4 ? static_cast<u8>(col[3] & 3) : static_cast<u8>((c & 1) * 3);
+                                hidden_set(cidx >> 1, (cidx & 1) ? bits : before);
+                                break;
+                            }
+                            case FB_RGBA5551: {
+                                const u32 r = static_cast<u32>(col[0]) & 0xf8, g = static_cast<u32>(col[1]) & 0xf8,
+                                          b = static_cast<u32>(col[2]) & 0xf8;
+                                const u32 cov = (static_cast<u32>(col[3]) & 0xff) >> 5;
+                                wr16(cidx, static_cast<u16>((r << 8) | (g << 3) | (b >> 2) | (cov >> 2)));
+                                hidden_set(cidx, static_cast<u8>(cov & 3));
+                                break;
+                            }
+                            case FB_IA88: {
+                                const u32 wv = ((static_cast<u32>(col[0]) & 0xff) << 8) | (static_cast<u32>(col[3]) & 0xff);
+                                wr16(cidx, static_cast<u16>(wv));
+                                hidden_set(cidx, static_cast<u8>((col[3] & 1) * 3));
+                                break;
+                            }
+                            default: {
+                                u8* q = fbm + cidx * 4;
+                                q[0] = static_cast<u8>(col[0]);
+                                q[1] = static_cast<u8>(col[1]);
+                                q[2] = static_cast<u8>(col[2]);
+                                q[3] = static_cast<u8>(col[3]);
+                                hidden_set(2 * cidx, static_cast<u8>((col[1] & 1) * 3));
+                                hidden_set(2 * cidx + 1, static_cast<u8>((col[3] & 1) * 3));
+                                break;
+                            }
+                        }
+                    }
+                    if (!p.alias && depth_dirty) {
+                        wr16(zidx, static_cast<u16>((cur_depth << 2) | (cur_dz >> 2)));
+                        hidden_set(zidx, static_cast<u8>(cur_dz & 3));
+                    }
                 }
             }
-        }
-        if (y == last_row) {
-            std::lock_guard<std::mutex> lk(hs_->tail_mutex);
-            if (static_cast<s32>(p.prim_serial - hs_->tail_serial) > 0) {
-                hs_->tail_serial = p.prim_serial;
-                std::copy(prev_mem_, prev_mem_ + 4, hs_->tail_mem);
+            if (!hires && y == last_row) {
+                std::lock_guard<std::mutex> lk(hs_->tail_mutex);
+                if (static_cast<s32>(p.prim_serial - hs_->tail_serial) > 0) {
+                    hs_->tail_serial = p.prim_serial;
+                    std::copy(prev_mem_, prev_mem_ + 4, hs_->tail_mem);
+                }
             }
         }
     }
@@ -2405,13 +2563,49 @@ void ExactRdpLanes::reset() {
     ci_addr_ = zi_addr_ = 0;
     ci_width_ = 1;
     ci_size_ = 2;
-    scissor_yhi_ = scissor_xhi_ = 0;
-    written_lo_ = ~0ull;
-    written_hi_ = 0;
-}
+        scissor_yhi_ = scissor_xhi_ = 0;
+        written_lo_ = ~0ull;
+        written_hi_ = 0;
+        sync_ranges_.clear();
+    }
+
+    void ExactRdpLanes::set_scale(u32 scale) {
+        flush();
+        for (auto& l : lanes_) l->set_scale(scale);
+    }
+
+    void ExactRdpLanes::add_sync_range(u64 lo, u64 hi) {
+        if (scale() <= 1) return;
+        for (auto& r : sync_ranges_)
+            if (lo <= r.second && hi >= r.first) {
+                r.first = std::min(r.first, lo);
+                r.second = std::max(r.second, hi);
+                return;
+            }
+        sync_ranges_.emplace_back(lo, hi);
+    }
+
+    // What a draw under the current state can write: the colour and the depth
+    // image down to the scissor's last line.
+    void ExactRdpLanes::draw_ranges(u64& lo, u64& hi, u64& zlo, u64& zhi) const {
+        auto bytes_pp = [](u32 size) { return size == 0 ? 1u : 1u << (size - 1); };
+        const u64 rows = (static_cast<u64>(scissor_yhi_) >> 2) + 1;
+        lo = ci_addr_;
+        hi = ci_addr_ + (rows + 1) * ci_width_ * bytes_pp(ci_size_) + 8;
+        zlo = zi_addr_;
+        zhi = zi_addr_ + (rows + 1) * ci_width_ * 2 + 8;
+    }
 
 void ExactRdpLanes::flush() {
     if (starts_.empty()) return;
+    // Internal resolution: every lane draws into lane 0's high-resolution
+    // copy, which first takes what the CPU changed in the frame buffers.
+    if (scale() > 1) {
+        const UpStore* up = lanes_[0]->upscaled(rdram_size_);
+        for (size_t i = 1; i < lanes_.size(); ++i)
+            if (lanes_[i]->upscaled() != up) lanes_[i]->share_upscaled_with(*lanes_[0]);
+        for (const auto& r : sync_ranges_) lanes_[0]->up_sync_before(r.first, r.second, rdram_, rdram_size_);
+    }
     auto run_lane = [&](u32 k) {
         for (u32 st : starts_) lanes_[k]->command(&buf_[st], rdram_, rdram_size_);
     };
@@ -2419,6 +2613,8 @@ void ExactRdpLanes::flush() {
     if (pool_ && !no_pool) pool_->run(static_cast<u32>(lanes_.size()), run_lane);
     else
         for (u32 k = 0; k < lanes_.size(); ++k) run_lane(k);
+    for (const auto& r : sync_ranges_) lanes_[0]->up_sync_after(r.first, r.second, rdram_, rdram_size_);
+    sync_ranges_.clear();
     buf_.clear();
     starts_.clear();
     written_lo_ = ~0ull;
@@ -2437,11 +2633,23 @@ void ExactRdpLanes::cpu_wrote(u32 paddr, u32 len) {
 
 void ExactRdpLanes::run_serial(const u32* w, u32 nwords) {
     (void)nwords;
+    u64 lo, hi, zlo, zhi;
+    draw_ranges(lo, hi, zlo, zhi);
+    add_sync_range(lo, hi);
+    add_sync_range(zlo, zhi);
+    if (scale() > 1) {
+        const UpStore* up = lanes_[0]->upscaled(rdram_size_);
+        for (size_t i = 1; i < lanes_.size(); ++i)
+            if (lanes_[i]->upscaled() != up) lanes_[i]->share_upscaled_with(*lanes_[0]);
+        for (const auto& r : sync_ranges_) lanes_[0]->up_sync_before(r.first, r.second, rdram_, rdram_size_);
+    }
     for (auto& l : lanes_) {
         l->set_serial(true);
         l->command(w, rdram_, rdram_size_);
         l->set_serial(false);
     }
+    for (const auto& r : sync_ranges_) lanes_[0]->up_sync_after(r.first, r.second, rdram_, rdram_size_);
+    sync_ranges_.clear();
 }
 
 bool ExactRdpLanes::command(const u32* w, u8* rdram, size_t rdram_size) {
@@ -2450,7 +2658,7 @@ bool ExactRdpLanes::command(const u32* w, u8* rdram, size_t rdram_size) {
     if (rdram_ != rdram || rdram_size_ != rdram_size) flush();
     rdram_ = rdram;
     rdram_size_ = rdram_size;
-    if (lanes_.size() == 1) return lanes_[0]->command(w, rdram, rdram_size);
+    if (lanes_.size() == 1 && scale() <= 1) return lanes_[0]->command(w, rdram, rdram_size);
     // The ninth bits are allocated before any lane runs.
     if (lanes_[0]->hidden().size() != rdram_size / 2) {
         flush();
@@ -2514,22 +2722,22 @@ bool ExactRdpLanes::command(const u32* w, u8* rdram, size_t rdram_size) {
 
     if (draw) {
         const u32 cycle = (other_h_ >> 20) & 3;
-        // (Pixels past the end of a row land in the next one, another lane's.)
+        // (Pixels past the end of a row land in the next one, another lane's.
+        // Copy and fill modes draw the pixel at the scissor's right edge too.)
         const bool serial = (cycle == 1 && (((other_l_ >> 30) & 3) == 1 || ((other_l_ >> 22) & 3) == 1 ||
                                             ((other_l_ >> 18) & 3) == 1)) ||
-                            (scissor_xhi_ >> 2) > ci_width_;
+                            (scissor_xhi_ >> 2) > ci_width_ || (cycle >= 2 && (scissor_xhi_ >> 2) >= ci_width_);
         if (serial) {
             flush();
             run_serial(w, nwords);
             return false;
         }
-        const u64 rows = (static_cast<u64>(scissor_yhi_) >> 2) + 1;
-        const u64 lo = ci_addr_, hi = ci_addr_ + (rows + 1) * ci_width_ * bytes_pp(ci_size_) + 8;
-        written_lo_ = std::min(written_lo_, lo);
-        written_hi_ = std::max(written_hi_, hi);
-        const u64 zlo = zi_addr_, zhi = zi_addr_ + (rows + 1) * ci_width_ * 2 + 8;
-        written_lo_ = std::min(written_lo_, zlo);
-        written_hi_ = std::max(written_hi_, zhi);
+        u64 lo, hi, zlo, zhi;
+        draw_ranges(lo, hi, zlo, zhi);
+        written_lo_ = std::min({written_lo_, lo, zlo});
+        written_hi_ = std::max({written_hi_, hi, zhi});
+        add_sync_range(lo, hi);
+        add_sync_range(zlo, zhi);
     }
 
     starts_.push_back(static_cast<u32>(buf_.size()));

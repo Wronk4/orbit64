@@ -9,6 +9,12 @@
 //
 // The pixel pipeline follows parallel-rdp by Themaister (MIT licence, see
 // rdp_exact.cpp), which reproduces Angrylion's reference RDP bit for bit.
+//
+// Internal resolution (set_scale), the way parallel-rdp upscales: RDRAM
+// still gets the native, bit-exact picture the game sees, and every
+// primitive is drawn a second time at `scale` times the resolution into a
+// separate copy of memory (UpStore) that only the VI shows. Fill rectangles
+// and copy-mode primitives are drawn natively and their pixels repeated.
 
 #include "common.hpp"
 #include <array>
@@ -16,10 +22,51 @@
 #include <mutex>
 #include <vector>
 
+// The high-resolution copy of memory: pixel (x, y) of a frame buffer at
+// `scale` times its size is sample (x % scale, y % scale) of native pixel
+// (x / scale, y / scale), kept in slice (y % scale) * scale + x % scale, a
+// whole RDRAM-sized array addressed like RDRAM. The OS only backs the pages
+// that are touched (the frame buffers).
+struct UpStore {
+    UpStore(u32 scale, size_t rdram_size);
+    ~UpStore();
+    UpStore(const UpStore&) = delete;
+    UpStore& operator=(const UpStore&) = delete;
+    u8* color(u32 slice) const { return color_ + slice * size; }         // RDRAM bytes
+    u8* hidden(u32 slice) const { return hidden_ + slice * (size / 2); } // ninth bits per halfword
+    u32 scale;
+    size_t size;
+    // RDRAM as it was when the copy last agreed with it (same layout): where
+    // RDRAM differs, the CPU wrote it since (see ExactRdp::up_sync_before).
+    u8* ref;
+
+private:
+    u8 *color_, *hidden_;
+    size_t color_bytes_, hidden_bytes_, ref_bytes_;
+};
+
 class ExactRdp {
 public:
     ExactRdp();
     void reset();
+
+    // ---- Internal resolution (see above). 1 = native only.
+    void set_scale(u32 scale) {
+        scale_ = scale < 1 ? 1 : scale;
+        up_.reset();
+    }
+    u32 scale() const { return scale_; }
+    void share_upscaled_with(const ExactRdp& o) {
+        scale_ = o.scale_;
+        up_ = o.up_;
+    }
+    // The high-resolution copy, allocated once RDRAM's size is known.
+    UpStore* upscaled(size_t rdram_size);
+    const UpStore* upscaled() const { return up_.get(); }
+    // Around drawing into [lo, hi): what the CPU changed there since goes to
+    // every sample (before), and the copy then agrees with RDRAM (after).
+    void up_sync_before(u64 lo, u64 hi, const u8* rdram, size_t rdram_size);
+    void up_sync_after(u64 lo, u64 hi, const u8* rdram, size_t rdram_size);
 
     // Number of 64-bit words of the command whose first byte is `op` (6 bits).
     static u32 command_words(u32 op);
@@ -73,8 +120,19 @@ public:
         s(other_h_, other_l_, combine_w0_, combine_w1_, fill_color_, fog_color_, blend_color_, prim_color_, env_color_);
         s(prim_min_level_, prim_lod_frac_, prim_depth_, prim_dz_, convert_, key_center_, key_scale_, key_width_);
         s(scissor_xlo_, scissor_ylo_, scissor_xhi_, scissor_yhi_, scissor_field_, scissor_odd_);
-        s(ti_addr_, ti_width_, ti_size_, ti_fmt_, ci_addr_, ci_width_, ci_fmt_, zi_addr_, prev_mem_);
-    }
+            s(ti_addr_, ti_width_, ti_size_, ti_fmt_, ci_addr_, ci_width_, ci_fmt_, zi_addr_, prev_mem_);
+                if constexpr (S::loading) rebuild_watched();
+            }
+            // State added to save states later (a section of its own): the primitive
+            // counter the noise is seeded from, the stale-rectangle memory and the
+            // delayed memory colour handed between lanes.
+            template <class S> void serialize_extra(S& s) {
+                s(prim_count_, stale_.w0, stale_.w1, stale_.idx, stale_.pre, stale_.n, stale_.valid);
+                s(hs_->tail_serial, hs_->tail_mem);
+            }
+            // Lanes: which lane's stale-rectangle memory is the real one (the lane
+            // that draws its row reads memory into it; the others don't).
+            u32 stale_owner(u32 lanes) const { return stale_.valid ? ((stale_.w1 & 0xfff) >> 2) % lanes : 0; }
 
 private:
     // ---- State set by commands
@@ -102,6 +160,10 @@ private:
     u32 lane_{0}, lanes_{1};
     bool serial_{false};
     u32 prim_count_{0};
+    u32 scale_{1};
+    std::shared_ptr<UpStore> up_;
+    bool mirror_{false};      // the primitive being drawn is repeated, not upscaled
+    s32 prev_mem_up_[4]{};    // prev_mem_ of the high-resolution pass
 
     u32 other_h_{0}, other_l_{0};
     u32 combine_w0_{0}, combine_w1_{0};
@@ -121,6 +183,10 @@ private:
     u32 zi_addr_{0};
     // 2-cycle mode: the memory colour of the last pixel walked (see draw()).
     s32 prev_mem_[4]{};
+
+    // After loading the ninth bits: the pages holding RDP-written ones are
+    // watched for CPU writes again.
+    void rebuild_watched();
 
     // ---- Primitives
     struct Setup {
@@ -174,8 +240,12 @@ public:
     // Draws everything queued.
     void flush();
     const ExactRdp& primary() const { return *lanes_[0]; }
+    ExactRdp& primary() { return *lanes_[0]; }
     // A CPU/DMA write (see ExactRdp::cpu_wrote); what is queued is drawn first.
     void cpu_wrote(u32 paddr, u32 len);
+    // Internal resolution (see ExactRdp::set_scale).
+    void set_scale(u32 scale);
+    u32 scale() const { return lanes_[0]->scale(); }
 
     template <class S> void serialize(S& s) {
         flush();
@@ -183,6 +253,19 @@ public:
         if constexpr (S::loading)
             for (size_t i = 1; i < lanes_.size(); ++i) lanes_[i]->copy_state_from(*lanes_[0]);
     }
+    template <class S> void serialize_extra(S& s) {
+        flush();
+        if constexpr (S::loading) {
+            lanes_[0]->serialize_extra(s);
+            for (size_t i = 1; i < lanes_.size(); ++i) lanes_[i]->copy_state_from(*lanes_[0]);
+            } else {
+                lanes_[lanes_[0]->stale_owner(static_cast<u32>(lanes_.size()))]->serialize_extra(s);
+            }
+            // What the queue knows of the state (which draws run alone, and when
+            // a batch ends).
+            s(other_h_, other_l_, ti_addr_, ti_width_, ti_size_, ci_addr_, ci_width_, ci_size_, zi_addr_, scissor_yhi_,
+              scissor_xhi_);
+        }
 
 private:
     std::vector<std::unique_ptr<ExactRdp>> lanes_;
@@ -197,5 +280,10 @@ private:
     u32 ci_addr_{0}, ci_width_{1}, ci_size_{2}, zi_addr_{0};
     u32 scissor_yhi_{0}, scissor_xhi_{0};
     u64 written_lo_{~0ull}, written_hi_{0}; // RDRAM the queued draws can write
+    // The same as the colour and the depth image ranges, which the
+    // high-resolution copy is brought up to date in around each batch.
+    std::vector<std::pair<u64, u64>> sync_ranges_;
+    void add_sync_range(u64 lo, u64 hi);
+    void draw_ranges(u64& lo, u64& hi, u64& zlo, u64& zhi) const;
     void run_serial(const u32* w, u32 nwords);
 };

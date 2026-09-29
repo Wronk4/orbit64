@@ -139,8 +139,8 @@ public:
     // RSP emulation (RspMode): 0 = HLE, 1 = LLE graphics, 2 = LLE graphics
     // and audio. Applied from the next RSP task on.
     void set_rsp_mode(int mode) { rsp_mode_ = mode; }
-    // Low-level graphics drawn by the bit-exact RDP (native resolution) or
-    // the fast one (which supports the internal resolution).
+    // Low-level graphics drawn by the bit-exact RDP or the fast one (both
+    // follow the internal resolution).
     void set_rdp_exact(bool on) { rdp_exact_ = on; }
     // Frame rate limit: 0 = console default (VI rate), >0 = that many frames per second.
     void set_fps_limit(int fps) { fps_limit_ = fps; }

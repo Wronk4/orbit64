@@ -136,15 +136,17 @@ public:
     // RDP command-buffer commands run so far (low-level graphics).
     u64 get_rdp_command_count() const { return raw_cmd_count_; }
     bool drawing_rdp_commands() const { return raw_mode_; }
-    // Low-level graphics: draw the RDP's commands bit-exactly (rdp_exact.hpp,
-    // native resolution only) instead of through the high-level renderer.
+    // Low-level graphics: draw the RDP's commands bit-exactly (rdp_exact.hpp)
+    // instead of through the high-level renderer.
     // ORBIT64_RDP=exact or fast overrides it.
     void set_exact(bool on) { exact_mode_ = env_exact_ >= 0 ? env_exact_ != 0 : on; }
     bool exact() const { return exact_mode_; }
     // Whether the frame being shown was drawn by the bit-exact RDP.
     bool exact_drawing() const { return exact_mode_ && raw_mode_; }
-    // The ninth bits the bit-exact RDP keeps (null before it drew anything).
+    // The bit-exact RDP (its ninth bits, and its high-resolution copy at an
+    // internal resolution, which set_hires_scale() sets for it too).
     const ExactRdp* exact_rdp() const { return &exact_.primary(); }
+    ExactRdp* exact_rdp() { return &exact_.primary(); }
 
     // Process a display list starting at segmented address in RDRAM
     void process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi);
@@ -191,6 +193,7 @@ public:
         s(raw_buf_, raw_mode_, raw_unbind_, raw_cmd_count_);
         exact_.serialize(s);
     }
+    template <class S> void serialize_exact_extra(S& s) { exact_.serialize_extra(s); }
     // Draws everything queued so far (into RDRAM and the high-resolution buffers).
     void flush_pending() {
         flush_native();

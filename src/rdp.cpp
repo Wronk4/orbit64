@@ -281,6 +281,7 @@ void RDP::clear_zbuffer() {
 void RDP::set_hires_scale(u32 scale) {
     flush_native();
     scale = std::clamp<u32>(scale, 1, HiResRenderer::kMaxScale);
+    if (scale != exact_.scale()) exact_.set_scale(scale);
     if (scale == hires_scale()) return;
     hires_shadow_ = nullptr;
     hires_.reset();

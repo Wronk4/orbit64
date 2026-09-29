@@ -16,11 +16,13 @@
 //  5. gamma (integer square root) and gamma dither.
 
 #include "vi.hpp"
+#include "raster_pool.hpp"
 #include "rdp_exact.hpp"
 #include <algorithm>
 #include <array>
 #include <climits>
 #include <cstring>
+#include <thread>
 
 namespace {
 
@@ -84,6 +86,25 @@ struct Px {
     s32 r, g, b, a; // a: coverage 0..7
 };
 
+// Runs f(y0, y1) over [0, n) in bands of rows, on several threads (every
+// stage below computes each of its rows from the previous stage's only).
+template <class F> void for_rows(int n, const F& f) {
+    static RasterPool pool([] {
+        const unsigned hw = std::thread::hardware_concurrency();
+        return std::clamp<unsigned>(hw > 1 ? hw - 1 : 0, 0, 8);
+    }());
+    constexpr int kBand = 8;
+    const int bands = (n + kBand - 1) / kBand;
+    if (bands <= 1) {
+        if (n > 0) f(0, n);
+        return;
+    }
+    pool.run(static_cast<u32>(bands), [&](u32 b) {
+        const int y0 = static_cast<int>(b) * kBand;
+        f(y0, std::min(n, y0 + kBand));
+    });
+}
+
 u32 median3(u32 l, u32 c, u32 r) {
     if (l < c) std::swap(l, c);
     if (c < r) std::swap(c, r);
@@ -93,7 +114,19 @@ u32 median3(u32 l, u32 c, u32 r) {
 
 } // namespace
 
-void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* rdp, std::vector<u32>& out,
+std::vector<u32> VI::exact_native_picture() const {
+    if (!exact_woven_.empty()) return exact_woven_; // loaded, not shown yet
+    std::vector<u32> pic;
+    if (!exact_serrate_ || exact_picture_.empty()) return pic;
+    const int S = exact_scale_, w = kScanoutWidth * S, h = static_cast<int>(exact_picture_.size()) / w;
+    pic.resize(static_cast<size_t>(kScanoutWidth) * (h / S));
+    for (int y = 0; y < h / S; ++y)
+        for (int x = 0; x < kScanoutWidth; ++x)
+            pic[static_cast<size_t>(y) * kScanoutWidth + x] = exact_picture_[static_cast<size_t>(y) * S * w + x * S];
+    return pic;
+}
+
+void VI::render_frame_exact(const u8* rdram, size_t rdram_size, ExactRdp* rdp, std::vector<u32>& out,
                             int& out_w, int& out_h) {
     const u32 frame = exact_frames_++;
     u32 st = status;
@@ -105,9 +138,22 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
     const bool serrate = (st & kCtrlSerrate) != 0;
     const u32 field = frame & 1; // the field being scanned out (interlaced modes)
 
-    out_w = kScanoutWidth;
-    out_h = out_lines;
+    // Internal resolution: S times finer everywhere.
+    const int S = rdp ? static_cast<int>(rdp->scale()) : 1;
+    out_w = kScanoutWidth * S;
+    out_h = out_lines * S;
     if (exact_picture_.size() != static_cast<size_t>(out_w) * out_h) exact_picture_.assign(static_cast<size_t>(out_w) * out_h, 0xFF000000u);
+    if (!exact_woven_.empty()) {
+        // A loaded state's picture (native resolution), at this one.
+        if (exact_woven_.size() == static_cast<size_t>(kScanoutWidth) * out_lines)
+            for (int Y = 0; Y < out_h; ++Y)
+                for (int X = 0; X < out_w; ++X)
+                    exact_picture_[static_cast<size_t>(Y) * out_w + X] =
+                        exact_woven_[static_cast<size_t>(Y / S) * kScanoutWidth + X / S];
+        exact_woven_.clear();
+    }
+    exact_scale_ = S;
+    exact_serrate_ = serrate;
     auto finish = [&]() { out = exact_picture_; };
     auto blank = [&]() {
         std::fill(exact_picture_.begin(), exact_picture_.end(), 0xFF000000u);
@@ -151,10 +197,18 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
         h_end = kScanoutWidth;
         right_clamp = true;
     }
-    const int h_start_clamp = h_start + (left_clamp ? 0 : 8);
-    const int h_end_clamp = h_end - (right_clamp ? 0 : 7);
-    const int h_res = h_end - h_start;
+    int h_start_clamp = h_start + (left_clamp ? 0 : 8);
+    int h_end_clamp = h_end - (right_clamp ? 0 : 7);
+    int h_res = h_end - h_start;
     if (h_res <= 0 || h_start >= kScanoutWidth || v_res <= 0) return blank();
+    h_start *= S;
+    h_start_clamp *= S;
+    h_end_clamp *= S;
+    h_res *= S;
+    x_start *= S;
+    y_start *= S;
+    const int vstart_n = vstart, v_res_n = v_res; // in (native) VI lines
+    v_res *= S;
     const int max_x = (x_start + h_res * x_add) >> 10;
     const int max_y = (y_start + v_res * y_add) >> 10;
 
@@ -165,42 +219,64 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
     const bool dither_filter = (st & kCtrlDitherFilter) != 0;
     const bool gamma = (st & kCtrlGamma) != 0, gamma_dither = (st & kCtrlGammaDither) != 0;
     const bool rgba8888 = (st & kCtrlTypeMask) == 3;
-    const bool fetch_bug = y_add < 1024;
+    const bool fetch_bug = y_add < 1024 && S == 1;
 
     // ---- 1. Fetch (frame buffer x in [-3, max_x + 5], y in [-2, max_y + 3])
     const int fx0 = divot ? -3 : -2, fy0 = -2;
     const int fw = max_x + 2 + 4 + (divot ? 2 : 0), fh = max_y + 1 + 4;
-    static thread_local std::vector<Px> vram;
+    static thread_local std::vector<Px> vram_buf;
+    std::vector<Px>& vram = vram_buf; // (the worker threads fill this thread's)
     vram.resize(static_cast<size_t>(fw) * fh);
     const size_t mask16 = (rdram_size >> 1) - 1, mask32 = (rdram_size >> 2) - 1;
-    for (int y = 0; y < fh; ++y) {
+    const UpStore* up = nullptr;
+    if (S > 1) {
+        // What the CPU drew into the frame buffer since the RDP did.
+        const u64 bpp = rgba8888 ? 4 : 2;
+        const s64 first = static_cast<s64>(vi_offset) + (static_cast<s64>(fy0) * vi_width - 4) * static_cast<s64>(bpp);
+        const s64 last = static_cast<s64>(vi_offset) + (static_cast<s64>(fh / S + 2) * vi_width + 8) * static_cast<s64>(bpp);
+        rdp->up_sync_before(static_cast<u64>(std::max<s64>(first, 0)), static_cast<u64>(last), rdram, rdram_size);
+        up = rdp->upscaled();
+    }
+    auto floor_div = [S](int a) { return a >= 0 ? a / S : -((-a + S - 1) / S); };
+    for_rows(fh, [&](int y_lo, int y_hi) {
+    for (int y = y_lo; y < y_hi; ++y) {
         for (int x = 0; x < fw; ++x) {
-            const s64 lin = static_cast<s64>(y + fy0) * vi_width + (x + fx0);
+            // Sample (x % S, y % S) of frame buffer pixel (x / S, y / S).
+            const int ix = x + fx0, iy = y + fy0;
+            const int nx = floor_div(ix), ny = floor_div(iy);
+            const s64 lin = static_cast<s64>(ny) * vi_width + nx;
+            const u32 slice = static_cast<u32>((iy - ny * S) * S + (ix - nx * S));
+            const u8* mem = up ? up->color(slice) : rdram;
             Px p{};
             if (rgba8888) {
                 const size_t i = static_cast<size_t>(lin + (vi_offset >> 2)) & mask32;
-                const u8* q = rdram + i * 4;
+                const u8* q = mem + i * 4;
                 p = {q[0], q[1], q[2], (q[3] >> 5) & 7};
             } else {
                 const size_t i = static_cast<size_t>(lin + (vi_offset >> 1)) & mask16;
-                const u32 w = (static_cast<u32>(rdram[i * 2]) << 8) | rdram[i * 2 + 1];
-                const u32 h = rdp ? rdp->hidden_at(i, static_cast<u16>(w)) : ((((w >> 8) & 1) << 1) | (w & 1));
+                const u32 w = (static_cast<u32>(mem[i * 2]) << 8) | mem[i * 2 + 1];
+                const u32 h = up ? up->hidden(slice)[i]
+                                 : rdp ? rdp->hidden_at(i, static_cast<u16>(w)) : ((((w >> 8) & 1) << 1) | (w & 1));
                 p = {static_cast<s32>((w >> 8) & 0xf8), static_cast<s32>((w >> 3) & 0xf8), static_cast<s32>((w << 2) & 0xf8),
                      static_cast<s32>(((w & 1) << 2) | h)};
             }
-            if (!fetch_aa) p.a = 7;
-            vram[static_cast<size_t>(y) * fw + x] = p;
-        }
-    }
+                    if (!fetch_aa) p.a = 7;
+                    vram[static_cast<size_t>(y) * fw + x] = p;
+                }
+            }
+            });
     auto V = [&](int x, int y) -> const Px& { return vram[static_cast<size_t>(y) * fw + x]; };
 
     // ---- 2. Anti-aliasing / dither filter; aa[y][x] is frame buffer
     // (x + fx0 + 2, y); `bug` the fetch-bug variant.
     const int aw = max_x + 3 + (divot ? 2 : 0), ah = max_y + 2;
-    static thread_local std::vector<Px> aa, aa_bug;
+    static thread_local std::vector<Px> aa_buf, aa_bug_buf;
+    std::vector<Px>& aa = aa_buf;
+    std::vector<Px>& aa_bug = aa_bug_buf;
     aa.resize(static_cast<size_t>(aw) * ah);
     aa_bug.resize(fetch_bug ? static_cast<size_t>(aw) * ah : 0);
-    for (int y = 0; y < ah; ++y) {
+    for_rows(ah, [&](int y_lo, int y_hi) {
+    for (int y = y_lo; y < y_hi; ++y) {
         for (int x = 0; x < aw; ++x) {
             const int px = x + 2, py = y + 2; // in vram coordinates
             const Px& mid = V(px, py);
@@ -272,14 +348,17 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
                 out_p = {(mid.r & 0xf8) + acc[0], (mid.g & 0xf8) + acc[1], (mid.b & 0xf8) + acc[2], mid.a};
                 out_b = {(mid.r & 0xf8) + accb[0], (mid.g & 0xf8) + accb[1], (mid.b & 0xf8) + accb[2], mid.a};
             }
-            aa[static_cast<size_t>(y) * aw + x] = out_p;
-            if (fetch_bug) aa_bug[static_cast<size_t>(y) * aw + x] = out_b;
-        }
-    }
+                    aa[static_cast<size_t>(y) * aw + x] = out_p;
+                    if (fetch_bug) aa_bug[static_cast<size_t>(y) * aw + x] = out_b;
+                }
+            }
+            });
 
     // ---- 3. Divot: output (x, y) is frame buffer (x, y).
     const int dw = max_x + 2, dh = max_y + 2;
-    static thread_local std::vector<Px> dv, dv_bug;
+    static thread_local std::vector<Px> dv_buf, dv_bug_buf;
+    std::vector<Px>& dv = dv_buf;
+    std::vector<Px>& dv_bug = dv_bug_buf;
     const std::vector<Px>* img = &aa;
     const std::vector<Px>* img_bug = &aa_bug;
     int iw = aw;
@@ -287,7 +366,8 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
         dv.resize(static_cast<size_t>(dw) * dh);
         dv_bug.resize(fetch_bug ? dv.size() : 0);
         auto run = [&](const std::vector<Px>& src, std::vector<Px>& dst) {
-            for (int y = 0; y < dh; ++y)
+            for_rows(dh, [&](int y_lo, int y_hi) {
+            for (int y = y_lo; y < y_hi; ++y)
                 for (int x = 0; x < dw; ++x) {
                     const Px& l = src[static_cast<size_t>(y) * aw + x];
                     const Px& m = src[static_cast<size_t>(y) * aw + x + 1];
@@ -298,9 +378,10 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
                         o.g = static_cast<s32>(median3(static_cast<u32>(l.g), static_cast<u32>(m.g), static_cast<u32>(r.g)));
                         o.b = static_cast<s32>(median3(static_cast<u32>(l.b), static_cast<u32>(m.b), static_cast<u32>(r.b)));
                     }
-                    dst[static_cast<size_t>(y) * dw + x] = o;
-                }
-        };
+                                dst[static_cast<size_t>(y) * dw + x] = o;
+                            }
+                        });
+                    };
         run(aa, dv);
         if (fetch_bug) run(aa_bug, dv_bug);
         img = &dv;
@@ -316,29 +397,29 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
 
     // ---- 4/5. Scale, gamma
     const GammaTables& gt = gamma_tables();
-    const int vs = serrate ? vstart * 2 : vstart;
-    const int vr = serrate ? v_res * 2 : v_res;
-    for (int Y = 0; Y < out_lines; ++Y) {
+    const int vs = serrate ? vstart_n * 2 : vstart_n;
+    const int vr = serrate ? v_res_n * 2 : v_res_n;
+    for_rows(out_h, [&](int y_lo, int y_hi) {
+    for (int Y = y_lo; Y < y_hi; ++Y) {
+        // Output line L of the 480 (576), and which of its S rows.
+        const int L = Y / S, sub = Y - L * S;
         // Progressive frames fill both lines of each pair; interlaced ones
         // only the current field's, keeping the other field's.
         int line;
         if (serrate) {
-            if (static_cast<u32>(Y & 1) != field) continue;
-            line = Y;
+            if (static_cast<u32>(L & 1) != field) continue;
+            line = L;
         } else {
-            line = Y >> 1;
+            line = L >> 1;
         }
         u32* dst = exact_picture_.data() + static_cast<size_t>(Y) * out_w;
-        if (!serrate && (Y & 1)) { // the second showing of a progressive line
-            std::memcpy(dst, dst - out_w, sizeof(u32) * static_cast<size_t>(out_w));
-            continue;
-        }
+        if (!serrate && (L & 1)) continue; // the second showing of a progressive line (below)
         const int cy = line - vs;
         if (cy < 0 || cy >= vr) {
             std::fill(dst, dst + out_w, 0xFF000000u);
             continue;
         }
-        const int py = serrate ? cy >> 1 : cy;
+        const int py = (serrate ? cy >> 1 : cy) * S + sub;
         for (int X = 0; X < out_w; ++X) {
             if (X < h_start_clamp || X >= h_end_clamp) {
                 dst[X] = 0xFF000000u;
@@ -383,9 +464,16 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, const ExactRdp* 
                 const u32 n = noise(static_cast<u32>(cx), static_cast<u32>(py), frame);
                 for (int k = 0; k < 3; ++k) c[k] = std::min<s32>(c[k] + static_cast<s32>((n >> k) & 1), 0xff);
             }
-            dst[X] = 0xFF000000u | (static_cast<u32>(c[0] & 0xff) << 16) | (static_cast<u32>(c[1] & 0xff) << 8) |
-                     static_cast<u32>(c[2] & 0xff);
-        }
-    }
-    finish();
+                    dst[X] = 0xFF000000u | (static_cast<u32>(c[0] & 0xff) << 16) | (static_cast<u32>(c[1] & 0xff) << 8) |
+                             static_cast<u32>(c[2] & 0xff);
+                }
+            }
+            });
+            if (!serrate)
+                for (int Y = 0; Y < out_h; ++Y)
+                    if ((Y / S) & 1) {
+                        u32* dst = exact_picture_.data() + static_cast<size_t>(Y) * out_w;
+                        std::memcpy(dst, dst - static_cast<size_t>(out_w) * S, sizeof(u32) * static_cast<size_t>(out_w));
+                    }
+            finish();
 }

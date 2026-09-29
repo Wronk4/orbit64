@@ -247,7 +247,7 @@ u32 Emulator::skip_idle_loop(u32 budget) {
 void Emulator::render_frame(VideoFrame& out) {
     const u8* rdram = bus.get_rdram();
     const size_t rdram_size = bus.get_rdram_size();
-    // The bit-exact RDP draws at native resolution only.
+    // The bit-exact RDP has its own internal resolution.
     HiResRenderer* hr = rdp.exact_drawing() ? nullptr : rdp.hires();
     const VIScanout so = vi.scanout(rdram_size);
     if (rdp.exact_drawing() && vi_exact_) {
@@ -255,7 +255,7 @@ void Emulator::render_frame(VideoFrame& out) {
         // Bit-exact RDP output goes through the VI as the hardware scans it out.
         out.gpu.reset();
         vi.render_frame_exact(rdram, rdram_size, rdp.exact_rdp(), out.pixels, out.w, out.h);
-        out.scale = 1;
+        out.scale = static_cast<int>(rdp.exact_rdp()->scale());
     } else if (!hr || so.blank || so.lines > kFbLines || !hr->present(so, rdram, rdram_size, out)) {
         // Native resolution, or the VI shows memory the RDP never drew into
         // (a screen the CPU drew, or a 480-line screen, which the
@@ -337,10 +337,19 @@ template <class S> void Emulator::serialize(S& s) {
     if constexpr (S::loading) {
         if (s.at_end()) return;
     }
-    s.begin_section("RDPC");
-    rdp.serialize_commands(s);
-    s.end_section();
-}
+        s.begin_section("RDPC");
+        rdp.serialize_commands(s);
+        s.end_section();
+            // Later still: the exact VI's frame counter (its noise and the field it
+            // shows) and more of the bit-exact RDP's state.
+            if constexpr (S::loading) {
+                if (s.at_end()) return;
+            }
+            s.begin_section("EXCT");
+            vi.serialize_exact(s);
+            rdp.serialize_exact_extra(s);
+            s.end_section();
+        }
 
 std::vector<u8> Emulator::save_state() {
     savestate::Writer w;

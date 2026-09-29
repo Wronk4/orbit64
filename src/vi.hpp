@@ -45,8 +45,11 @@ public:
     // X/Y_SCALE, gamma and gamma dither, over the whole 640-wide picture
     // including its borders. `rdp` has the RDRAM's ninth bits (coverage);
     // without it they are what CPU writes leave. The picture comes out
-    // 640 x 480 (576 PAL), each line of a progressive frame shown twice.
-    void render_frame_exact(const u8* rdram, size_t rdram_size, const class ExactRdp* rdp, std::vector<u32>& out_pixels,
+    // 640 x 480 (576 PAL), each line of a progressive frame shown twice -
+    // times the RDP's internal resolution when it has one: the VI then
+    // scans the RDP's high-resolution copy of the frame buffer, with every
+    // position scaled up (as parallel-rdp does; no fetch bug).
+    void render_frame_exact(const u8* rdram, size_t rdram_size, class ExactRdp* rdp, std::vector<u32>& out_pixels,
                             int& out_w, int& out_h);
 
     u32 get_origin() const { return origin; }
@@ -62,6 +65,20 @@ public:
     template <class S> void serialize(S& s) {
         s(status, origin, width, v_intr, v_current, burst, v_sync, h_sync, leap, h_start, v_start, v_burst, x_scale,
           y_scale);
+    }
+    // render_frame_exact()'s state (a separate, later section): the frame
+    // counter and, after an interlaced frame, the picture the next field is
+    // woven into - at native resolution (every scale-th pixel), so a state
+    // doesn't depend on the internal resolution.
+    template <class S> void serialize_exact(S& s) {
+        s(exact_frames_);
+        std::vector<u32> woven;
+        if constexpr (!S::loading) woven = exact_native_picture();
+        s(woven);
+        if constexpr (S::loading) {
+            exact_woven_ = std::move(woven);
+            exact_serrate_ = false; // (until the next frame says)
+        }
     }
 
 private:
@@ -84,4 +101,8 @@ private:
     // frame counter (gamma dither noise, field parity).
     std::vector<u32> exact_picture_;
     u32 exact_frames_{0};
+    int exact_scale_{1};        // of exact_picture_
+    bool exact_serrate_{false}; // the last frame was interlaced
+    std::vector<u32> exact_woven_; // from a loaded state, for the next frame
+    std::vector<u32> exact_native_picture() const;
 };
