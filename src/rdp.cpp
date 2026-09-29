@@ -3138,6 +3138,7 @@ void RDP::flush_native() {
 }
 
 void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t, f32 dsdx, f32 dtdy, bool flip, u8* rdram, size_t rdram_size) {
+    ++tex_rect_count_;
     if (color_image_addr >= rdram_size) return;
     const DrawState& live = draw_state();
     HiResTarget* hr = hires_target(rdram, rdram_size);
@@ -3159,6 +3160,7 @@ void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f
 
 void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size) {
     stat_rast_called++;
+    ++triangle_count_;
     if (color_image_addr >= rdram_size) return;
 
     if (v0.w <= 0.0001f || v1.w <= 0.0001f || v2.w <= 0.0001f) return;

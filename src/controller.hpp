@@ -51,6 +51,10 @@ public:
     // Helper for command string input (e.g. "start", "a", "b", "up", etc.)
     void press_named_button(const std::string& name, bool pressed);
 
+    // How often the game has read the buttons (tools/game_probe.cpp).
+    u64 poll_count() const { return poll_count_; }
+    void note_poll() { ++poll_count_; }
+
 private:
     u16 buttons{0};
     s8 stick_x{0};
@@ -58,5 +62,6 @@ private:
     bool plugged_in{true};
     Accessory accessory_{Accessory::None};
     bool rumble_{false};
+    u64 poll_count_{0};
     TransferPak tpak_;
 };

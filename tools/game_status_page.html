@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbit64 game compatibility – Nintendo 64 games tested</title>
+<meta name="description" content="How far each Nintendo 64 game gets in the Orbit64 emulator: every game is started and played automatically, with screenshots and a status per game.">
+<meta name="theme-color" content="#14131f">
+<link rel="canonical" href="https://wronk4.github.io/orbit64/compatibility/">
+<link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Orbit64">
+<meta property="og:title" content="Orbit64 game compatibility">
+<meta property="og:description" content="Every Nintendo 64 game started and played automatically in Orbit64, with screenshots and a status per game.">
+<meta property="og:url" content="https://wronk4.github.io/orbit64/compatibility/">
+<meta property="og:image" content="https://wronk4.github.io/orbit64/og-image.png">
+<style>
+  :root {
+    --bg: #f6f5fb; --bg2: #eeecf8; --fg: #16151f; --muted: #575468; --card: #ffffff; --line: #e1dff0;
+    --accent: #5b47e0; --accent-fg: #ffffff; --accent-soft: rgba(91, 71, 224, 0.10);
+    --s-INGAME: #1f8a3b; --s-MENU: #2f6fd0; --s-INTRO_TITLE: #8a5cd6; --s-BLACK_SCREEN: #7d7a90; --s-CRASH_ERROR: #c62f2f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e0d15; --bg2: #15131f; --fg: #eceaf6; --muted: #a09db4; --card: #17151f; --line: #2a2738;
+      --accent: #8b7bff; --accent-fg: #0e0d15; --accent-soft: rgba(139, 123, 255, 0.14);
+      --s-INGAME: #3fbf62; --s-MENU: #5a9bf0; --s-INTRO_TITLE: #a585f5; --s-BLACK_SCREEN: #8d8aa3; --s-CRASH_ERROR: #f06060;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e0d15; --bg2: #15131f; --fg: #eceaf6; --muted: #a09db4; --card: #17151f; --line: #2a2738;
+    --accent: #8b7bff; --accent-fg: #0e0d15; --accent-soft: rgba(139, 123, 255, 0.14);
+    --s-INGAME: #3fbf62; --s-MENU: #5a9bf0; --s-INTRO_TITLE: #a585f5; --s-BLACK_SCREEN: #8d8aa3; --s-CRASH_ERROR: #f06060;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+
+  header.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  header.top .wrap { display: flex; align-items: center; gap: 16px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; color: var(--fg); text-decoration: none; }
+  .brand img { width: 32px; height: 32px; }
+  nav { margin-left: auto; display: flex; gap: 18px; font-size: 0.95rem; }
+  nav a { color: var(--muted); text-decoration: none; }
+  nav a:hover, nav a[aria-current] { color: var(--fg); }
+
+  .intro { padding: 40px 0 8px; }
+  h1 { font-size: clamp(1.8rem, 5vw, 2.6rem); line-height: 1.12; margin: 0 0 12px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .lead { color: var(--muted); margin: 0; max-width: 720px; }
+
+  .overview { display: grid; grid-template-columns: 240px 1fr; gap: 32px; align-items: center; padding: 24px 0 8px; }
+  @media (max-width: 640px) { .overview { grid-template-columns: 1fr; justify-items: center; gap: 16px; } }
+  .donut { position: relative; width: 240px; height: 240px; }
+  .donut svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .donut circle { fill: none; stroke-width: 34; cursor: pointer; transition: stroke-width .15s, opacity .15s; }
+  .donut circle:hover, .donut circle:focus-visible { stroke-width: 40; outline: none; }
+  .donut.dim circle:not(.on) { opacity: .25; }
+  .donut .mid { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; pointer-events: none; }
+  .donut .mid b { font-size: 2.3rem; line-height: 1; letter-spacing: -0.02em; }
+  .donut .mid span { color: var(--muted); font-size: 0.85rem; }
+  .legend { display: grid; gap: 6px; width: 100%; max-width: 520px; }
+  .legend button { display: grid; grid-template-columns: 14px 1fr auto 52px; gap: 10px; align-items: center; text-align: left;
+    width: 100%; border: 1px solid transparent; background: transparent; color: var(--fg); font: inherit; padding: 6px 10px;
+    border-radius: 8px; cursor: pointer; }
+  .legend button:hover { background: var(--bg2); }
+  .legend button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .legend .n { font-variant-numeric: tabular-nums; font-weight: 650; }
+  .legend .pct { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .legend .desc { color: var(--muted); font-size: 0.8rem; grid-column: 2 / 5; margin-top: -4px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex: none; }
+
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--muted); font-size: 0.88rem; padding: 8px 0 20px; }
+  .facts b { color: var(--fg); }
+  .notice { background: var(--accent-soft); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px;
+    font-size: 0.9rem; color: var(--muted); margin: 0 0 20px; }
+  .notice b { color: var(--fg); }
+  .notice.warn { border-color: var(--s-MENU); }
+  .tag.ok { color: var(--s-INGAME); border-color: var(--s-INGAME); background: transparent; margin-left: 0; }
+
+  .tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+  input[type=search], select { border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 8px;
+    padding: 8px 10px; font: inherit; }
+  input[type=search] { flex: 1 1 240px; min-width: 0; }
+  .count { color: var(--muted); font-size: 0.88rem; margin-left: auto; }
+  .clear { border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0; }
+
+  .pager { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: center; margin: 0 0 16px; }
+  .pager.bottom { margin: -30px 0 48px; }
+  .pager button { min-width: 38px; height: 38px; padding: 0 10px; border: 1px solid var(--line); background: var(--card);
+    color: var(--fg); border-radius: 8px; font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+  .pager button:hover:not(:disabled) { border-color: var(--accent); }
+  .pager button[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 650; }
+  .pager button:disabled { opacity: .4; cursor: default; }
+  .pager .gap { color: var(--muted); padding: 0 2px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; padding-bottom: 40px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .card .big { border: 0; padding: 0; background: #000; cursor: zoom-in; display: block; width: 100%; }
+  .card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #000; }
+  .strip { display: flex; gap: 2px; background: #000; }
+  .strip img { flex: 1; min-width: 0; cursor: zoom-in; }
+  .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 3px; }
+  .name { font-weight: 650; line-height: 1.3; }
+  .meta { color: var(--muted); font-size: 0.82rem; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; font-weight: 600; flex-wrap: wrap; }
+  .detail { color: var(--muted); font-weight: 400; }
+  .note { font-size: 0.82rem; color: var(--muted); }
+  .tag { font-size: 0.72rem; font-weight: 650; border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; margin-left: 4px;
+    color: var(--accent); background: var(--accent-soft); vertical-align: 1px; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; grid-column: 1 / -1; }
+  .how { border-top: 1px solid var(--line); padding: 28px 0 8px; color: var(--muted); font-size: 0.92rem; max-width: 820px; }
+  .how h2 { color: var(--fg); font-size: 1.15rem; margin: 0 0 8px; }
+  .how li { margin: 4px 0; }
+  .how b { color: var(--fg); }
+
+  dialog { border: 0; padding: 0; background: transparent; max-width: min(96vw, 960px); }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.8); }
+  dialog img { width: 100%; image-rendering: pixelated; display: block; border-radius: 6px; }
+  dialog p { color: #fff; margin: 8px 0 0; text-align: center; }
+
+  footer { border-top: 1px solid var(--line); padding: 20px 0 36px; color: var(--muted); font-size: 0.85rem; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+  footer img { vertical-align: middle; margin-right: 6px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <a class="brand" href="../"><img src="logo.svg" alt="" width="32" height="32">Orbit64</a>
+  <nav aria-label="Sections">
+    <a href="../">Home</a>
+    <a href="./" aria-current="page">Compatibility</a>
+    <a href="https://github.com/Wronk4/orbit64">GitHub</a>
+  </nav>
+</div></header>
+
+<div class="wrap">
+  <section class="intro">
+    <h1>Game <span>compatibility</span></h1>
+    <p class="lead">Every game was started in Orbit64 and played automatically. The tester presses A or START only when the game
+      reacts to them, and finally checks whether the stick moves the character or the camera.</p>
+  </section>
+
+  <section class="overview" aria-label="Summary">
+    <div class="donut" id="donut">
+      <svg viewBox="0 0 240 240" role="img" aria-label="Share of games per status" id="donutsvg"></svg>
+      <div class="mid"><b id="midn">0</b><span id="midl">games</span></div>
+    </div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <div class="facts" id="facts"></div>
+  <p class="notice warn" role="note"><b>These results are not 100% certain.</b> Every game is played by an automatic tester, so it can be wrong:
+    a game shown as <i>Menu</i> or <i>Intro / title</i> may work fine and the tester just didn't find its way further, and the other way round.
+    <b>Menu</b> and <b>Intro / title</b> do not mean the game is broken: in many of those games the emulator works fine and the tester
+    simply doesn't reach gameplay (it can't pick a mode or a character, needs a specific button sequence, a save, or a longer wait).
+    The results are still being checked by hand and will be corrected; games checked by hand are marked <span class="tag ok">checked</span>.
+    If you know a game's real state, please <a href="https://github.com/Wronk4/orbit64/issues">tell us</a>.</p>
+  <p class="notice" id="notice"></p>
+
+  <div class="tools">
+    <input type="search" id="q" placeholder="Search games" aria-label="Search games">
+    <select id="sort" aria-label="Sort">
+      <option value="name">Sort: name</option>
+      <option value="status">Sort: best status first</option>
+    </select>
+    <select id="per" aria-label="Games per page">
+      <option value="12">12 per page</option>
+      <option value="24">24 per page</option>
+      <option value="48">48 per page</option>
+      <option value="96">96 per page</option>
+    </select>
+    <span class="count"><span id="count"></span> <button class="clear" id="clear" hidden>show all</button></span>
+  </div>
+  <nav class="pager" id="pagerTop" aria-label="Pages"></nav>
+  <main class="grid" id="grid"></main>
+  <nav class="pager bottom" id="pagerBottom" aria-label="Pages"></nav>
+
+  <section class="how">
+    <h2>How the status is decided</h2>
+    <p>The tester runs each game with save states: from the same moment it tries the game without input, with A, with START
+      and with the stick held, and compares the pictures. A game that reacts to a button gets that button; a game that doesn't react
+      is left alone (logos, cut-scenes, loading). Then it looks at the last seconds. The automatic verdict is then compared with the
+      screenshots by eye and corrected where it is wrong; this is still in progress, so many games are not checked yet.</p>
+    <ul>
+      <li><b>In-game</b> – the stick moves the character or the camera: gameplay.</li>
+      <li><b>Menu</b> – the game reacts to buttons or a cursor, but the tester didn't get into gameplay. The game may well work.</li>
+      <li><b>Intro / title</b> – logos, intro, title screen or demo, no control yet. The game may well work.</li>
+      <li><b>Black screen</b> – nothing (or only black) is shown.</li>
+      <li><b>Crash / error</b> – the emulator crashed or timed out, the game froze, or the picture is broken.</li>
+      <li><b>HLE / LLE</b> – HLE is the default, fast emulation. LLE runs the game's own RSP microcode with a bit-exact RDP:
+        slower, more compatible. A game is tried in HLE first, in LLE only when HLE doesn't get into the game.</li>
+    </ul>
+    <p>"In-game" is not "perfect": glitches, missing effects and slowdowns are not measured here. The run is short (about a minute
+      of game time), so a game that needs a long intro, a choice in a menu or a specific button sequence to reach gameplay can show up as
+      Menu or Intro even though it runs fine. Only <b>Black screen</b> and <b>Crash / error</b> point to a problem in the emulator with any
+      likelihood, and even those are checked by hand before they are treated as such.</p>
+  </section>
+</div>
+
+<footer><div class="wrap">
+  <span><img src="logo.svg" alt="" width="22" height="22">Orbit64</span>
+  <a href="https://github.com/Wronk4/orbit64">Source code</a>
+  <a href="https://github.com/Wronk4/orbit64/issues">Report a bug</a>
+  <span>Not affiliated with or endorsed by Nintendo. Nintendo 64 is a trademark of Nintendo.</span>
+</div></footer>
+
+<dialog id="dlg"><img id="dlgimg" alt=""><p id="dlgcap"></p></dialog>
+<script>
+const DATA = /*DATA*/;
+const ORDER = ["INGAME", "MENU", "INTRO_TITLE", "BLACK_SCREEN", "CRASH_ERROR"];
+const LABEL = {INGAME: "In-game", MENU: "Menu", INTRO_TITLE: "Intro / title", BLACK_SCREEN: "Black screen", CRASH_ERROR: "Crash / error"};
+const DESC = {INGAME: "Gameplay reached: the stick moves the character or camera",
+  MENU: "Menus that react to input (the game may work fine)", INTRO_TITLE: "Logos, intro or title screen (the game may work fine)",
+  BLACK_SCREEN: "Nothing is drawn", CRASH_ERROR: "Crash, freeze or broken picture"};
+const games = DATA.games, total = games.length, counts = DATA.counts;
+const col = s => `var(--s-${s})`;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const $ = id => document.getElementById(id);
+let active = null, query = "", sort = "name", page = 1, perPage = 24;   // active: one status, or null for all
+
+// The state lives in the address (#s=INGAME&q=mario&o=status&p=2&n=48): back/forward and shared links work.
+function readHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  active = ORDER.includes(h.get("s")) ? h.get("s") : null;
+  query = (h.get("q") || "").toLowerCase();
+  sort = h.get("o") === "status" ? "status" : "name";
+  perPage = [12, 24, 48, 96].includes(+h.get("n")) ? +h.get("n") : 24;
+  page = Math.max(1, +h.get("p") || 1);
+  $("q").value = h.get("q") || ""; $("sort").value = sort; $("per").value = perPage;
+}
+function writeHash() {
+  const h = new URLSearchParams();
+  if (active) h.set("s", active);
+  if (query) h.set("q", query);
+  if (sort !== "name") h.set("o", sort);
+  if (perPage !== 24) h.set("n", perPage);
+  if (page > 1) h.set("p", page);
+  const t = h.toString();
+  history.replaceState(null, "", t ? "#" + t : location.pathname + location.search);
+}
+
+// Donut: one circle per status, drawn with stroke-dasharray.
+const R = 91, C = 2 * Math.PI * R;
+let off = 0, svg = "";
+ORDER.forEach(s => {
+  const len = C * counts[s] / total;
+  if (!counts[s]) return;
+  svg += `<circle data-s="${s}" cx="120" cy="120" r="${R}" stroke="${col(s)}" stroke-dasharray="${Math.max(len - 1.5, 0)} ${C}"
+    stroke-dashoffset="${-off}" tabindex="0" role="button" aria-label="${LABEL[s]}: ${counts[s]}"><title>${LABEL[s]}: ${counts[s]}</title></circle>`;
+  off += len;
+});
+$("donutsvg").innerHTML = svg;
+$("legend").innerHTML = ORDER.map(s => `<button data-s="${s}" aria-pressed="false">
+  <span class="dot" style="background:${col(s)}"></span><span>${LABEL[s]}</span><span class="n">${counts[s]}</span>
+  <span class="pct">${(100 * counts[s] / total).toFixed(0)}%</span><span class="desc">${DESC[s]}</span></button>`).join("");
+
+const pick = s => { active = active === s ? null : s; page = 1; render(); };
+document.querySelectorAll("[data-s]").forEach(e => {
+  e.addEventListener("click", () => pick(e.dataset.s));
+  e.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(e.dataset.s); } });
+});
+$("clear").onclick = () => { active = null; query = ""; page = 1; $("q").value = ""; render(); };
+$("q").oninput = e => { query = e.target.value.trim().toLowerCase(); page = 1; render(); };
+$("sort").onchange = e => { sort = e.target.value; page = 1; render(); };
+$("per").onchange = e => { perPage = +e.target.value; page = 1; render(); };
+
+$("facts").innerHTML = [
+  `<span><b>${total}</b> games tested</span>`,
+  `<span><b>${counts.INGAME}</b> reach gameplay (${(100 * counts.INGAME / total).toFixed(0)}%)</span>`,
+  DATA.lle_gain ? `<span><b>${DATA.lle_gain}</b> of them only with LLE</span>` : "",
+  `<span>updated <b>${DATA.generated}</b>${DATA.build ? ` · build <b>${esc(DATA.build)}</b>` : ""}</span>`
+].join("");
+$("notice").innerHTML = DATA.lle_tried
+  ? `Results are for the default <b>HLE</b> mode. <b>${DATA.lle_tried}</b> games that did not reach gameplay were also tried in LLE so far (more will follow); the better result is shown, tagged <span class="tag">LLE</span> when it needs LLE.`
+  : `Results are for the default <b>HLE</b> mode. LLE (bit-exact RDP) results are not included yet and will be added; some games listed as failing here may work there.`;
+
+const rank = s => ORDER.indexOf(s);
+function card(g, i) {
+  const [main, ...rest] = g.shots;
+  const meta = [g.region, g.version].filter(Boolean).join(" · ");
+  const lle = g.mode === "LLE";
+  const tip = Object.entries(g.modes).map(([m, v]) => `${m}: ${LABEL[v.status]}`).join(", ");
+  return `<article class="card">
+    ${main ? `<button class="big" data-i="${i}" data-k="0" aria-label="Enlarge screenshot"><img loading="lazy" src="${main.src}" alt="${esc(g.name)} – ${esc(main.label)}"></button>` : ""}
+    ${rest.length ? `<div class="strip">${rest.map((s, k) => `<img loading="lazy" src="${s.src}" alt="${esc(g.name)} – ${esc(s.label)}" title="${esc(s.label)}" data-i="${i}" data-k="${k + 1}">`).join("")}</div>` : ""}
+    <div class="body">
+      <div class="name">${esc(g.name)}${lle ? ` <span class="tag" title="Best result with the low-level RSP/RDP (${esc(tip)})">LLE</span>` : ""}${g.source === "review" ? ` <span class="tag ok" title="Status checked by hand">checked</span>` : ""}</div>
+      ${meta ? `<div class="meta">${esc(meta)}</div>` : ""}
+      <div class="status"><span class="dot" style="background:${col(g.status)}"></span>${LABEL[g.status]}<span class="detail">· ${esc(g.detail)}</span></div>
+      ${g.note ? `<div class="note">${esc(g.note)}</div>` : ""}
+    </div></article>`;
+}
+
+function render() {
+  document.querySelectorAll(".legend button").forEach(b => b.setAttribute("aria-pressed", b.dataset.s === active));
+  $("donut").classList.toggle("dim", !!active);
+  document.querySelectorAll("#donutsvg circle").forEach(c => c.classList.toggle("on", c.dataset.s === active));
+  $("midn").textContent = active ? counts[active] : total;
+  $("midl").textContent = active ? LABEL[active] : "games";
+  let list = games.map((g, i) => [g, i]).filter(([g]) => (!active || g.status === active) &&
+    (!query || (g.name + " " + g.internal + " " + g.files.join(" ")).toLowerCase().includes(query)));
+  if (sort === "status") list.sort((a, b) => rank(a[0].status) - rank(b[0].status) || a[0].name.localeCompare(b[0].name));
+  const pages = Math.max(1, Math.ceil(list.length / perPage));
+  page = Math.min(page, pages);
+  const from = (page - 1) * perPage, shown = list.slice(from, from + perPage);
+  $("grid").innerHTML = shown.length ? shown.map(([g, i]) => card(g, i)).join("") : `<p class="empty">No games match.</p>`;
+  $("count").textContent = list.length ? `${from + 1}–${from + shown.length} of ${list.length}` + (list.length < total ? ` (${total} in total)` : "") : `0 of ${total}`;
+  $("clear").hidden = !active && !query;
+  renderPager(pages);
+  writeHash();
+}
+
+// « ‹ 1 … 4 [5] 6 … 12 › »
+function renderPager(pages) {
+  const nums = new Set([1, pages, page - 1, page, page + 1]);
+  if (page <= 3) [2, 3, 4].forEach(n => nums.add(n));
+  if (page >= pages - 2) [pages - 1, pages - 2, pages - 3].forEach(n => nums.add(n));
+  let html = `<button data-p="${page - 1}" ${page <= 1 ? "disabled" : ""} aria-label="Previous page">‹ Prev</button>`, last = 0;
+  [...nums].filter(n => n >= 1 && n <= pages).sort((a, b) => a - b).forEach(n => {
+    if (n - last > 1) html += `<span class="gap">…</span>`;
+    html += `<button data-p="${n}" ${n === page ? 'aria-current="page"' : ""} aria-label="Page ${n}">${n}</button>`;
+    last = n;
+  });
+  html += `<button data-p="${page + 1}" ${page >= pages ? "disabled" : ""} aria-label="Next page">Next ›</button>`;
+  const on = pages > 1;
+  ["pagerTop", "pagerBottom"].forEach(id => { $(id).innerHTML = on ? html : ""; $(id).hidden = !on; });
+}
+function goto(n, scroll) {
+  page = n; render();
+  if (scroll) $("grid").scrollIntoView({block: "start", behavior: "smooth"});
+}
+["pagerTop", "pagerBottom"].forEach(id => $(id).addEventListener("click", e => {
+  const b = e.target.closest("button[data-p]");
+  if (b && !b.disabled) goto(+b.dataset.p, id === "pagerBottom");
+}));
+window.addEventListener("hashchange", () => { readHash(); render(); });
+readHash();
+render();
+
+const dlg = $("dlg");
+$("grid").addEventListener("click", e => {
+  const t = e.target.closest("[data-i]");
+  if (!t) return;
+  const g = games[t.dataset.i], s = g.shots[t.dataset.k];
+  $("dlgimg").src = s.src;
+  $("dlgcap").textContent = `${g.name} – ${s.label}`;
+  dlg.showModal();
+});
+dlg.addEventListener("click", () => dlg.close());
+</script>
+</body>
+</html>

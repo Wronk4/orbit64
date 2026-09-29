@@ -105,6 +105,9 @@ public:
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
     bool has_processed_display_list() const { return display_list_count != 0; }
     u64 get_display_list_count() const { return display_list_count; }
+    // Primitives sent to the rasterizer so far (tools/game_probe.cpp).
+    u64 get_triangle_count() const { return triangle_count_; }
+    u64 get_tex_rect_count() const { return tex_rect_count_; }
     u32 get_segment(int index) const { return segments[index & 15]; }
 
     // Debugger geometry capture (see CapturedMesh).
@@ -359,6 +362,8 @@ private:
     MicrocodeType ucode_type{MicrocodeType::Auto};
     MicrocodeType current_ucode_active{MicrocodeType::Fast3D};
     u64 display_list_count{0};
+    u64 triangle_count_{0};
+    u64 tex_rect_count_{0};
     u32 rdp_half1{0};
     u32 rdp_half2{0};
     // Fast3D/F3DEX gSPForceMatrix: the model-view-projection matrix arrives in

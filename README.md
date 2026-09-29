@@ -88,6 +88,27 @@ With a big library, `python tools/test_set.py` picks a small test set out of a f
 that doesn't simply run, the slowest ones, the noisiest ones, one per microcode, CIC and save type, and a core of games
 whose fixes must not regress - into `tools/test_set.txt`; `compat_sweep.py --list tools/test_set.txt` runs just those.
 
+### Game status page
+
+`python tools/game_status.py` answers a different question: how far does each game get. It needs `make game_probe`
+(`bin/game_probe`), which plays a ROM by itself. From the same save state it tries the game with no input, with A, with
+START and with the stick held, and compares the pictures: whatever changes is the game reacting to that input, so it
+presses A or START only where the game reacts, moves the cursor of a menu before A, and finally checks whether the stick
+moves the character or the camera. Every game ends up with one status - `INGAME`, `MENU`, `INTRO_TITLE`, `BLACK_SCREEN`
+or `CRASH_ERROR` - plus a finer detail (`freeze`, `playable`, ...).
+
+Each game runs on the high-level RSP first (`--rsp hle`); the ones that don't reach gameplay, and did start a graphics
+task, are run again on the low-level RSP and RDP (`--rsp lle-gfx`), and the better result counts. Identical dumps
+(same CRCs) run once. Interrupting with Ctrl+C is safe: run the same command again and it continues where it stopped
+(`--fresh` starts over, `--redo MENU,INTRO_TITLE` or `--redo CUT` repeat the games the probe could not get through, `--hle-only`
+skips the low-level pass). `--report-only` rebuilds the reports from the saved runs.
+
+The verdict is automatic and can be wrong (a game that needs a choice in a menu may stay `MENU`), so it can be corrected by
+hand in `tools/game_status_review.json`, keyed by the ROM's CRCs, and such games are marked "checked" on the page.
+`--publish` writes the result page to `site/compatibility/`, which GitHub Pages publishes at
+<https://wronk4.github.io/orbit64/compatibility/>; without it the page goes to `test_output/game_status/web/`, next to
+`review/` (screenshots and verdicts, ten games per sheet) and `results.json`.
+
 ## RSP
 
 The graphics and audio tasks of libultra games are emulated at a high level (`src/rdp.cpp`, `src/ahle.*`). Every other

@@ -102,6 +102,17 @@ $(BUILD_DIR)/tools/audio_check.o: tools/audio_check.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
 
+# Plays a ROM headless and records how it reacts to input (tools/game_probe.cpp, tools/game_status.py).
+GAME_PROBE_TARGET := $(BIN_DIR)/game_probe$(EXE)
+.PHONY: game_probe
+game_probe: $(GAME_PROBE_TARGET)
+$(GAME_PROBE_TARGET): $(BUILD_DIR)/tools/game_probe.o $(CHECK_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ -lpthread
+$(BUILD_DIR)/tools/game_probe.o: tools/game_probe.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
+DEPS += $(BUILD_DIR)/tools/game_probe.d
+
 # Console tools without SDL keep their own main().
 $(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o \
 $(BUILD_DIR)/tools/savestate_check.o $(BUILD_DIR)/tools/rsp_test.o: CXXFLAGS += -Umain

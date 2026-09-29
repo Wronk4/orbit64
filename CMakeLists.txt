@@ -118,6 +118,12 @@ add_executable(savestate_check EXCLUDE_FROM_ALL tools/savestate_check.cpp ${CHEC
 target_include_directories(savestate_check PRIVATE src third_party/stb)
 target_link_libraries(savestate_check PRIVATE Threads::Threads)
 
+# Plays a ROM headless and records how it reacts to input (tools/game_probe.cpp,
+# driven by tools/game_status.py), not built by default.
+add_executable(game_probe EXCLUDE_FROM_ALL tools/game_probe.cpp ${CHECK_SOURCES})
+target_include_directories(game_probe PRIVATE src third_party/stb)
+target_link_libraries(game_probe PRIVATE Threads::Threads)
+
 # GPU renderer vs CPU renderer, frame by frame (tools/gpu_check.cpp), not built by default.
 add_executable(gpu_check EXCLUDE_FROM_ALL tools/gpu_check.cpp ${CHECK_SOURCES} ${GPU_SOURCES})
 target_include_directories(gpu_check PRIVATE src third_party/stb)

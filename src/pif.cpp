@@ -109,6 +109,7 @@ void PIF::process_commands(Controller controllers[4], Cartridge& cartridge) {
                         }
                     } else if (sub_cmd == 0x01) {
                         // Read controller status
+                        ctrl.note_poll();
                         if (idx + tx_len + 3 < 64) {
                             u16 btn = ctrl.get_buttons();
                             ram[idx + tx_len + 0] = static_cast<u8>((btn >> 8) & 0xFF);

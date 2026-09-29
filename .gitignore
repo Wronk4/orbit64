@@ -31,3 +31,6 @@ bin_*/
 
 # Local reference material, e.g. the Nintendo 64 SDK (proprietary, never committed)
 reference/
+
+# Python bytecode of the tools
+__pycache__/
