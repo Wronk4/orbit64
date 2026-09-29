@@ -446,10 +446,14 @@ def web_report(results, outdir, args):
         shots = []
         for s in web_shots(r):
             dst = f"{r['slug']}__{s[:-4]}.webp"
+            full = f"{r['slug']}__{s[:-4]}_full.webp"
             im = Image.open(os.path.join(r["dir"], s)).convert("RGB")
+            big = im.copy()
+            big.thumbnail((640, 480))  # for the screenshot viewer
+            big.save(os.path.join(img, full), "WEBP", quality=82, method=6)
             im.thumbnail((256, 192))
             im.save(os.path.join(img, dst), "WEBP", quality=70, method=6)
-            shots.append({"src": "img/" + dst, "label": shot_label(s)})
+            shots.append({"src": "img/" + dst, "full": "img/" + full, "label": shot_label(s)})
         games.append({"name": r["name"], "region": r["region"], "version": r["version"], "crc": r["crc"],
                       "internal": r["internal"], "files": [os.path.basename(f) for f in r["files"]],
                       "status": r["status"], "detail": r["detail"], "note": r["note"], "source": r["source"],
@@ -465,7 +469,7 @@ def web_report(results, outdir, args):
     with open(PAGE_FILE, encoding="utf-8") as f:
         page = f.read()
     with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
-        f.write(page.replace("/*DATA*/", text.replace("</", "<\/")))
+        f.write(page.replace("/*DATA*/", text.replace("</", "<\\/")))
     print(f"page: {d} ({sum(os.path.getsize(os.path.join(img, x)) for x in os.listdir(img)) / 1e6:.1f} MB of images)")
 
 

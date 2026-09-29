@@ -117,10 +117,44 @@
   .how li { margin: 4px 0; }
   .how b { color: var(--fg); }
 
-  dialog { border: 0; padding: 0; background: transparent; max-width: min(96vw, 960px); }
-  dialog::backdrop { background: rgba(0, 0, 0, 0.8); }
-  dialog img { width: 100%; image-rendering: pixelated; display: block; border-radius: 6px; }
-  dialog p { color: #fff; margin: 8px 0 0; text-align: center; }
+  /* Screenshot viewer: the game's name on top, the picture as large as fits, arrows and thumbnails to step through. */
+  html.lb-open { overflow: hidden; }
+  dialog.lb { width: 100vw; height: 100vh; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
+    background: rgba(9, 8, 16, 0.96); color: #eceaf6; }
+  dialog.lb[open] { display: flex; flex-direction: column; }
+  dialog.lb::backdrop { background: rgba(0, 0, 0, 0.6); }
+  .lb-top { display: flex; align-items: center; gap: 16px; padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  .lb-title { min-width: 0; flex: 1; }
+  .lb-name { font-size: clamp(1.1rem, 3vw, 1.45rem); font-weight: 700; letter-spacing: -0.01em; line-height: 1.25;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lb-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: #a09db4; font-size: 0.88rem; margin-top: 2px; }
+  .lb-meta .st { display: inline-flex; align-items: center; gap: 6px; color: #eceaf6; font-weight: 600; }
+  .lb-meta .tag { margin-left: 0; }
+  .lb-count { color: #a09db4; font-variant-numeric: tabular-nums; font-size: 0.9rem; flex: none; }
+  .lb-x { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 0; background: rgba(255, 255, 255, 0.1); color: #fff;
+    font-size: 1.5rem; line-height: 1; cursor: pointer; }
+  .lb-x:hover, .lb-nav:hover { background: rgba(255, 255, 255, 0.2); }
+  .lb-stage { flex: 1; min-height: 0; position: relative; display: flex; align-items: center; justify-content: center; padding: 16px 72px; }
+  .lb-stage figure { margin: 0; flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .lb-stage img { display: block; width: min(100%, calc((100dvh - 250px) * 4 / 3), 1280px); aspect-ratio: 4 / 3; object-fit: contain;
+    image-rendering: pixelated; background: #000; border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+  .lb-stage figcaption { color: #a09db4; font-size: 0.92rem; }
+  .lb-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 48px; height: 48px; border-radius: 50%; border: 0;
+    background: rgba(255, 255, 255, 0.1); color: #fff; font-size: 1.9rem; line-height: 1; cursor: pointer; }
+  .lb-nav.prev { left: 14px; } .lb-nav.next { right: 14px; }
+  .lb-nav:focus-visible, .lb-x:focus-visible, .lb-thumbs button:focus-visible { outline: 2px solid #8b7bff; outline-offset: 2px; }
+  .lb-thumbs { display: flex; justify-content: center; gap: 8px; padding: 0 16px 16px; overflow-x: auto; }
+  .lb-thumbs button { flex: none; padding: 0; border: 2px solid transparent; border-radius: 6px; background: #000; cursor: pointer;
+    opacity: 0.55; transition: opacity .15s; }
+  .lb-thumbs button:hover { opacity: 0.85; }
+  .lb-thumbs button[aria-current="true"] { opacity: 1; border-color: #8b7bff; }
+  .lb-thumbs img { display: block; width: 88px; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 4px; }
+  @media (max-width: 640px) {
+    .lb-stage { padding: 12px 8px; }
+    .lb-nav { width: 40px; height: 40px; font-size: 1.6rem; background: rgba(0, 0, 0, 0.55); }
+    .lb-nav.prev { left: 6px; } .lb-nav.next { right: 6px; }
+    .lb-thumbs img { width: 64px; }
+  }
 
   footer { border-top: 1px solid var(--line); padding: 20px 0 36px; color: var(--muted); font-size: 0.85rem; }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
@@ -209,7 +243,19 @@
   <span>Not affiliated with or endorsed by Nintendo. Nintendo 64 is a trademark of Nintendo.</span>
 </div></footer>
 
-<dialog id="dlg"><img id="dlgimg" alt=""><p id="dlgcap"></p></dialog>
+<dialog id="dlg" class="lb" aria-labelledby="lbname">
+  <div class="lb-top">
+    <div class="lb-title"><div class="lb-name" id="lbname"></div><div class="lb-meta" id="lbmeta"></div></div>
+    <span class="lb-count" id="lbcount"></span>
+    <button class="lb-x" id="lbclose" aria-label="Close">×</button>
+  </div>
+  <div class="lb-stage" id="lbstage">
+    <button class="lb-nav prev" id="lbprev" aria-label="Previous screenshot">‹</button>
+    <figure><img id="lbimg" alt=""><figcaption id="lbcap"></figcaption></figure>
+    <button class="lb-nav next" id="lbnext" aria-label="Next screenshot">›</button>
+  </div>
+  <div class="lb-thumbs" id="lbthumbs"></div>
+</dialog>
 <script>
 const DATA = /*DATA*/;
 const ORDER = ["INGAME", "MENU", "INTRO_TITLE", "BLACK_SCREEN", "CRASH_ERROR"];
@@ -342,16 +388,61 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
 readHash();
 render();
 
+// Screenshot viewer. ← / → (or the arrows, the thumbnails, a swipe) step through the game's pictures; Esc closes.
 const dlg = $("dlg");
+let lbGame = null, lbShot = 0;
+const big = s => s.full || s.src;   // a full-size picture when the page has one, else the thumbnail scaled up
+function lbShow(k) {
+  const shots = lbGame.shots, n = shots.length;
+  lbShot = (k + n) % n;
+  const s = shots[lbShot];
+  $("lbimg").src = big(s);
+  $("lbimg").alt = `${lbGame.name} – ${s.label}`;
+  $("lbcap").textContent = s.label;
+  $("lbcount").textContent = n > 1 ? `${lbShot + 1} / ${n}` : "";
+  $("lbthumbs").querySelectorAll("button").forEach((b, j) => b.setAttribute("aria-current", j === lbShot));
+  shots.forEach((x, j) => { if (j !== lbShot) new Image().src = big(x); });   // the next step shows at once
+}
+function lbOpen(g, k) {
+  lbGame = g;
+  const meta = [g.region, g.version].filter(Boolean).join(" · ");
+  $("lbname").textContent = g.name;
+  $("lbname").title = g.name;
+  $("lbmeta").innerHTML = `<span class="st"><span class="dot" style="background:${col(g.status)}"></span>${LABEL[g.status]}</span>` +
+    (g.detail ? `<span>${esc(g.detail)}</span>` : "") + (meta ? `<span>${esc(meta)}</span>` : "") +
+    (g.mode === "LLE" ? `<span class="tag">LLE</span>` : "") + (g.source === "review" ? `<span class="tag ok">checked</span>` : "");
+  const many = g.shots.length > 1;
+  $("lbprev").hidden = $("lbnext").hidden = $("lbthumbs").hidden = !many;
+  $("lbthumbs").innerHTML = many ? g.shots.map((s, j) =>
+    `<button data-k="${j}" aria-label="${esc(s.label)}" title="${esc(s.label)}"><img src="${s.src}" alt=""></button>`).join("") : "";
+  lbShow(k);
+  document.documentElement.classList.add("lb-open");
+  if (!dlg.open) dlg.showModal();
+}
 $("grid").addEventListener("click", e => {
   const t = e.target.closest("[data-i]");
-  if (!t) return;
-  const g = games[t.dataset.i], s = g.shots[t.dataset.k];
-  $("dlgimg").src = s.src;
-  $("dlgcap").textContent = `${g.name} – ${s.label}`;
-  dlg.showModal();
+  if (t) lbOpen(games[t.dataset.i], +t.dataset.k);
 });
-dlg.addEventListener("click", () => dlg.close());
+$("lbprev").onclick = () => lbShow(lbShot - 1);
+$("lbnext").onclick = () => lbShow(lbShot + 1);
+$("lbclose").onclick = () => dlg.close();
+$("lbthumbs").addEventListener("click", e => { const b = e.target.closest("button[data-k]"); if (b) lbShow(+b.dataset.k); });
+// A click on the dark area around the picture closes it, like the × does.
+dlg.addEventListener("click", e => { if (e.target === dlg || e.target === $("lbstage")) dlg.close(); });
+dlg.addEventListener("close", () => document.documentElement.classList.remove("lb-open"));
+dlg.addEventListener("keydown", e => {
+  if (e.repeat && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { e.preventDefault(); return; }   // one step per press
+  if (e.key === "ArrowLeft") { e.preventDefault(); lbShow(lbShot - 1); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); lbShow(lbShot + 1); }
+});
+let touchX = null;
+$("lbstage").addEventListener("touchstart", e => { touchX = e.touches.length === 1 ? e.touches[0].clientX : null; }, {passive: true});
+$("lbstage").addEventListener("touchend", e => {
+  if (touchX === null || lbGame.shots.length < 2) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  if (Math.abs(dx) > 50) lbShow(lbShot + (dx < 0 ? 1 : -1));
+  touchX = null;
+});
 </script>
 </body>
 </html>
