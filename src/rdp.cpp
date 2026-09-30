@@ -255,7 +255,9 @@ void RDP::reset() {
     combine_mode_set = false;
 
     other_mode_l = 0x00000030; // Z_CMP | Z_UPD enabled by default
-    other_mode_h = 0;
+    // What the microcodes start with (their G_RDPSETOTHERMODE 0xEF080CFF):
+    // RGB and alpha dither off, among others games may never set.
+    other_mode_h = 0x00080CFF;
 
     vp_scale_x = 160.0f; vp_scale_y = 120.0f; vp_scale_z = 511.5f;
     vp_trans_x = 160.0f; vp_trans_y = 120.0f; vp_trans_z = 511.5f;

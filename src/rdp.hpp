@@ -348,7 +348,7 @@ private:
 
     // Other modes (render mode, z-compare, alpha compare, cycle type)
     u32 other_mode_l{0x00000030}; // Default Z_CMP | Z_UPD
-    u32 other_mode_h{0};
+    u32 other_mode_h{0x00080CFF};
 
     // Lighting state
     struct Light {
