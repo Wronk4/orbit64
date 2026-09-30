@@ -535,12 +535,22 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
         float diw_dx = dw0x * iw0 + dw1x * iw1 + dw2x * iw2;
         float duw_dx = dw0x * u0 + dw1x * u1 + dw2x * u2, dvw_dx = dw0x * v0 + dw1x * v1 + dw2x * v2;
         if ((D[sb + GPU_ST_LOD] & GPU_LOD_DOLOD) != 0u) {
-            float dw0y = (x2 - x1) * inv_area, dw1y = (x0 - x2) * inv_area, dw2y = -dw0y - dw1y;
-            float iwx = iw + diw_dx, iwy = iw + (dw0y * iw0 + dw1y * iw1 + dw2y * iw2);
-            float rx = iwx != 0.0 ? 1.0 / iwx : 1.0, ry = iwy != 0.0 ? 1.0 / iwy : 1.0;
-            float delta = max(max(abs((uw + duw_dx) * rx - u), abs((vw + dvw_dx) * rx - v)),
-                              max(abs((uw + (dw0y * u0 + dw1y * u1 + dw2y * u2)) * ry - u),
-                                  abs((vw + (dw0y * v0 + dw1y * v1 + dw2y * v2)) * ry - v)));
+            float delta;
+            if ((flags & GPU_ST_TWO_CYCLE) != 0u) {
+                float dw0y = (x2 - x1) * inv_area, dw1y = (x0 - x2) * inv_area, dw2y = -dw0y - dw1y;
+                float iwx = iw + diw_dx, iwy = iw + (dw0y * iw0 + dw1y * iw1 + dw2y * iw2);
+                float rx = iwx != 0.0 ? 1.0 / iwx : 1.0, ry = iwy != 0.0 ? 1.0 / iwy : 1.0;
+                delta = max(max(abs((uw + duw_dx) * rx - u), abs((vw + dvw_dx) * rx - v)),
+                            max(abs((uw + (dw0y * u0 + dw1y * u1 + dw2y * u2)) * ry - u),
+                                abs((vw + (dw0y * v0 + dw1y * v1 + dw2y * v2)) * ry - v)));
+            } else {
+                // 1-cycle mode: the next two pixels along the row (raster::triangle()).
+                float d1 = fword(pb + 25u), d2 = 2.0 * d1;
+                float i1 = iw + diw_dx * d1, i2 = iw + diw_dx * d2;
+                float r1 = i1 != 0.0 ? 1.0 / i1 : 1.0, r2 = i2 != 0.0 ? 1.0 / i2 : 1.0;
+                delta = max(abs((uw + duw_dx * d2) * r2 - (uw + duw_dx * d1) * r1),
+                            abs((vw + dvw_dx * d2) * r2 - (vw + dvw_dx * d1) * r1));
+            }
             lod_tiles(sb, delta, tile0, tile0, tile1, lod_frac);
         }
         if ((flags & GPU_ST_COMBINED) != 0u) {

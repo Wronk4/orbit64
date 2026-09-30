@@ -1158,7 +1158,8 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
     const f32 duw_dx = ddx(u_over_w0, u_over_w1, u_over_w2), duw_dy = ddy(u_over_w0, u_over_w1, u_over_w2);
     const f32 dvw_dx = ddx(v_over_w0, v_over_w1, v_over_w2), dvw_dy = ddy(v_over_w0, v_over_w1, v_over_w2);
     const f32 diw_dx = ddx(inv_w0, inv_w1, inv_w2), diw_dy = ddy(inv_w0, inv_w1, inv_w2);
-    const f32 walk_dir = st.pipelined_tex1 ? walk_direction(v0, v1, v2) : 1.0f;
+    const f32 walk_dir = (st.pipelined_tex1 || (dolod && !st.two_cycle)) ? walk_direction(v0, v1, v2) : 1.0f;
+    const f32 walk_lod = walk_dir; // native pixels
     s32 tri_dz;
     u8 tri_dzc;
     triangle_depth_slope(st, v0, v1, v2, area, tri_dz, tri_dzc);
@@ -1259,10 +1260,22 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     f32 u = uw * w_interp;
                     f32 v = vw * w_interp;
                     if (dolod) {
-                        const f32 iwx = inv_w_interp + diw_dx, iwy = inv_w_interp + diw_dy;
-                        const f32 rx = iwx != 0.0f ? 1.0f / iwx : 1.0f, ry = iwy != 0.0f ? 1.0f / iwy : 1.0f;
-                        const f32 delta = std::max(std::max(std::fabs((uw + duw_dx) * rx - u), std::fabs((vw + dvw_dx) * rx - v)),
-                                                   std::max(std::fabs((uw + duw_dy) * ry - u), std::fabs((vw + dvw_dy) * ry - v)));
+                        f32 delta;
+                        if (st.two_cycle) {
+                            // The pixel to the right and the one below.
+                            const f32 iwx = inv_w_interp + diw_dx, iwy = inv_w_interp + diw_dy;
+                            const f32 rx = iwx != 0.0f ? 1.0f / iwx : 1.0f, ry = iwy != 0.0f ? 1.0f / iwy : 1.0f;
+                            delta = std::max(std::max(std::fabs((uw + duw_dx) * rx - u), std::fabs((vw + dvw_dx) * rx - v)),
+                                             std::max(std::fabs((uw + duw_dy) * ry - u), std::fabs((vw + dvw_dy) * ry - v)));
+                        } else {
+                            // 1-cycle mode: the texture unit, a pixel ahead, compares
+                            // the next two pixels along the row (nothing below).
+                            const f32 d1 = walk_lod, d2 = 2.0f * walk_lod;
+                            const f32 i1 = inv_w_interp + diw_dx * d1, i2 = inv_w_interp + diw_dx * d2;
+                            const f32 r1 = i1 != 0.0f ? 1.0f / i1 : 1.0f, r2 = i2 != 0.0f ? 1.0f / i2 : 1.0f;
+                            delta = std::max(std::fabs((uw + duw_dx * d2) * r2 - (uw + duw_dx * d1) * r1),
+                                             std::fabs((vw + dvw_dx * d2) * r2 - (vw + dvw_dx * d1) * r1));
+                        }
                         lod_tiles(st, delta, st.active_tile, tile0, tile1, lod_frac);
                     }
 
