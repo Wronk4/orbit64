@@ -421,43 +421,42 @@ void RdpRenderer::triangle(HiResTarget* ht, const DrawState& st, u64 serial, u64
 
 void RdpRenderer::tex_rect(HiResTarget* ht, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly,
                            u32 lrx, u32 lry, u32 tile, f32 s, f32 tc, f32 dsdx, f32 dtdy, bool flip) {
-    // The bounds and steps of raster::tex_rect().
-    u32 max_x = std::min(lrx, st.fb_w);
-    u32 max_y = std::min(lry, kMaxFbLines);
-    if (st.fill_or_copy) {
-        max_x = std::min(lrx + 1, st.fb_w);
-        max_y = std::min(lry + 1, kMaxFbLines);
-    }
-    if (st.copy_mode) dsdx *= 0.25f;
-    const u32 S = scale_;
-    const s32 x0 = static_cast<s32>(ulx * S), x1 = static_cast<s32>(max_x * S);
-    const s32 y0 = static_cast<s32>(uly * S), y1 = static_cast<s32>(max_y * S);
-    if (x0 >= x1 || y0 >= y1) return;
+    // The pixels and coordinate steps of raster::tex_rect().
+    const raster::TexRectSetup r = raster::tex_rect_setup(st, ulx, uly, lrx, lry, dsdx, dtdy, flip);
+    const s32 x_last = std::min(r.x1, static_cast<s32>(st.fb_w) - 1);
+    const s32 y_last = std::min(r.y1, static_cast<s32>(kMaxFbLines) - 1);
+    if (r.x0 > x_last || r.y0 > y_last) return;
+    const s32 S = static_cast<s32>(scale_);
     Target* t = static_cast<Target*>(ht);
     // The primitive's upper-left corner is where S/T start, so it can't be clipped.
-    if (x0 >= static_cast<s32>(t->width * S) || y0 >= static_cast<s32>(kFbLines * S)) return;
+    if (r.x0 * S >= static_cast<s32>(t->width) * S || r.y0 * S >= static_cast<s32>(kFbLines) * S) return;
     const u32 state = recorded_state(st, serial, tmem_gen, true);
     const bool combined = st.combine_set && !st.copy_mode;
     // One level of detail for the whole rectangle, as raster::tex_rect() works it out.
     u32 t0 = tile & 7, t1 = (tile + 1) & 7;
     s32 lod_frac = 0;
-    if (st.dolod) raster::lod_tiles(st, std::max(std::fabs(dsdx), std::fabs(dtdy)), tile, t0, t1, lod_frac);
+    if (st.dolod) raster::lod_tiles(st, std::max(std::fabs(r.dx), std::fabs(r.dy)), tile, t0, t1, lod_frac);
     if (!combined || st.need_tex0) attach_table(state, st, t0, tmem_gen);
     if (combined && st.need_tex1) attach_table(state, st, t1, tmem_gen);
-    u32* q = add_prim(GPU_PRIM_RECT, t, depth_for(st), state, x0, y0, x1 - 1, y1 - 1);
+    u32* q = add_prim(GPU_PRIM_RECT, t, depth_for(st), state, r.x0 * S, r.y0 * S, (x_last + 1) * S - 1, (y_last + 1) * S - 1);
     if (!q) return;
+    const f32 ax_a = (static_cast<f32>(r.x0) - r.x_origin) * r.dx, ax_b = (static_cast<f32>(x_last) - r.x_origin) * r.dx;
+    const f32 ay_a = (static_cast<f32>(r.y0) - r.y_origin) * r.dy, ay_b = (static_cast<f32>(y_last) - r.y_origin) * r.dy;
     q[3] = tile;
-    q[13] = t0 | t1 << 4 | static_cast<u32>(lod_frac & 0x1FF) << 8;
     q[4] = fbits(s);
     q[5] = fbits(tc);
-    q[6] = fbits(dsdx / static_cast<f32>(S));
-    q[7] = fbits(dtdy / static_cast<f32>(S));
-    q[8] = flip ? 1u : 0u;
-    const raster::TexRectClamp cl = raster::tex_rect_clamp(s, tc, dsdx, dtdy, max_x - ulx, max_y - uly);
-    q[9] = fbits(cl.s_min);
-    q[10] = fbits(cl.s_max);
-    q[11] = fbits(cl.t_min);
-    q[12] = fbits(cl.t_max);
+    q[6] = fbits(r.dx);
+    q[7] = fbits(r.dy);
+    q[8] = (flip ? 1u : 0u) | (r.full ? 2u : 0u);
+    q[9] = fbits(std::min(ax_a, ax_b));
+    q[10] = fbits(std::max(ax_a, ax_b));
+    q[11] = fbits(std::min(ay_a, ay_b));
+    q[12] = fbits(std::max(ay_a, ay_b));
+    q[13] = t0 | t1 << 4 | static_cast<u32>(lod_frac & 0x1FF) << 8;
+    q[14] = ulx | uly << 16;
+    q[15] = lrx | lry << 16;
+    q[16] = fbits(r.x_origin);
+    q[17] = fbits(r.y_origin);
 }
 
 void RdpRenderer::fill_rect(HiResTarget* ht, u32 x0, u32 y0, u32 x1, u32 y1, u32 argb) {

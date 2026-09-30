@@ -576,20 +576,38 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
     sink_write(sb, x, y, color, aux, c, z);
 }
 
-void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint c, inout float z) {
+void draw_rect(uint pb, uint sb, uint x, uint y, inout uint c, inout float z) {
     // Outside the scissor: dropped by sink_write anyway.
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
-    float ds = fword(pb + 6u);
-    float cur_s = clamp(fword(pb + 4u) + float(int(x) - int(rx0)) * ds, fword(pb + 9u), fword(pb + 10u));
-    float cur_t = clamp(fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u), fword(pb + 11u), fword(pb + 12u));
-    bool flip = D[pb + 8u] != 0u;
-    float ss = flip ? cur_t : cur_s;
-    float st = flip ? cur_s : cur_t;
     uint flags = D[sb];
+    uint fl = D[pb + 8u];
+    bool flip = (fl & 1u) != 0u;
+    float nx = float(x) * P.inv_scale, ny = float(y) * P.inv_scale;
+    uint mask = 0xFFu;
+    if ((fl & 2u) == 0u) {
+        // Coverage: the 8 samples within the edges (quarter pixels).
+        float ulx = float(D[pb + 14u] & 0xFFFFu), uly = float(D[pb + 14u] >> 16u);
+        float lrx = float(D[pb + 15u] & 0xFFFFu), lry = float(D[pb + 15u] >> 16u);
+        mask = 0u;
+        for (int i = 0; i < 8; ++i) {
+            float qx = nx * 4.0 + kSampleX[i] * 4.0 * P.inv_scale, qy = ny * 4.0 + kSampleY[i] * 4.0 * P.inv_scale;
+            if (qx >= ulx && qx < lrx && qy >= uly && qy < lry) mask |= 1u << uint(i);
+        }
+        if ((flags & GPU_ST_AA) != 0u ? mask == 0u : (mask & 1u) == 0u) return;
+    }
+    float dx = fword(pb + 6u), dy = fword(pb + 7u);
+    float ax = (nx - fword(pb + 16u)) * dx, ay = (ny - fword(pb + 17u)) * dy;
+    if (P.scale > 1u) {
+        ax = clamp(ax, fword(pb + 9u), fword(pb + 10u));
+        ay = clamp(ay, fword(pb + 11u), fword(pb + 12u));
+    }
+    float ss = fword(pb + 4u) + (flip ? ay : ax);
+    float st = fword(pb + 5u) + (flip ? ax : ay);
     uint lt = D[pb + 13u];
     uint t0 = lt & 15u, t1 = (lt >> 4u) & 15u;
     Aux aux = aux_default();
     aux.shade_a = 0u; // rectangles have no shade, nor depth (but the primitive's)
+    aux.cvg = uint(bitCount(mask));
     if ((flags & GPU_ST_Z_PRIM) != 0u) {
         uint pz = D[sb + GPU_ST_PRIM_Z];
         aux.z = int(pz & 0x7FFFu) << 3;
@@ -602,9 +620,12 @@ void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint 
     } else {
         uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, t0, ss, st, false) : 0u;
         uint tex1 = 0u;
-        if ((flags & GPU_ST_NEED_TEX1) != 0u) tex1 = sample_texture(sb, t1, ss, st, true);
-        else if ((flags & GPU_ST_PIPE_TEX1) != 0u) // the next pixel's, rightwards
-            tex1 = flip ? sample_texture(sb, t0, cur_t, cur_s + ds, false) : sample_texture(sb, t0, cur_s + ds, cur_t, false);
+        if ((flags & GPU_ST_NEED_TEX1) != 0u) {
+            tex1 = sample_texture(sb, t1, ss, st, true);
+        } else if ((flags & GPU_ST_PIPE_TEX1) != 0u) { // the next pixel's, rightwards
+            float step = dx * P.inv_scale;
+            tex1 = sample_texture(sb, t0, flip ? ss : ss + step, flip ? st + step : st, false);
+        }
         int noise = (flags & GPU_ST_NOISE) != 0u ? int(((pixel_noise(sb, x, y) & 7u) << 6u) | 0x20u) : 0;
         color = combine(sb, tex, tex1, ivec4(0), int(lt >> 8u), noise, aux.alpha0);
         if ((flags & GPU_ST_TWO_CYCLE) == 0u) aux.alpha0 = -1;
@@ -641,7 +662,7 @@ void main() {
         if (type == GPU_PRIM_TRI) {
             draw_triangle(pb, sb, x, y, c, z);
         } else if (type == GPU_PRIM_RECT) {
-            draw_rect(pb, sb, x, y, px0, py0, c, z);
+            draw_rect(pb, sb, x, y, c, z);
         } else if (type == GPU_PRIM_FILL) {
             c = D[pb + 3u];
         } else if (type == GPU_PRIM_BLOCK) {

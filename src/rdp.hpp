@@ -482,6 +482,7 @@ private:
     void clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram, size_t rdram_size);
     void clip_and_rasterize_line(Vertex v0, Vertex v1, u8* rdram, size_t rdram_size);
     void rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size);
+    // Edges in quarter pixels (10.2), see raster::tex_rect().
     void rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t, f32 dsdx, f32 dtdy, bool flip, u8* rdram, size_t rdram_size);
     void rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size);
     // Draws a triangle as it is (no culling); `area` is triangle_area().

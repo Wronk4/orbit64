@@ -547,12 +547,12 @@ void RDP::process_rdp_commands(MI& mi, u8* rdram, size_t rdram_size) {
         }
         switch (op) {
             case 0x24: // Texture Rectangle
-            case 0x25: { // Texture Rectangle Flip
-                u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
-                u32 lry = (w0 & 0xFFF) / 4;
+            case 0x25: { // Texture Rectangle Flip (edges in quarter pixels)
+                u32 lrx = (w0 >> 12) & 0xFFF;
+                u32 lry = w0 & 0xFFF;
                 const u32 tile_idx = (w1 >> 24) & 0x7;
-                u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
-                u32 uly = (w1 & 0xFFF) / 4;
+                u32 ulx = (w1 >> 12) & 0xFFF;
+                u32 uly = w1 & 0xFFF;
                 if (ulx > lrx) std::swap(ulx, lrx);
                 if (uly > lry) std::swap(uly, lry);
                 const u64 c1 = cmd[1];
@@ -2540,11 +2540,12 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
             case 0xE4: // G_TEXRECT
             case 0xE5: { // G_TEXRECTFLIP
                 bool flip = (opcode == 0xE5);
-                u32 lrx = ((w0 >> 12) & 0xFFF) / 4;
-                u32 lry = (w0 & 0xFFF) / 4;
+                // Edges in quarter pixels.
+                u32 lrx = (w0 >> 12) & 0xFFF;
+                u32 lry = w0 & 0xFFF;
                 u32 tile_idx = (w1 >> 24) & 0x7;
-                u32 ulx = ((w1 >> 12) & 0xFFF) / 4;
-                u32 uly = (w1 & 0xFFF) / 4;
+                u32 ulx = (w1 >> 12) & 0xFFF;
+                u32 uly = w1 & 0xFFF;
 
                 if (ulx > lrx) std::swap(ulx, lrx);
                 if (uly > lry) std::swap(uly, lry);
@@ -2851,8 +2852,11 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
             // through the combiner and blender like a texture rectangle -
             // e.g. OoT's fade overlays (PRIM colour, alpha 0 = no change),
             // which cleared the whole screen to black when taken as fills.
+            // (Edges in quarter pixels; texture coordinates all 0.)
             const u32 cycle_type = (other_mode_h >> 20) & 0x3;
-            if (cycle_type < 2) rasterize_tex_rect(ulx, uly, lrx, lry, 0, 0.0f, 0.0f, 1.0f, 1.0f, false, rdram, rdram_size);
+            if (cycle_type < 2)
+                rasterize_tex_rect((w1 >> 12) & 0xFFF, w1 & 0xFFF, (w0 >> 12) & 0xFFF, w0 & 0xFFF, 0, 0.0f, 0.0f, 0.0f, 0.0f,
+                                   false, rdram, rdram_size);
             else rasterize_fill_rect(ulx, uly, lrx, lry, rdram, rdram_size);
             break;
         }
@@ -3239,9 +3243,10 @@ void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f
     NativeCmd cmd{};
     cmd.kind = NativeCmd::Kind::TexRect;
     cmd.st = native_snapshot(tile_idx, !combined || live.need_tex0, combined && live.need_tex1);
-    // raster::tex_rect() draws rows uly .. min(lry (+1 in FILL/COPY), 480) - 1.
-    cmd.y_first = static_cast<s32>(std::min<u32>(uly, kMaxFbLines));
-    cmd.y_last = static_cast<s32>(std::min<u32>(lry, kMaxFbLines - 1));
+    // The rows raster::tex_rect() can draw.
+    const raster::TexRectSetup rs = raster::tex_rect_setup(live, ulx, uly, lrx, lry, dsdx, dtdy, flip);
+    cmd.y_first = std::min(rs.y0, static_cast<s32>(kMaxFbLines));
+    cmd.y_last = std::min(rs.y1, static_cast<s32>(kMaxFbLines) - 1);
     cmd.shadow = hires_shadow_;
     cmd.shadow_len = hires_shadow_len_;
     cmd.ulx = ulx; cmd.uly = uly; cmd.lrx = lrx; cmd.lry = lry; cmd.tile = tile_idx;
@@ -3582,10 +3587,11 @@ void RDP::s2dex_draw_obj_rect(u32 sp_addr, bool use_matrix, u8* rdram, size_t rd
     if (flipS) s0 -= 0.001f;
     if (flipT) t0 -= 0.001f;
 
-    u32 ulx = static_cast<u32>(clip_x0);
-    u32 uly = static_cast<u32>(clip_y0);
-    u32 lrx = static_cast<u32>(clip_x1);
-    u32 lry = static_cast<u32>(clip_y1);
+    // In quarter pixels, as the microcode hands them to the RDP.
+    u32 ulx = static_cast<u32>(clip_x0 * 4.0f);
+    u32 uly = static_cast<u32>(clip_y0 * 4.0f);
+    u32 lrx = static_cast<u32>(clip_x1 * 4.0f);
+    u32 lry = static_cast<u32>(clip_y1 * 4.0f);
 
     rasterize_tex_rect(ulx, uly, lrx, lry, 0, s0, t0, dsdx_signed, dtdy_signed, false, rdram, rdram_size);
 }

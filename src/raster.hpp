@@ -1251,108 +1251,124 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
     return true;
 }
 
-// The S/T range a native texture rectangle w x h pixels samples.
-struct TexRectClamp {
-    f32 s_min, s_max, t_min, t_max;
+// The pixels a texture rectangle covers (native, inclusive) and how its
+// texture coordinates run, as the RDP draws it from its edges in quarter
+// pixels (ulx, uly, lrx, lry: 10.2). In 1- and 2-cycle mode the right and
+// bottom edges are exclusive and edge pixels are partly covered (sampled
+// like triangles); FILL and COPY draw whole pixels up to and including the
+// lower-right one. S and T are the texture coordinates at the upper-left
+// edge: along X they start at the (fractional) left edge (at its whole
+// pixel in COPY mode), along Y at the top edge's scanline. FLIP swaps the
+// axes the coordinates run along: S down and T across.
+struct TexRectSetup {
+    s32 x0, x1, y0, y1;       // native pixels, inclusive
+    f32 x_origin, y_origin;   // where the coordinates are s and t
+    f32 dx, dy;               // coordinate steps per pixel across / per row down
+    bool full;                // FILL/COPY: whole pixels, no coverage
 };
-
-inline TexRectClamp tex_rect_clamp(f32 s, f32 t, f32 dsdx, f32 dtdy, u32 w, u32 h) {
-    const f32 s_end = s + static_cast<f32>(w - 1) * dsdx;
-    const f32 t_end = t + static_cast<f32>(h - 1) * dtdy;
-    return {std::min(s, s_end), std::max(s, s_end), std::min(t, t_end), std::max(t, t_end)};
+inline TexRectSetup tex_rect_setup(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, f32 dsdx, f32 dtdy, bool flip) {
+    TexRectSetup r;
+    r.full = st.fill_or_copy;
+    r.x0 = static_cast<s32>(ulx >> 2);
+    r.y0 = static_cast<s32>(uly >> 2);
+    if (r.full) {
+        r.x1 = static_cast<s32>(lrx >> 2);
+        r.y1 = static_cast<s32>(lry >> 2);
+    } else {
+        r.x1 = static_cast<s32>((lrx + 3) >> 2) - 1;
+        r.y1 = static_cast<s32>((lry + 3) >> 2) - 1;
+    }
+    r.x_origin = st.copy_mode ? static_cast<f32>(ulx >> 2) : static_cast<f32>(ulx) * 0.25f;
+    r.y_origin = static_cast<f32>(uly >> 2);
+    // COPY steps four texels per cycle: DSDX is four times the per-pixel step.
+    if (st.copy_mode) dsdx *= 0.25f;
+    r.dx = flip ? dtdy : dsdx;
+    r.dy = flip ? dsdx : dtdy;
+    return r;
 }
 
 // Texture rectangle (G_TEXRECT / G_TEXRECTFLIP / S2DEX objects) at `scale`
-// times the frame buffer resolution, rows [row_begin, row_end) only. The
-// rectangle and texture coordinates are in frame buffer units; each output
-// pixel samples the texture at its upper-left corner, as the RDP does.
+// times the frame buffer resolution, rows [row_begin, row_end) only, from
+// its edges in quarter pixels (see TexRectSetup). Rectangles have no shade
+// and no depth of their own (0, or the primitive depth).
 template <class Sink>
 inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t,
                      f32 dsdx, f32 dtdy, bool flip, u32 scale, s32 row_begin, s32 row_end, Sink& sink) {
-    const u32 fb_w = st.fb_w;
-    u32 max_x = std::min(lrx, fb_w);
-    u32 max_y = std::min(lry, kMaxFbLines);
-
-    // In COPY (and FILL) cycle type the lower-right rectangle edge is inclusive,
-    // and COPY steps four texels per cycle, so the S increment is quartered.
-    // Without this 2D sprites lose their last row/column and are stretched 4x.
-    if (st.fill_or_copy) {
-        max_x = std::min(lrx + 1, fb_w);
-        max_y = std::min(lry + 1, kMaxFbLines);
-    }
-    if (st.copy_mode) {
-        dsdx *= 0.25f;
-    }
-    const f32 dsdx_px = dsdx / static_cast<f32>(scale); // S from one (output) pixel to the next
+    const TexRectSetup r = tex_rect_setup(st, ulx, uly, lrx, lry, dsdx, dtdy, flip);
+    const s32 fb_w = static_cast<s32>(st.fb_w);
+    const s32 x_last = std::min(r.x1, fb_w - 1), y_last = std::min(r.y1, static_cast<s32>(kMaxFbLines) - 1);
+    if (r.x0 > x_last || r.y0 > y_last) return;
 
     const bool combined = st.combine_set && !st.copy_mode;
-    // The texture coordinates step by DSDX / DTDY per pixel: one level of
-    // detail for the whole rectangle.
+    // One level of detail for the whole rectangle.
     u32 t0 = tile_idx & 7, t1 = (tile_idx + 1) & 7;
     s32 lod_frac = 0;
-    if (st.dolod) lod_tiles(st, std::max(std::fabs(dsdx), std::fabs(dtdy)), tile_idx, t0, t1, lod_frac);
-    // Rectangles have no shade: the combiner's SHADE input is 0.
-    // No depth of their own: 0 (or the primitive depth), slope 1.
+    if (st.dolod) lod_tiles(st, std::max(std::fabs(r.dx), std::fabs(r.dy)), tile_idx, t0, t1, lod_frac);
     const s32 rect_z = st.z_source_prim ? static_cast<s32>(st.prim_depth & 0x7FFF) << 3 : 0;
     const s32 rect_dz = st.z_source_prim ? st.prim_dz : 1;
     const u8 rect_dzc = dz_compress_prim(rect_dz);
-    auto shade = [&](f32 cur_s, f32 cur_t, u32 x, u32 y, PixelAux& aux) -> u32 {
-        aux.shade_a = 0;
-        aux.z = rect_z;
-        aux.dz = rect_dz;
-        aux.dzc = rect_dzc;
-        if (st.alpha_test_dither) aux.noise = static_cast<u8>(pixel_noise(st, x, y) >> 8);
-        f32 sample_s = flip ? cur_t : cur_s;
-        f32 sample_t = flip ? cur_s : cur_t;
-        if (!combined) return sample_texture(st, t0, sample_s, sample_t);
-        u32 tex = st.need_tex0 ? sample_texture(st, t0, sample_s, sample_t) : 0;
-        u32 tex1 = 0;
-        if (st.need_tex1) tex1 = sample_texture(st, t1, sample_s, sample_t, true);
-        else if (st.pipelined_tex1) // the next pixel's, rightwards
-            tex1 = flip ? sample_texture(st, t0, cur_t, cur_s + dsdx_px) : sample_texture(st, t0, cur_s + dsdx_px, cur_t);
-        const s32 noise = st.uses_noise ? cc_noise(st, x, y) : 0;
-        u8 a0 = 0;
-        const u32 c = combine(st, tex, tex1, 0, 0, 0, 0, lod_frac, noise, &a0);
-        if (st.two_cycle) aux.alpha0 = a0;
-        return c;
-    };
+    const f32 inv_scale = 1.0f / static_cast<f32>(scale);
+    // How far the coordinates have run across and down; at a higher
+    // resolution, kept within what the native rectangle samples (past its
+    // last pixel the high-resolution pixels would filter in texels beyond
+    // the loaded tile: seams between rectangles drawn in strips).
+    const f32 ax_a = (static_cast<f32>(r.x0) - r.x_origin) * r.dx, ax_b = (static_cast<f32>(x_last) - r.x_origin) * r.dx;
+    const f32 ay_a = (static_cast<f32>(r.y0) - r.y_origin) * r.dy, ay_b = (static_cast<f32>(y_last) - r.y_origin) * r.dy;
+    const f32 ax_lo = std::min(ax_a, ax_b), ax_hi = std::max(ax_a, ax_b);
+    const f32 ay_lo = std::min(ay_a, ay_b), ay_hi = std::max(ay_a, ay_b);
+    // The sample points of a pixel (see triangle()), in quarter pixels.
+    static constexpr f32 kQx[8] = {0.0f, 2.0f, 1.0f, 3.0f, 0.0f, 2.0f, 1.0f, 3.0f};
+    static constexpr f32 kQy[8] = {0.0f, 0.0f, 1.0f, 1.0f, 2.0f, 2.0f, 3.0f, 3.0f};
+    const f32 fulx = static_cast<f32>(ulx), fuly = static_cast<f32>(uly), flrx = static_cast<f32>(lrx), flry = static_cast<f32>(lry);
+    const bool aa = st.aa_en;
 
-    if (scale == 1) {
-        // Stepping S/T per pixel, like the RDP.
-        f32 cur_t = t;
-        for (u32 y = uly; y < max_y; ++y) {
-            if (static_cast<s32>(y) >= row_begin && static_cast<s32>(y) < row_end) {
-                f32 cur_s = s;
-                for (u32 x = ulx; x < max_x; ++x) {
-                    PixelAux aux;
-                    const u32 c = shade(cur_s, cur_t, x, y, aux);
-                    sink.write(x, y, c, aux);
-                    cur_s += dsdx;
+    const s32 S = static_cast<s32>(scale);
+    const s32 hy0 = std::max(r.y0 * S, row_begin), hy1 = std::min((y_last + 1) * S, row_end);
+    const s32 hx0 = r.x0 * S, hx1 = (x_last + 1) * S;
+    for (s32 hy = hy0; hy < hy1; ++hy) {
+        const f32 ny = static_cast<f32>(hy) * inv_scale;
+        f32 ay = (ny - r.y_origin) * r.dy;
+        if (scale > 1) ay = std::clamp(ay, ay_lo, ay_hi);
+        for (s32 hx = hx0; hx < hx1; ++hx) {
+            const f32 nx = static_cast<f32>(hx) * inv_scale;
+            u32 mask = 0xFF;
+            if (!r.full) {
+                mask = 0;
+                for (int i = 0; i < 8; ++i) {
+                    const f32 qx = nx * 4.0f + kQx[i] * inv_scale, qy = ny * 4.0f + kQy[i] * inv_scale;
+                    if (qx >= fulx && qx < flrx && qy >= fuly && qy < flry) mask |= 1u << i;
                 }
+                if (aa ? mask == 0 : (mask & 1) == 0) continue;
             }
-            cur_t += dtdy;
-        }
-        return;
-    }
-
-    if (ulx >= max_x || uly >= max_y) return;
-    const f32 dsdx_hr = dsdx / static_cast<f32>(scale);
-    const f32 dtdy_hr = dtdy / static_cast<f32>(scale);
-    const s32 x0 = static_cast<s32>(ulx * scale), x1 = static_cast<s32>(max_x * scale);
-    const s32 y0 = static_cast<s32>(uly * scale);
-    const s32 y_first = std::max(y0, row_begin);
-    const s32 y_last = std::min(static_cast<s32>(max_y * scale), row_end);
-    // Keep S/T within the texels the native rectangle samples. Past its last
-    // pixel centre the hi-res pixels would otherwise filter in texels beyond
-    // the loaded tile, which draws seams between rectangles drawn in strips.
-    const TexRectClamp cl = tex_rect_clamp(s, t, dsdx, dtdy, max_x - ulx, max_y - uly);
-    for (s32 y = y_first; y < y_last; ++y) {
-        const f32 cur_t = std::clamp(t + static_cast<f32>(y - y0) * dtdy_hr, cl.t_min, cl.t_max);
-        for (s32 x = x0; x < x1; ++x) {
-            const f32 cur_s = std::clamp(s + static_cast<f32>(x - x0) * dsdx_hr, cl.s_min, cl.s_max);
+            f32 ax = (nx - r.x_origin) * r.dx;
+            if (scale > 1) ax = std::clamp(ax, ax_lo, ax_hi);
+            const f32 ss = s + (flip ? ay : ax), tt = t + (flip ? ax : ay);
+            const u32 x = static_cast<u32>(hx), y = static_cast<u32>(hy);
             PixelAux aux;
-            const u32 c = shade(cur_s, cur_t, static_cast<u32>(x), static_cast<u32>(y), aux);
-            sink.write(static_cast<u32>(x), static_cast<u32>(y), c, aux);
+            aux.shade_a = 0;
+            aux.cvg = static_cast<u8>(__builtin_popcount(mask));
+            aux.z = rect_z;
+            aux.dz = rect_dz;
+            aux.dzc = rect_dzc;
+            if (st.alpha_test_dither) aux.noise = static_cast<u8>(pixel_noise(st, x, y) >> 8);
+            u32 c;
+            if (!combined) {
+                c = sample_texture(st, t0, ss, tt);
+            } else {
+                const u32 tex = st.need_tex0 ? sample_texture(st, t0, ss, tt) : 0;
+                u32 tex1 = 0;
+                if (st.need_tex1) {
+                    tex1 = sample_texture(st, t1, ss, tt, true);
+                } else if (st.pipelined_tex1) { // the next pixel's, rightwards
+                    const f32 step = r.dx * inv_scale;
+                    tex1 = sample_texture(st, t0, flip ? ss : ss + step, flip ? tt + step : tt);
+                }
+                const s32 noise = st.uses_noise ? cc_noise(st, x, y) : 0;
+                u8 a0 = 0;
+                c = combine(st, tex, tex1, 0, 0, 0, 0, lod_frac, noise, &a0);
+                if (st.two_cycle) aux.alpha0 = a0;
+            }
+            sink.write(x, y, c, aux);
         }
     }
 }

@@ -122,6 +122,7 @@ public:
     // copy of both.
     virtual void triangle(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen,
                           const Vertex& v0, const Vertex& v1, const Vertex& v2, f32 area) = 0;
+    // Edges in quarter pixels (raster::tex_rect()).
     virtual void tex_rect(HiResTarget* t, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly, u32 lrx,
                           u32 lry, u32 tile, f32 s, f32 tc, f32 dsdx, f32 dtdy, bool flip) = 0;
     // FILL-mode rectangle, native pixel bounds [x0, x1) x [y0, y1).
