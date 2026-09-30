@@ -47,6 +47,13 @@ struct RDP::NativeSink {
     void write(u32 x, u32 y, u32 color, const raster::PixelAux& aux = {}) {
         rdp.write_pixel(st, x, y, color, rdram, rdram_size, shadow, shadow_len, stats, aux);
     }
+    bool occluded(u32 x, u32 y, const raster::PixelAux& aux) const {
+        if (!st.z_compare || x >= st.fb_w) return false;
+        const u32 zidx = st.zb_addr + (y * st.fb_w + x) * 2;
+        if (zidx + 1 >= rdram_size) return false;
+        const u16 word = static_cast<u16>((rdram[zidx] << 8) | rdram[zidx + 1]);
+        return raster::depth_occluded(st, aux, word, rdp.hle_hidden_->hidden_at(zidx >> 1, word));
+    }
 };
 
 Matrix4x4 Matrix4x4::identity() {
@@ -2984,6 +2991,13 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
             }
         }
         if (hr) hires_->fill_rect(hr, start_x, start_y, max_x, max_y, fb_pixel_to_argb(color16, 2));
+    } else if (color_image_size == 1) { // 8-bit: byte k of the fill colour for address k mod 4
+        for (u32 y = start_y; y < max_y; ++y) {
+            for (u32 x = start_x; x < max_x; ++x) {
+                const u32 idx = color_image_addr + y * fb_w + x;
+                if (idx < rdram_size) rdram[idx] = static_cast<u8>(fill_color >> (((idx & 3) ^ 3) * 8));
+            }
+        }
     } else if (color_image_size == 3) { // 32-bit
         for (u32 y = start_y; y < max_y; ++y) {
             for (u32 x = start_x; x < max_x; ++x) {
@@ -3063,6 +3077,21 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, s
         rdram[idx + 3] = a;
         if (pixel_idx < shadow_len)
             shadow[pixel_idx] = (static_cast<u32>(res.r) << 24) | (static_cast<u32>(res.g) << 16) | (static_cast<u32>(res.b) << 8) | a;
+    } else if (st.fb_size == 1) { // 8-bit intensity: every byte a pixel, coverage always full
+        const u32 idx = st.fb_addr + pixel_idx;
+        if (idx >= rdram_size) return;
+        mem.r = mem.g = mem.b = rdram[idx];
+        mem.cvg = 7;
+        if (!raster::pixel_backend(st, color, aux, mem, res, true, x, y)) {
+            stats.z_fail++;
+            return;
+        }
+        // The RDP stores the red channel in even bytes and green in odd ones;
+        // an odd byte's ninth bits follow its lowest bit.
+        const u8 c = (idx & 1) ? res.g : res.r;
+        rdram[idx] = c;
+        const u32 h = idx & ~1u;
+        if (idx & 1) hle_hidden_->force_hidden(h >> 1, (c & 1) * 3, static_cast<u16>((rdram[h] << 8) | c));
     } else {
         return;
     }

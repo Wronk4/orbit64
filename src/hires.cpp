@@ -31,6 +31,14 @@ struct HiResSink {
         is16 = s.fb_size == 2;
     }
 
+    bool occluded(u32 x, u32 y, const raster::PixelAux& aux) const {
+        if (!st.z_compare || !depth || x >= width || y >= height) return false;
+        const f32 dv = depth[static_cast<size_t>(y) * width + x];
+        if (dv >= 1e29f) return false;
+        const u32 zv = static_cast<u32>(dv);
+        return raster::depth_occluded(st, aux, static_cast<u16>(zv >> 2), static_cast<u8>(zv & 3));
+    }
+
     // The colour keeps the pixel's coverage in the upper 3 bits of alpha,
     // like a 32-bit colour image in RDRAM; the depth, what the RDP stores in
     // RDRAM (halfword << 2 | ninth bits), as a float (1e30: cleared).

@@ -860,6 +860,50 @@ inline s32 dither_channel(s32 c, s32 d) {
     return c > 247 ? 255 : (c & 0xF8) + 8;
 }
 
+// The depth test's comparisons of a pixel against the depth buffer
+// halfword (and its ninth bits) it would replace, allowing for both depth
+// slopes (and the coarse precision of near depths).
+struct DepthCompare {
+    s32 memory_z, combined_dz, shift_a, shift_b;
+    bool max_z, front, farther, nearer;
+    DepthCompare(const PixelAux& aux, u16 zword, u8 zhidden) {
+        const s32 z = aux.z;
+        const s32 cur_depth = zword >> 2;
+        const s32 cur_dz = zhidden | ((zword & 3) << 2);
+        memory_z = z_decompress(static_cast<u32>(cur_depth));
+        s32 memory_dz = 1 << cur_dz;
+        const s32 precision = (cur_depth >> 11) & 0xF;
+        bool coplanar = false;
+        shift_a = std::clamp(static_cast<s32>(aux.dzc) - cur_dz, 0, 4);
+        shift_b = std::clamp(cur_dz - static_cast<s32>(aux.dzc), 0, 4);
+        if (precision < 3) {
+            if (memory_dz != 0x8000) {
+                memory_dz = std::max(memory_dz << 1, 16 >> precision);
+            } else {
+                coplanar = true;
+                memory_dz = 0xFFFF;
+            }
+        }
+        combined_dz = combine_dz(aux.dz | memory_dz);
+        const s32 cdz = combined_dz << 3;
+        farther = coplanar || (z + cdz) >= memory_z;
+        max_z = memory_z == 0x3FFFF;
+        front = z < memory_z;
+        nearer = coplanar || (z - cdz) <= memory_z;
+    }
+};
+// Whether a pixel fails the depth test whatever its coverage and colour
+// (so it needn't be shaded).
+inline bool depth_occluded(const DrawState& st, const PixelAux& aux, u16 zword, u8 zhidden) {
+    if (!st.z_compare || st.copy_mode) return false;
+    const DepthCompare dc(aux, zword, zhidden);
+    switch (st.z_mode) {
+        case 0: case 1: return !dc.max_z && !dc.nearer;
+        case 2: return !dc.max_z && !dc.front;
+        default: return !(dc.farther && dc.nearer && !dc.max_z);
+    }
+}
+
 // The memory stage of a 1- or 2-cycle pixel (not FILL; COPY writes the
 // texel as it is): coverage and alpha, the alpha compare, the depth test,
 // the blender (both cycles) and the coverage stored with the colour, in the
@@ -914,46 +958,26 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, c
     bool blend_en;
     s32 shift_a = 0, shift_b = 0; // the blender's A_MEM factors, by depth slope
     if (st.z_compare) {
-        const s32 cur_depth = mem.zword >> 2;
-        const s32 cur_dz = mem.zhidden | ((mem.zword & 3) << 2);
-        const s32 memory_z = z_decompress(static_cast<u32>(cur_depth));
-        s32 memory_dz = 1 << cur_dz;
-        const s32 precision = (cur_depth >> 11) & 0xF;
-        bool coplanar = false;
-        shift_a = std::clamp(static_cast<s32>(aux.dzc) - cur_dz, 0, 4);
-        shift_b = std::clamp(cur_dz - static_cast<s32>(aux.dzc), 0, 4);
-        if (precision < 3) {
-            if (memory_dz != 0x8000) {
-                memory_dz = std::max(memory_dz << 1, 16 >> precision);
-            } else {
-                coplanar = true;
-                memory_dz = 0xFFFF;
-            }
-        }
-        s32 combined_dz = combine_dz(aux.dz | memory_dz);
-        const s32 combined_dz_ip = combined_dz;
-        combined_dz <<= 3;
-        const bool farther = coplanar || (z + combined_dz) >= memory_z;
-        blend_en = st.force_blend || (!overflow && st.aa_en && farther);
-        const bool max_z = memory_z == 0x3FFFF;
-        const bool front = z < memory_z;
-        const bool nearer = coplanar || (z - combined_dz) <= memory_z;
+        const DepthCompare dc(aux, mem.zword, mem.zhidden);
+        shift_a = dc.shift_a;
+        shift_b = dc.shift_b;
+        blend_en = st.force_blend || (!overflow && st.aa_en && dc.farther);
         bool pass;
         switch (st.z_mode) {
-            case 0: pass = max_z || (overflow ? front : nearer); break;
+            case 0: pass = dc.max_z || (overflow ? dc.front : dc.nearer); break;
             case 1:
-                if (!front || !farther || !overflow) {
-                    pass = max_z || (overflow ? front : nearer);
+                if (!dc.front || !dc.farther || !overflow) {
+                    pass = dc.max_z || (overflow ? dc.front : dc.nearer);
                 } else {
                     // Interpenetrating: the coverage is scaled by how far in front it is.
-                    const s32 cdz = dz_compress(combined_dz_ip & 0xFFFF);
-                    const s32 coeff = ((memory_z >> cdz) - (z >> cdz)) & 0xF;
+                    const s32 cdz = dz_compress(dc.combined_dz & 0xFFFF);
+                    const s32 coeff = ((dc.memory_z >> cdz) - (z >> cdz)) & 0xF;
                     cvg = std::min((coeff * cvg) >> 3, 8);
                     pass = true;
                 }
                 break;
-            case 2: pass = front || max_z; break;
-            default: pass = farther && nearer && !max_z; break;
+            case 2: pass = dc.front || dc.max_z; break;
+            default: pass = dc.farther && dc.nearer && !dc.max_z; break;
         }
         if (!pass || (st.aa_en && cvg == 0)) return false;
     } else {
@@ -1067,7 +1091,8 @@ inline f32 triangle_area(const V& v0, const V& v1, const V& v2) {
 // Rasterizes one (already culled) triangle at `scale` times the frame buffer
 // resolution, visiting only output rows [row_begin, row_end). Pixels whose
 // centre lies inside the triangle are shaded and handed to
-// sink.write(x, y, colour, PixelAux). V is any vertex type with the screen-space
+// sink.write(x, y, colour, PixelAux) (sink.occluded(x, y, aux): whether it
+// certainly fails the depth test, before it is shaded). V is any vertex type with the screen-space
 // fields of Vertex. Returns false when the scissor leaves nothing to draw.
 // The scissored bounding box triangle() scans at `scale`; false if it is
 // empty (nothing is drawn). Rows int(min_y) .. int(max_y) are the only ones
@@ -1205,6 +1230,7 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                                          : depth18(w0 * v0.sz + w1 * v1.sz + w2 * v2.sz);
                 aux.dz = tri_dz;
                 aux.dzc = tri_dzc;
+                if (sink.occluded(static_cast<u32>(x), static_cast<u32>(y), aux)) continue;
 
                 u8 r, g, b, a;
                 if (smooth_shading) {
