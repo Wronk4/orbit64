@@ -322,9 +322,7 @@ struct DrawState {
         force_blend = (other_mode_l & 0x4000) != 0;
         blend_enabled = (other_mode_l & 0x4800) != 0 || (other_mode_l & 0x1008) == 0x1008;
         alpha_compare = other_mode_l & 0x3;
-        // COPY mode ignores the blend colour: a texel passes the alpha test unless its alpha
-        // is 0 (Hydro Thunder's menu sprites rely on it; RGBA16 palette entries have 0 or 255).
-        alpha_threshold = copy_mode ? 1 : (blend_color & 0xFF);
+        alpha_threshold = blend_color & 0xFF;
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
         alpha_from_cvg = (other_mode_l & 0x3000) == 0x2000;
         rgb_dither = (other_mode_h >> 6) & 3;
@@ -458,85 +456,77 @@ inline s32 wrap_t(const TexUnit& tu, s32 c) {
     return wrap_texel_coord(c, tu.tile.mask_t, tu.tile.clamp_t != 0, tu.tile.mirror_t != 0, tu.extent_t);
 }
 
-// Texel at an already wrapped coordinate.
+// Texel at an already wrapped coordinate, as the texture unit reads it.
+// With a TLUT (tlut_type 2 or 3) every 4- and 8-bit format indexes the
+// palette (4-bit ones in the tile's 16-entry bank), and so does a 16-bit
+// texel's upper byte; without one, CI texels are their index (intensity and
+// alpha), and 16-bit I/CI texels read as two bytes (I = r = b, A = g = a).
 inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt, u32 tlut_type, s32 is, s32 it) {
     const Tile& tile = tu.tile;
     const u32 tmem_base = tu.tmem_base;
     const u32 row_stride = tu.row_stride;
     constexpr u32 kTmemSize = 4096;
+    auto splat = [](u32 v) { return (v << 24) | (v << 16) | (v << 8) | v; };
+    auto odd_row = [&](u32 offset) {
+        const u32 word_addr = offset / 8;
+        return ((it & 1) && word_addr < 512 && tmem_dxt[word_addr]) ? offset ^ 4 : offset;
+    };
+    if (tile.format >= 5) return 0; // formats 5-7 read nothing
+    // (G_MDSFT_TEXTLUT: bit 1 enables the TLUT, bit 0 picks IA16 over RGBA16.)
 
     if (tile.size == 3) { // 32-bit RGBA (bank 0 = RG, bank 1 = BA)
-        u32 offset = tmem_base + (it * row_stride + is * 2);
-        u32 word_addr = offset / 8;
-        if ((it & 1) && word_addr < 512 && tmem_dxt[word_addr]) {
-            offset ^= 4;
-        }
+        const u32 offset = odd_row(tmem_base + (it * row_stride + is * 2));
         if (offset + 0x801 < kTmemSize) {
             u8 r = tmem[offset + 0];
             u8 g = tmem[offset + 1];
             u8 b = tmem[offset + 0x800 + 0];
             u8 a = tmem[offset + 0x800 + 1];
+            if (tlut_type >= 2) return lookup_tlut(tmem, r, tlut_type);
             return (static_cast<u32>(a) << 24) | (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | b;
         }
     } else if (tile.size == 2) { // 16-bit
-        u32 offset = tmem_base + (it * row_stride + is * 2);
-        u32 word_addr = offset / 8;
-        if ((it & 1) && word_addr < 512 && tmem_dxt[word_addr]) {
-            offset ^= 4;
-        }
+        const u32 offset = odd_row(tmem_base + (it * row_stride + is * 2));
         if (offset + 1 < kTmemSize) {
-            u16 p = (static_cast<u16>(tmem[offset]) << 8) | static_cast<u16>(tmem[offset + 1]);
+            const u16 p = (static_cast<u16>(tmem[offset]) << 8) | static_cast<u16>(tmem[offset + 1]);
+            if (tlut_type >= 2) return lookup_tlut(tmem, p >> 8, tlut_type);
             if (tile.format == 3) { // IA16: 8-bit I + 8-bit A
                 u8 i = (p >> 8) & 0xFF;
                 u8 a = p & 0xFF;
                 return (static_cast<u32>(a) << 24) | (static_cast<u32>(i) << 16) | (static_cast<u32>(i) << 8) | i;
             }
+            if (tile.format == 2 || tile.format == 4) { // CI16 / I16: the two bytes
+                const u32 hi = p >> 8, lo = p & 0xFF;
+                return (lo << 24) | (hi << 16) | (lo << 8) | hi;
+            }
             return rgba16_to_rgba32(p);
         }
     } else if (tile.size == 1) { // 8-bit
-        u32 offset = tmem_base + (it * row_stride + is);
-        u32 word_addr = offset / 8;
-        if ((it & 1) && word_addr < 512 && tmem_dxt[word_addr]) {
-            offset ^= 4;
-        }
+        const u32 offset = odd_row(tmem_base + (it * row_stride + is));
         if (offset < kTmemSize) {
-            u8 val = tmem[offset];
-            // With TLUT enabled the hardware looks every 4/8-bit texel up in the palette,
-            // whatever the tile's format field says (Madden 2000's grass is RGBA with TLUT on).
-            if (tile.format == 2 || tlut_type != 0) { // CI8: full 256-entry TLUT
-                if (tlut_type == 0) return 0xFF000000 | (val << 16) | (val << 8) | val;
-                return lookup_tlut(tmem, val, tlut_type);
-            } else if (tile.format == 3) { // IA8: 4 bits intensity, 4 bits alpha
+            const u8 val = tmem[offset];
+            if (tlut_type >= 2) return lookup_tlut(tmem, val, tlut_type);
+            if (tile.format == 3) { // IA8: 4 bits intensity, 4 bits alpha
                 u8 i = static_cast<u8>(((val >> 4) & 0xF) * 17);
                 u8 a = static_cast<u8>((val & 0xF) * 17);
                 return (static_cast<u32>(a) << 24) | (static_cast<u32>(i) << 16) | (static_cast<u32>(i) << 8) | i;
             }
-            // I8: the texture unit replicates intensity into alpha.
-            return (static_cast<u32>(val) << 24) | (val << 16) | (val << 8) | val;
+            // RGBA8 / CI8 / I8: the byte is the intensity and the alpha.
+            return splat(val);
         }
-    } else if (tile.size == 0) { // 4-bit
-        u32 offset = tmem_base + (it * row_stride + (is / 2));
-        u32 word_addr = offset / 8;
-        if ((it & 1) && word_addr < 512 && tmem_dxt[word_addr]) {
-            offset ^= 4;
-        }
+    } else { // 4-bit
+        const u32 offset = odd_row(tmem_base + (it * row_stride + (is / 2)));
         if (offset < kTmemSize) {
-            u8 byte_val = tmem[offset];
-            u8 val = (is & 1) ? (byte_val & 0xF) : ((byte_val >> 4) & 0xF);
-            if (tile.format == 2 || tlut_type != 0) { // CI4: 16-entry sub-palette
-                if (tlut_type == 0) {
-                    u8 i = static_cast<u8>(val * 17);
-                    return (static_cast<u32>(i) << 24) | (i << 16) | (i << 8) | i;
-                }
-                return lookup_tlut(tmem, tile.palette * 16 + val, tlut_type);
-            } else if (tile.format == 3) { // IA4: 3 bits intensity, 1 bit alpha
+            const u8 byte_val = tmem[offset];
+            const u8 val = (is & 1) ? (byte_val & 0xF) : ((byte_val >> 4) & 0xF);
+            if (tlut_type >= 2) return lookup_tlut(tmem, tile.palette * 16 + val, tlut_type);
+            if (tile.format == 2) return splat((static_cast<u32>(tile.palette) << 4) | val); // CI4: its index
+            if (tile.format == 3) { // IA4: 3 bits intensity, 1 bit alpha
                 u8 i = static_cast<u8>(((val >> 1) & 0x7) * 255 / 7);
                 u8 a = (val & 1) ? 255 : 0;
                 return (static_cast<u32>(a) << 24) | (static_cast<u32>(i) << 16) | (static_cast<u32>(i) << 8) | i;
             }
-            // I4: intensity also drives alpha.
-            u8 i = static_cast<u8>(val * 17);
-            return (static_cast<u32>(i) << 24) | (i << 16) | (i << 8) | i;
+            // RGBA4 / I4: intensity also drives alpha.
+            return splat(static_cast<u32>(val) * 17);
         }
     }
     return 0;
