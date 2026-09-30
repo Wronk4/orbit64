@@ -562,8 +562,8 @@ void RDP::process_rdp_commands(MI& mi, u8* rdram, size_t rdram_size) {
                 const u32 tile_idx = (w1 >> 24) & 0x7;
                 u32 ulx = (w1 >> 12) & 0xFFF;
                 u32 uly = w1 & 0xFFF;
-                if (ulx > lrx) std::swap(ulx, lrx);
-                if (uly > lry) std::swap(uly, lry);
+                // (A rectangle whose right edge is left of its left one, or
+                // bottom above top, draws nothing.)
                 const u64 c1 = cmd[1];
                 const f32 s = static_cast<s16>(c1 >> 48) / 32.0f;
                 const f32 t = static_cast<s16>(c1 >> 32) / 32.0f;
@@ -2556,9 +2556,8 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                 u32 ulx = (w1 >> 12) & 0xFFF;
                 u32 uly = w1 & 0xFFF;
 
-                if (ulx > lrx) std::swap(ulx, lrx);
-                if (uly > lry) std::swap(uly, lry);
-
+                // (A rectangle whose right edge is left of its left one, or
+                // bottom above top, draws nothing.)
                 f32 s = 0.0f, t = 0.0f, dsdx = 1.0f, dtdy = 1.0f;
 
                 phys_pc = segment_to_physical(pc);
@@ -2713,12 +2712,14 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
             native_before_read(src_addr, static_cast<u64>(src_addr) + static_cast<u64>(words) * 4);
 
             if (timg_size == 3) {
+                // 32-bit texels: red/green in TMEM's lower half, blue/alpha
+                // at the same place in the upper half (addresses wrap there).
                 u32 texels = words;
                 for (u32 i = 0; i < texels; ++i) {
                     u32 dram_idx = src_addr + i * 4;
-                    u32 rg_dest = tmem_dest + i * 2;
+                    u32 rg_dest = (tmem_dest + i * 2) & 0x7FF;
                     u32 ba_dest = rg_dest + 0x800;
-                    if (dram_idx + 3 < rdram_size && ba_dest + 1 < tmem.size()) {
+                    if (dram_idx + 3 < rdram_size) {
                         tmem[rg_dest + 0] = rdram[dram_idx + 0];
                         tmem[rg_dest + 1] = rdram[dram_idx + 1];
                         tmem[ba_dest + 0] = rdram[dram_idx + 2];
@@ -2727,11 +2728,9 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
                 }
                 u32 num_words = (texels * 2 + 7) / 8;
                 bool is_dxt_zero = (dxt == 0);
-                for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
-                    tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
-                }
-                for (u32 w = 0; w < num_words && (start_word + 256 + w < 512); ++w) {
-                    tmem_word_dxt_zero[start_word + 256 + w] = is_dxt_zero;
+                for (u32 w = 0; w < num_words && w < 256; ++w) {
+                    tmem_word_dxt_zero[(start_word + w) & 255] = is_dxt_zero;
+                    tmem_word_dxt_zero[((start_word + w) & 255) + 256] = is_dxt_zero;
                 }
             } else {
                 u32 bytes;
@@ -2741,13 +2740,13 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
                     case 2: bytes = words * 2; break;       // 16-bit
                     default: bytes = words; break;
                 }
-                for (u32 b = 0; b < bytes && (tmem_dest + b < tmem.size()) && (src_addr + b < rdram_size); ++b) {
-                    tmem[tmem_dest + b] = rdram[src_addr + b];
+                for (u32 b = 0; b < bytes && b < tmem.size() && (src_addr + b < rdram_size); ++b) {
+                    tmem[(tmem_dest + b) & 0xFFF] = rdram[src_addr + b];
                 }
                 u32 num_words = (bytes + 7) / 8;
                 bool is_dxt_zero = (dxt == 0);
-                for (u32 w = 0; w < num_words && (start_word + w < 512); ++w) {
-                    tmem_word_dxt_zero[start_word + w] = is_dxt_zero;
+                for (u32 w = 0; w < num_words && w < 512; ++w) {
+                    tmem_word_dxt_zero[(start_word + w) & 511] = is_dxt_zero;
                 }
             }
             break;
@@ -2786,27 +2785,27 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
 
                 for (u32 row = 0; row < num_rows; ++row) {
                     u32 dram_row_start = timg_addr + (start_t + row) * dram_stride + (start_s * 4);
-                    u32 tmem_row_rg = tmem_dest + row * tmem_stride;
-                    u32 tmem_row_ba = tmem_row_rg + 0x800;
+                    // Red/green in TMEM's lower half, blue/alpha in the upper
+                    // half (addresses wrap there).
+                    u32 tmem_row_rg = (tmem_dest + row * tmem_stride) & 0x7FF;
 
                     for (u32 col = 0; col < num_texels; ++col) {
                         u32 dram_idx = dram_row_start + col * 4;
-                        u32 rg_idx = tmem_row_rg + col * 2;
-                        u32 ba_idx = tmem_row_ba + col * 2;
+                        u32 rg_idx = (tmem_row_rg + col * 2) & 0x7FF;
+                        u32 ba_idx = rg_idx + 0x800;
 
-                        if (dram_idx + 3 < rdram_size && ba_idx + 1 < tmem.size()) {
+                        if (dram_idx + 3 < rdram_size) {
                             tmem[rg_idx + 0] = rdram[dram_idx + 0];
                             tmem[rg_idx + 1] = rdram[dram_idx + 1];
                             tmem[ba_idx + 0] = rdram[dram_idx + 2];
                             tmem[ba_idx + 1] = rdram[dram_idx + 3];
                         }
                     }
-                    u32 rg_w0 = tmem_row_rg / 8;
-                    u32 rg_w1 = (tmem_row_rg + num_texels * 2 + 7) / 8;
-                    for (u32 w = rg_w0; w < rg_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
-                    u32 ba_w0 = tmem_row_ba / 8;
-                    u32 ba_w1 = (tmem_row_ba + num_texels * 2 + 7) / 8;
-                    for (u32 w = ba_w0; w < ba_w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                    const u32 rg_w0 = tmem_row_rg / 8, rg_n = (num_texels * 2 + 7) / 8;
+                    for (u32 w = 0; w < rg_n && w < 256; ++w) {
+                        tmem_word_dxt_zero[(rg_w0 + w) & 255] = false;
+                        tmem_word_dxt_zero[((rg_w0 + w) & 255) + 256] = false;
+                    }
                 }
             } else {
                 u32 bpp_shift = (timg_size == 2) ? 1 : 0;
@@ -2819,14 +2818,13 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
                                          ((timg_size == 0) ? (start_s / 2) : (start_s << bpp_shift));
                     u32 tmem_row_start = tmem_dest + row * tmem_stride;
 
-                    for (u32 b = 0; b < row_bytes; ++b) {
-                        if (tmem_row_start + b < tmem.size() && dram_row_start + b < rdram_size) {
-                            tmem[tmem_row_start + b] = rdram[dram_row_start + b];
+                    for (u32 b = 0; b < row_bytes && b < tmem.size(); ++b) {
+                        if (dram_row_start + b < rdram_size) {
+                            tmem[(tmem_row_start + b) & 0xFFF] = rdram[dram_row_start + b];
                         }
                     }
-                    u32 w0 = tmem_row_start / 8;
-                    u32 w1 = (tmem_row_start + row_bytes + 7) / 8;
-                    for (u32 w = w0; w < w1 && w < 512; ++w) tmem_word_dxt_zero[w] = false;
+                    const u32 w0 = tmem_row_start / 8, wn = (row_bytes + 7) / 8;
+                    for (u32 w = 0; w < wn && w < 512; ++w) tmem_word_dxt_zero[(w0 + w) & 511] = false;
                 }
             }
             break;

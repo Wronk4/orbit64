@@ -33,22 +33,23 @@ uint fetch_wrapped(uint tb, uint tm, uint tlut_type, int is, int it) {
     uint uis = uint(is), uit = uint(it);
     bool tlut = tlut_type >= 2u;
     if (format >= 5u) return 0u;
+    uint wrap = (size == 3u || tlut) ? 0x7FFu : 0xFFFu; // raster::fetch_wrapped()
     if (size == 3u) {
-        uint off = base + (uit * stride + uis * 2u);
+        uint off = (base + (uit * stride + uis * 2u)) & wrap;
         uint wa = off / 8u;
         if ((uit & 1u) != 0u && wa < 512u && tmem_dxt(tm, wa)) off ^= 4u;
-        if (off + 0x801u < 4096u) {
+        {
             uint r = tmem_byte(tm, off), g = tmem_byte(tm, off + 1u);
             uint b = tmem_byte(tm, off + 0x800u), a = tmem_byte(tm, off + 0x801u);
             if (tlut) return lookup_tlut(tm, r, tlut_type);
             return (a << 24u) | (r << 16u) | (g << 8u) | b;
         }
     } else if (size == 2u) {
-        uint off = base + (uit * stride + uis * 2u);
+        uint off = (base + (uit * stride + uis * 2u)) & wrap;
         uint wa = off / 8u;
         if ((uit & 1u) != 0u && wa < 512u && tmem_dxt(tm, wa)) off ^= 4u;
-        if (off + 1u < 4096u) {
-            uint p = (tmem_byte(tm, off) << 8u) | tmem_byte(tm, off + 1u);
+        {
+            uint p = (tmem_byte(tm, off) << 8u) | tmem_byte(tm, (off + 1u) & 0xFFFu);
             if (tlut) return lookup_tlut(tm, p >> 8u, tlut_type);
             if (format == 3u) return ia_argb((p >> 8u) & 0xFFu, p & 0xFFu);
             if (format == 2u || format == 4u) {
@@ -58,20 +59,20 @@ uint fetch_wrapped(uint tb, uint tm, uint tlut_type, int is, int it) {
             return rgba16_to_argb(p);
         }
     } else if (size == 1u) {
-        uint off = base + (uit * stride + uis);
+        uint off = (base + (uit * stride + uis)) & wrap;
         uint wa = off / 8u;
         if ((uit & 1u) != 0u && wa < 512u && tmem_dxt(tm, wa)) off ^= 4u;
-        if (off < 4096u) {
+        {
             uint val = tmem_byte(tm, off);
             if (tlut) return lookup_tlut(tm, val, tlut_type);
             if (format == 3u) return ia_argb(((val >> 4u) & 0xFu) * 17u, (val & 0xFu) * 17u);
             return splat8(val);
         }
     } else {
-        uint off = base + (uit * stride + (uis / 2u));
+        uint off = (base + (uit * stride + (uis / 2u))) & wrap;
         uint wa = off / 8u;
         if ((uit & 1u) != 0u && wa < 512u && tmem_dxt(tm, wa)) off ^= 4u;
-        if (off < 4096u) {
+        {
             uint byte_val = tmem_byte(tm, off);
             uint val = (uis & 1u) != 0u ? (byte_val & 0xFu) : ((byte_val >> 4u) & 0xFu);
             if (tlut) return lookup_tlut(tm, palette * 16u + val, tlut_type);

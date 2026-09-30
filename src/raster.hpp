@@ -465,9 +465,13 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
     const Tile& tile = tu.tile;
     const u32 tmem_base = tu.tmem_base;
     const u32 row_stride = tu.row_stride;
-    constexpr u32 kTmemSize = 4096;
     auto splat = [](u32 v) { return (v << 24) | (v << 16) | (v << 8) | v; };
+    // Texel addresses wrap around TMEM; 32-bit texels and the indices a
+    // TLUT looks up live in its lower half (32-bit ones have their blue and
+    // alpha in the upper half, the TLUT is there).
+    const u32 wrap = (tile.size == 3 || tlut_type >= 2) ? 0x7FF : 0xFFF;
     auto odd_row = [&](u32 offset) {
+        offset &= wrap;
         const u32 word_addr = offset / 8;
         return ((it & 1) && word_addr < 512 && tmem_dxt[word_addr]) ? offset ^ 4 : offset;
     };
@@ -476,7 +480,7 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
 
     if (tile.size == 3) { // 32-bit RGBA (bank 0 = RG, bank 1 = BA)
         const u32 offset = odd_row(tmem_base + (it * row_stride + is * 2));
-        if (offset + 0x801 < kTmemSize) {
+        {
             u8 r = tmem[offset + 0];
             u8 g = tmem[offset + 1];
             u8 b = tmem[offset + 0x800 + 0];
@@ -486,8 +490,8 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
         }
     } else if (tile.size == 2) { // 16-bit
         const u32 offset = odd_row(tmem_base + (it * row_stride + is * 2));
-        if (offset + 1 < kTmemSize) {
-            const u16 p = (static_cast<u16>(tmem[offset]) << 8) | static_cast<u16>(tmem[offset + 1]);
+        {
+            const u16 p = (static_cast<u16>(tmem[offset]) << 8) | static_cast<u16>(tmem[(offset + 1) & 0xFFF]);
             if (tlut_type >= 2) return lookup_tlut(tmem, p >> 8, tlut_type);
             if (tile.format == 3) { // IA16: 8-bit I + 8-bit A
                 u8 i = (p >> 8) & 0xFF;
@@ -502,7 +506,7 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
         }
     } else if (tile.size == 1) { // 8-bit
         const u32 offset = odd_row(tmem_base + (it * row_stride + is));
-        if (offset < kTmemSize) {
+        {
             const u8 val = tmem[offset];
             if (tlut_type >= 2) return lookup_tlut(tmem, val, tlut_type);
             if (tile.format == 3) { // IA8: 4 bits intensity, 4 bits alpha
@@ -515,7 +519,7 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
         }
     } else { // 4-bit
         const u32 offset = odd_row(tmem_base + (it * row_stride + (is / 2)));
-        if (offset < kTmemSize) {
+        {
             const u8 byte_val = tmem[offset];
             const u8 val = (is & 1) ? (byte_val & 0xF) : ((byte_val >> 4) & 0xF);
             if (tlut_type >= 2) return lookup_tlut(tmem, tile.palette * 16 + val, tlut_type);
