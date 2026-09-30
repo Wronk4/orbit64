@@ -16,16 +16,25 @@ namespace {
 // Some of Rare's graphics microcodes carry no credit string to recognize them
 // by, so they are recognized by a CRC-32 of the start of their code; Auto
 // (no match) leaves the banner search to decide.
-MicrocodeType ucode_by_crc(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
+u32 ucode_crc(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
     constexpr u32 kLen = 0x800;
     const u32 phys = ucode_ptr & static_cast<u32>(rdram_size - 1);
-    if (phys + kLen > rdram_size) return MicrocodeType::Auto;
+    if (phys + kLen > rdram_size) return 0;
     u32 c = 0xFFFFFFFFu;
     for (u32 i = 0; i < kLen; ++i) {
         c ^= rdram[phys + i];
         for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
     }
-    switch (~c) {
+    return ~c;
+}
+// Microcodes with a known banner the high-level renderer mustn't take for
+// the one it names: the SDK 2.0G Sprite2D microcode (G_SPRITE2D_*), whose
+// banner reads like GoldenEye's. They run on the low-level RSP.
+bool ucode_needs_lle(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
+    return ucode_crc(ucode_ptr, rdram, rdram_size) == 0x11C734DBu;
+}
+MicrocodeType ucode_by_crc(u32 ucode_ptr, const u8* rdram, size_t rdram_size) {
+    switch (ucode_crc(ucode_ptr, rdram, rdram_size)) {
         case 0xF295D221u: return MicrocodeType::F3DPD;  // Perfect Dark
         case 0xE434110Du: return MicrocodeType::F3DDKR; // Diddy Kong Racing
         case 0x248DCED9u: return MicrocodeType::F3DJFG; // Jet Force Gemini
@@ -348,6 +357,7 @@ bool RSP::detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_s
 
     // Microcodes known by their code come first: some share another's
     // banner (Wave Race 64's reads like Super Mario 64's Fast3D).
+    if (ucode_needs_lle(ucode_ptr, rdram, rdram_size)) return false;
     if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
         rdp.set_ucode_type(t);
         return true;
