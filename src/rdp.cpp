@@ -114,12 +114,13 @@ bool ucode_banner_is_non(const u8* p, size_t len) {
     return name.substr(0, name.find(' ')).find(".NoN") != std::string_view::npos;
 }
 
-RDP::RDP() {
+RDP::RDP(bool geometry_only) : geometry_only_(geometry_only) {
+    reset();
+    if (geometry_only_) return;
     // CPU and DMA writes to RDRAM reset the ninth bits the RDP left there.
     jit::set_write_hook(this, [](void* owner, u32 paddr, u32 len) {
         static_cast<RDP*>(owner)->exact_.cpu_wrote(paddr, len);
     });
-    reset();
     if (const char* e = std::getenv("ORBIT64_PICK")) std::sscanf(e, "%d,%d,%d", &pick_x_, &pick_y_, &pick_frame_);
     if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
         dl_trace_frame_ = std::atoi(e);
@@ -129,6 +130,53 @@ RDP::RDP() {
 
 RDP::~RDP() {
     jit::clear_write_hook_if(this);
+}
+
+void RDP::set_capture(bool on) {
+    capture_enabled = on;
+    if (!on) capture_frame.clear();
+    if (on && !capture_shadow_ && !geometry_only_) {
+        capture_shadow_ = std::make_unique<RDP>(true);
+        capture_shadow_mi_ = std::make_unique<MI>();
+    }
+    if (capture_shadow_) capture_shadow_->set_capture(on);
+}
+
+std::vector<CapturedMesh> RDP::take_capture() {
+    finish_texture_run();
+    std::vector<CapturedMesh> out;
+    out.swap(capture_frame);
+    capture_tris = 0;
+    // A frame drawn on the low-level RSP: what the geometry-only copy read.
+    std::vector<CapturedMesh> shadow = capture_shadow_ ? capture_shadow_->take_capture() : std::vector<CapturedMesh>{};
+    capture_from_shadow_ = out.empty() && !shadow.empty();
+    return capture_from_shadow_ ? std::move(shadow) : std::move(out);
+}
+
+std::vector<CapturedTexture> RDP::take_textures() {
+    std::vector<CapturedTexture> out, shadow;
+    out.swap(capture_textures);
+    if (capture_shadow_) shadow = capture_shadow_->take_textures();
+    return capture_from_shadow_ ? std::move(shadow) : std::move(out);
+}
+
+void RDP::set_texture_capture_target(u32 vtx_phys) {
+    capture_texture_vtx = vtx_phys;
+    if (capture_shadow_) capture_shadow_->set_texture_capture_target(vtx_phys);
+}
+
+const Matrix4x4& RDP::get_projection() const {
+    return capture_from_shadow_ && capture_shadow_ ? capture_shadow_->projection_matrix : projection_matrix;
+}
+
+RDP* RDP::capture_shadow() {
+    return capture_enabled ? capture_shadow_.get() : nullptr;
+}
+
+void RDP::capture_display_list(u32 dl_addr, const u8* rdram, size_t rdram_size) {
+    if (!capture_enabled || !capture_shadow_) return;
+    // Geometry-only: nothing is written to RDRAM (see RDP(bool)).
+    capture_shadow_->process_display_list(dl_addr, const_cast<u8*>(rdram), rdram_size, *capture_shadow_mi_);
 }
 
 void RDP::reset() {
@@ -237,6 +285,7 @@ void RDP::reset() {
     s2d_pending_valid = false;
 
     internal_zbuffer.assign(640 * 480, 1e30f);
+    if (capture_shadow_) capture_shadow_->reset();
 
     draw_state_dirty_ = true;
     ++tmem_gen_;
@@ -1323,6 +1372,7 @@ void RDP::debug_pick(u32 a, u32 b, u32 c) const {
 }
 
 void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     stat_tri_called++;
 
     const f32 NEAR_W = 0.1f;
@@ -1391,6 +1441,7 @@ void RDP::clip_and_rasterize_triangle(Vertex v0, Vertex v1, Vertex v2, u8* rdram
 }
 
 void RDP::clip_and_rasterize_line(Vertex v0, Vertex v1, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     flush_native();
     const f32 NEAR_W = 0.1f;
     if (v0.w < NEAR_W && v1.w < NEAR_W) return;
@@ -2863,6 +2914,7 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
 }
 
 void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     flush_native();
     if (color_image_addr != 0 && color_image_addr == depth_image_addr) {
         clear_zbuffer();
@@ -3138,6 +3190,7 @@ void RDP::flush_native() {
 }
 
 void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f32 s, f32 t, f32 dsdx, f32 dtdy, bool flip, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     ++tex_rect_count_;
     if (color_image_addr >= rdram_size) return;
     const DrawState& live = draw_state();
@@ -3428,6 +3481,7 @@ RDP::S2DObjSpriteInfo RDP::s2dex_setup_obj_tile(u32 sp_addr, const u8* rdram, si
 }
 
 void RDP::s2dex_draw_obj_rect(u32 sp_addr, bool use_matrix, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     S2DObjSpriteInfo info = s2dex_setup_obj_tile(sp_addr, rdram, rdram_size);
     if (info.imageW <= 0.0f || info.imageH <= 0.0f) return;
 
@@ -3488,6 +3542,7 @@ void RDP::s2dex_draw_obj_rect(u32 sp_addr, bool use_matrix, u8* rdram, size_t rd
 }
 
 void RDP::s2dex_draw_obj_sprite(u32 sp_addr, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     S2DObjSpriteInfo info = s2dex_setup_obj_tile(sp_addr, rdram, rdram_size);
     if (info.imageW <= 0.0f || info.imageH <= 0.0f) return;
 
@@ -3528,6 +3583,7 @@ void RDP::s2dex_draw_obj_sprite(u32 sp_addr, u8* rdram, size_t rdram_size) {
 }
 
 void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) {
+    if (geometry_only_) return;
     flush_native(); // draws synchronously, and reads its image straight from RDRAM
     if (bg_addr + 32 > rdram_size) return;
 

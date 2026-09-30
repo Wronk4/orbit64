@@ -153,6 +153,14 @@ void RSP::start(MI& mi, RDP& rdp, u8* rdram, size_t rdram_size) {
     } else {
         lle = true;
     }
+    // The debugger's geometry capture reads a low-level graphics task's
+    // display list too, when the high-level emulation knows its microcode.
+    if (lle && task_type == 1)
+        if (RDP* shadow = rdp.capture_shadow(); shadow && detect_gfx_ucode(0xFC0, *shadow, rdram, rdram_size)) {
+            const u32 data_ptr = (static_cast<u32>(dmem[0xFF0]) << 24) | (static_cast<u32>(dmem[0xFF1]) << 16) |
+                                 (static_cast<u32>(dmem[0xFF2]) << 8) | static_cast<u32>(dmem[0xFF3]);
+            if (data_ptr != 0) rdp.capture_display_list(data_ptr, rdram, rdram_size);
+        }
     if (lle) {
         lle_running = true;
         lle_cycle_debt = 0;

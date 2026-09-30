@@ -75,7 +75,10 @@ class MI;
 
 class RDP {
 public:
-    RDP();
+    // geometry_only: a copy that only reads display lists, for the debugger's
+    // geometry capture while graphics run on the low-level RSP (see
+    // capture_display_list): it never draws, and nothing it does reaches RDRAM.
+    explicit RDP(bool geometry_only = false);
     ~RDP();
 
     void reset();
@@ -111,18 +114,20 @@ public:
     u32 get_segment(int index) const { return segments[index & 15]; }
 
     // Debugger geometry capture (see CapturedMesh).
-    void set_capture(bool on) { capture_enabled = on; if (!on) capture_frame.clear(); }
-    std::vector<CapturedMesh> take_capture() {
-        finish_texture_run();
-        std::vector<CapturedMesh> out;
-        out.swap(capture_frame);
-        capture_tris = 0;
-        return out;
-    }
-    std::vector<CapturedTexture> take_textures() { std::vector<CapturedTexture> out; out.swap(capture_textures); return out; }
+    void set_capture(bool on);
+    bool capture_on() const { return capture_enabled; }
+    std::vector<CapturedMesh> take_capture();
+    std::vector<CapturedTexture> take_textures();
     // Physical address of the vertex buffer whose meshes should have their textures captured (0 = none).
-    void set_texture_capture_target(u32 vtx_phys) { capture_texture_vtx = vtx_phys; }
-    const Matrix4x4& get_projection() const { return projection_matrix; }
+    void set_texture_capture_target(u32 vtx_phys);
+    const Matrix4x4& get_projection() const;
+    // A graphics task running on the low-level RSP draws through RDP
+    // commands, which carry no 3D geometry: its display list is read here
+    // too, by the geometry-only copy, so the capture still sees the scene.
+    // The RSP identifies the microcode on capture_shadow() first (null while
+    // the capture is off).
+    RDP* capture_shadow();
+    void capture_display_list(u32 dl_addr, const u8* rdram, size_t rdram_size);
 
     // MMIO register access for DPC (0x04100000) and DPS (0x04200000)
     u32 read_dpc_reg(u32 addr) const;
@@ -265,6 +270,10 @@ private:
     struct RawVertex { f32 x{0}, y{0}, z{0}; u32 src{0}; };
     std::array<RawVertex, 80> raw_vertex{};
     bool capture_enabled{false};
+    bool geometry_only_{false};
+    std::unique_ptr<RDP> capture_shadow_; // geometry-only copy (capture_display_list)
+    std::unique_ptr<MI> capture_shadow_mi_; // takes its interrupts
+    bool capture_from_shadow_{false};     // what the last take_capture() returned
     std::vector<CapturedMesh> capture_frame;
     u32 capture_mtx_addr{0};
     u32 capture_dl_addr{0};
