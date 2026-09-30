@@ -717,13 +717,16 @@ void RDP::rdp_triangle(const u64* cmd, u32 op, u8* rdram, size_t rdram_size) {
     if (ym > yl) { // no L part: M runs to the bottom
         poly[3] = poly[4] = {xm + dxmdy * (yl - y0), yl};
     }
+    // (Only corners that coincide are merged: two edges meeting a hair
+    // apart are each the polygon's boundary on their side.)
     P pts[6];
     int n = 0;
+    constexpr f32 kSame = 1.0f / 4096.0f;
     for (const P& p : poly) {
-        if (n > 0 && std::fabs(p.x - pts[n - 1].x) < 0.125f && std::fabs(p.y - pts[n - 1].y) < 0.125f) continue;
+        if (n > 0 && std::fabs(p.x - pts[n - 1].x) < kSame && std::fabs(p.y - pts[n - 1].y) < kSame) continue;
         pts[n++] = p;
     }
-    while (n > 1 && std::fabs(pts[n - 1].x - pts[0].x) < 0.125f && std::fabs(pts[n - 1].y - pts[0].y) < 0.125f) --n;
+    while (n > 1 && std::fabs(pts[n - 1].x - pts[0].x) < kSame && std::fabs(pts[n - 1].y - pts[0].y) < kSame) --n;
     if (n < 3) return;
 
     const bool persp = (other_mode_h >> 19) & 1;
