@@ -266,7 +266,11 @@ void Emulator::render_frame(VideoFrame& out) {
     // The bit-exact RDP has its own internal resolution.
     HiResRenderer* hr = rdp.exact_drawing() ? nullptr : rdp.hires();
     const VIScanout so = vi.scanout(rdram_size);
-    if (rdp.exact_drawing() && vi_exact_) {
+    // At native resolution the high-level renderer's frames go through the
+    // exact VI too: it writes the coverage (ninth bits) and dithering the
+    // VI's anti-aliasing and dither filters work from.
+    const bool native_exact_vi = !hr && rdp.exact_rdp()->scale() <= 1;
+    if ((rdp.exact_drawing() || native_exact_vi) && vi_exact_) {
         rdp.flush_pending(); // queued bit-exact draws
         // Bit-exact RDP output goes through the VI as the hardware scans it out.
         out.gpu.reset();

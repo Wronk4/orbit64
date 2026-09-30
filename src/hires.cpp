@@ -51,7 +51,12 @@ struct HiResSink {
             mem.zhidden = static_cast<u8>(zv & 3);
         }
         raster::PixelResult res;
-        if (!raster::pixel_backend(st, c, aux, mem, res)) return;
+#ifdef HIRES_EXACT_TEST
+        const bool dither = true; // as the native pass (scale 1)
+#else
+        const bool dither = false; // nothing filters it out again
+#endif
+        if (!raster::pixel_backend(st, c, aux, mem, res, dither, x, y)) return;
         if (res.z_write && depth) depth[idx] = static_cast<f32>((static_cast<u32>(res.zword) << 2) | res.zhidden);
         const u32 a = static_cast<u32>(res.cvg) << 29;
 #ifdef HIRES_EXACT_TEST

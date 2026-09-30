@@ -196,6 +196,7 @@ struct DrawState {
     bool aa_en{false}, image_read{false}, color_on_cvg{false}, cvg_times_alpha{false}, alpha_cvg_select{false};
     bool alpha_test{false}, alpha_test_dither{false};
     u8 z_mode{0};   // ZMODE: 0 opaque, 1 interpenetrating, 2 translucent, 3 decal
+    u8 rgb_dither{3}, alpha_dither{3}; // G_MDSFT_RGBDITHER / ALPHADITHER: 0 magic square, 1 Bayer, 2 noise, 3 none
     u8 cvg_mode{0}; // CVG_DST: 0 clamp, 1 wrap, 2 full, 3 save
     // Texture level of detail: G_TEXTURE's level count, gDPSetPrimColor's
     // minimum level and fraction; derived: whether LOD is worked out at all.
@@ -326,6 +327,8 @@ struct DrawState {
         alpha_threshold = copy_mode ? 1 : (blend_color & 0xFF);
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
         alpha_from_cvg = (other_mode_l & 0x3000) == 0x2000;
+        rgb_dither = (other_mode_h >> 6) & 3;
+        alpha_dither = (other_mode_h >> 4) & 3;
         aa_en = (other_mode_l >> 3) & 1;
         image_read = (other_mode_l >> 6) & 1;
         color_on_cvg = (other_mode_l >> 7) & 1;
@@ -837,12 +840,44 @@ inline const u8* blender_divider() {
     return lut.data();
 }
 
+// ---- Dithering: before the colour is stored, each channel is rounded up
+// to the next multiple of 8 when its lower 3 bits are above the pixel's
+// threshold (magic square or Bayer matrix, or noise); the alpha gets a
+// 0..7 offset. The VI's dither filter smooths the pattern out again.
+inline constexpr u8 kDitherMatrix[2][16] = {
+    {0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0}, // magic square
+    {0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2}, // Bayer
+};
+// A pixel's RGB threshold (3 bits per channel, r in the lowest) and alpha offset.
+inline void dither_values(const DrawState& st, u32 x, u32 y, u32 noise, s32& rgb_dith, s32& alpha_dith) {
+    constexpr s32 kSplat = (1 << 0) | (1 << 3) | (1 << 6);
+    const int m = st.rgb_dither, am = st.alpha_dither;
+    const u32 cell = (y & 3) * 4 + (x & 3);
+    if (m < 2) rgb_dith = kDitherMatrix[m][cell] * kSplat;
+    else if (m == 2) rgb_dith = static_cast<s32>(noise & 0x1FF);
+    else rgb_dith = 0;
+    if (am == 3) {
+        alpha_dith = 0;
+    } else if (am == 2) {
+        alpha_dith = static_cast<s32>((noise >> 9) & 7);
+    } else {
+        alpha_dith = m >= 2 ? kDitherMatrix[m & 1][cell] : (rgb_dith & 7);
+        if (am == 1) alpha_dith = ~alpha_dith & 7;
+    }
+}
+inline s32 dither_channel(s32 c, s32 d) {
+    if ((c & 7) <= d) return c;
+    return c > 247 ? 255 : (c & 0xF8) + 8;
+}
+
 // The memory stage of a 1- or 2-cycle pixel (not FILL; COPY writes the
 // texel as it is): coverage and alpha, the alpha compare, the depth test,
 // the blender (both cycles) and the coverage stored with the colour, in the
 // hardware's integer arithmetic. `color` is the combiner's output (ARGB).
-// False when the pixel is not written.
-inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, const MemPixel& mem, PixelResult& out) {
+// With `dither` (the native pass), pixel (x, y) is dithered as the modes
+// say. False when the pixel is not written.
+inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, const MemPixel& mem, PixelResult& out,
+                          bool dither = false, u32 x = 0, u32 y = 0) {
     const s32 in_r = (color >> 16) & 0xFF, in_g = (color >> 8) & 0xFF, in_b = color & 0xFF, in_a = color >> 24;
     if (st.copy_mode) {
         if (st.alpha_test && in_a == 0) return false;
@@ -853,6 +888,10 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, c
         out.z_write = false;
         return true;
     }
+    s32 rgb_dith = 0, alpha_dith = 0;
+    const bool dither_rgb = dither && st.rgb_dither != 3;
+    if (dither && (st.rgb_dither != 3 || st.alpha_dither != 3))
+        dither_values(st, x, y, (st.rgb_dither == 2 || st.alpha_dither == 2) ? pixel_noise(st, x, y) >> 4 : 0, rgb_dith, alpha_dith);
     // Coverage and alpha
     s32 cvg = aux.cvg;
     const s32 expanded = in_a + ((in_a + 1) >> 8);
@@ -863,13 +902,15 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, c
     } else {
         modulated = cvg << 5;
     }
-    const s32 alpha = std::clamp(st.alpha_cvg_select ? modulated : expanded, 0, 0xFF);
+    const s32 alpha = std::clamp(st.alpha_cvg_select ? modulated : expanded + alpha_dith, 0, 0xFF);
+    const s32 shade_a = std::min(aux.shade_a + alpha_dith, 0xFF);
     if (st.aa_en && cvg == 0) return false;
     if (st.alpha_test) {
         s32 ref = alpha;
         if (st.two_cycle && aux.alpha0 >= 0) {
             s32 ea = aux.alpha0 + ((aux.alpha0 + 1) >> 8);
             if (st.alpha_cvg_select) ea = st.cvg_times_alpha ? (ea * aux.cvg + 4) >> 3 : aux.cvg << 5;
+            else ea += alpha_dith;
             ref = std::clamp(ea, 0, 0xFF);
         }
         const s32 threshold = st.alpha_test_dither ? aux.noise : static_cast<s32>(st.blend_color & 0xFF);
@@ -949,7 +990,7 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, c
             for (int i = 0; i < 3; ++i) res[i] = src0[i];
             return;
         }
-        s32 a0 = a == 0 ? px[3] : a == 1 ? fog[3] : a == 2 ? aux.shade_a : 0;
+        s32 a0 = a == 0 ? px[3] : a == 1 ? fog[3] : a == 2 ? shade_a : 0;
         s32 a1 = b == 0 ? (~a0 & 0xFF) : b == 1 ? memc[3] : b == 2 ? 0xFF : 0;
         a0 >>= 3;
         a1 >>= 3;
@@ -975,6 +1016,8 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, c
     } else {
         cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, true, rgb);
     }
+    if (dither_rgb)
+        for (int i = 0; i < 3; ++i) rgb[i] = dither_channel(rgb[i], (rgb_dith >> (3 * i)) & 7);
     out.r = static_cast<u8>(rgb[0]);
     out.g = static_cast<u8>(rgb[1]);
     out.b = static_cast<u8>(rgb[2]);
@@ -1153,13 +1196,15 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                         mask |= 1u << i;
             }
             if (aa ? mask == 0 : (mask & 1) == 0) continue;
+            // Barycentric coordinates of the corner, where the texture
+            // coordinates are taken, and of the first covered sample, where
+            // the shade and the depth are.
+            const f32 tw0 = e[0] * sgn * inv_area;
+            const f32 tw1 = e[1] * sgn * inv_area;
+            const f32 tw2 = 1.0f - tw0 - tw1;
             const int first = __builtin_ctz(mask);
-            if (first != 0) {
-                px += kSampleX[first] * inv_scale;
-                py += kSampleY[first] * inv_scale;
+            if (first != 0)
                 for (int k = 0; k < 3; ++k) e[k] += sdelta[k][first];
-            }
-            // Barycentric coordinates of the point the attributes are taken at.
             const f32 w0 = e[0] * sgn * inv_area;
             const f32 w1 = e[1] * sgn * inv_area;
             const f32 w2 = 1.0f - w0 - w1;
@@ -1187,10 +1232,10 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
 
                 u32 color;
                 if (textured) {
-                    f32 inv_w_interp = w0 * inv_w0 + w1 * inv_w1 + w2 * inv_w2;
+                    f32 inv_w_interp = tw0 * inv_w0 + tw1 * inv_w1 + tw2 * inv_w2;
                     f32 w_interp = (inv_w_interp != 0.0f) ? (1.0f / inv_w_interp) : 1.0f;
-                    const f32 uw = w0 * u_over_w0 + w1 * u_over_w1 + w2 * u_over_w2;
-                    const f32 vw = w0 * v_over_w0 + w1 * v_over_w1 + w2 * v_over_w2;
+                    const f32 uw = tw0 * u_over_w0 + tw1 * u_over_w1 + tw2 * u_over_w2;
+                    const f32 vw = tw0 * v_over_w0 + tw1 * v_over_w1 + tw2 * v_over_w2;
                     f32 u = uw * w_interp;
                     f32 v = vw * w_interp;
                     if (dolod) {

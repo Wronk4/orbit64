@@ -14,8 +14,10 @@
 //   bin/rdp_check rom.z64 [--frames N] [--scale S] [--warm N] [--int]
 //                 [--mash btn] [--mash-from frame] [--press frame:btn] [--shot frame:out.png]
 //                 [--shot-every n:dir]
-//                 [--frame-log out.txt] [--timing] [--dump-ram out.bin] [--raw frame:out.argb]
+//                 [--frame-log out.txt] [--timing] [--dump-ram out.bin] [--raw frame:out.argb] [--vi-native]
 //
+// --vi-native shows the frame buffer as it is instead of through the exact
+// VI (which native-resolution frames otherwise go through).
 // --timing skips the per-frame hashing (it costs several ms per frame at
 // high scales). --frame-log writes one hash per frame, to find the first frame
 // two builds disagree on.
@@ -52,7 +54,7 @@ int main(int argc, char** argv) {
     std::string rom, mash, frame_log, dump_ram, shot_dir;
     int mash_from = 0, shot_every = 0;
     int frames = 900, scale = 1, warm = 300;
-    bool interp = false, timing = false;
+    bool interp = false, timing = false, vi_native = false;
     std::vector<std::pair<int, std::string>> presses, shots, raws;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -61,6 +63,7 @@ int main(int argc, char** argv) {
         else if (a == "--scale") scale = std::stoi(next());
         else if (a == "--warm") warm = std::stoi(next());
         else if (a == "--int") interp = true;
+        else if (a == "--vi-native") vi_native = true;
         else if (a == "--timing") timing = true;
         else if (a == "--mash") mash = next();
         else if (a == "--mash-from") mash_from = std::stoi(next());
@@ -86,6 +89,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     emu.set_cpu_core(interp ? CpuCore::Interpreter : CpuCore::Recompiler);
+    if (vi_native) emu.set_vi_exact(false);
 #ifdef HIRES_EXACT_TEST
     emu.get_rdp().force_hires(static_cast<u32>(scale));
 #else

@@ -485,12 +485,12 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
     }
     uint flags = D[sb];
     if ((flags & GPU_ST_AA) != 0u ? mask == 0u : (mask & 1u) == 0u) return;
+    // Texture coordinates at the corner, shade and depth at the first covered sample.
+    float tw0 = e.x * sgn * inv_area;
+    float tw1 = e.y * sgn * inv_area;
+    float tw2 = 1.0 - tw0 - tw1;
     int first = findLSB(mask);
-    if (first != 0) {
-        px += kSampleX[first] * P.inv_scale;
-        py += kSampleY[first] * P.inv_scale;
-        e += (ea * kSampleX[first] + eb * kSampleY[first]) * P.inv_scale * sgn;
-    }
+    if (first != 0) e += (ea * kSampleX[first] + eb * kSampleY[first]) * P.inv_scale * sgn;
     float w0 = e.x * sgn * inv_area;
     float w1 = e.y * sgn * inv_area;
     float w2 = 1.0 - w0 - w1;
@@ -518,10 +518,10 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
 
     uint color;
     if ((flags & GPU_ST_TEXTURED) != 0u) {
-        float iw = w0 * fword(pb + 6u) + w1 * fword(pb + 13u) + w2 * fword(pb + 20u);
+        float iw = tw0 * fword(pb + 6u) + tw1 * fword(pb + 13u) + tw2 * fword(pb + 20u);
         float w_interp = iw != 0.0 ? 1.0 / iw : 1.0;
-        float uw = w0 * fword(pb + 7u) + w1 * fword(pb + 14u) + w2 * fword(pb + 21u);
-        float vw = w0 * fword(pb + 8u) + w1 * fword(pb + 15u) + w2 * fword(pb + 22u);
+        float uw = tw0 * fword(pb + 7u) + tw1 * fword(pb + 14u) + tw2 * fword(pb + 21u);
+        float vw = tw0 * fword(pb + 8u) + tw1 * fword(pb + 15u) + tw2 * fword(pb + 22u);
         float u = uw * w_interp;
         float v = vw * w_interp;
         uint tile0 = (D[sb + 1u] >> 4u) & 7u;

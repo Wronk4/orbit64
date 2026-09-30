@@ -3036,7 +3036,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, s
         mem.g = (word >> 3) & 0xF8;
         mem.b = (word << 2) & 0xF8;
         mem.cvg = ((word & 1) << 2) | hle_hidden_->hidden_at(idx >> 1, word);
-        if (!raster::pixel_backend(st, color, aux, mem, res)) {
+        if (!raster::pixel_backend(st, color, aux, mem, res, true, x, y)) {
             stats.z_fail++;
             return;
         }
@@ -3052,7 +3052,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, s
         mem.g = rdram[idx + 1];
         mem.b = rdram[idx + 2];
         mem.cvg = rdram[idx + 3] >> 5;
-        if (!raster::pixel_backend(st, color, aux, mem, res)) {
+        if (!raster::pixel_backend(st, color, aux, mem, res, true, x, y)) {
             stats.z_fail++;
             return;
         }
