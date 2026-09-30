@@ -284,7 +284,7 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
            flag(st.image_read, GPU_ST_IMAGE_READ) | flag(st.color_on_cvg, GPU_ST_COLOR_ON_CVG) |
            flag(st.cvg_times_alpha, GPU_ST_CVG_X_ALPHA) | flag(st.alpha_cvg_select, GPU_ST_ALPHA_CVG_SEL) |
            flag(st.alpha_test, GPU_ST_ALPHA_TEST) | flag(st.alpha_test_dither, GPU_ST_ALPHA_DITHER) |
-           flag(st.uses_noise, GPU_ST_NOISE);
+           flag(st.uses_noise, GPU_ST_NOISE) | flag(st.z_source_prim, GPU_ST_Z_PRIM);
     w[1] = (st.tlut_type & 15) | (st.active_tile & 7) << 4 | static_cast<u32>(st.z_mode & 3) << 8 |
            static_cast<u32>(st.cvg_mode & 3) << 10 | static_cast<u32>(st.blend_color & 0xFF) << 16;
     auto mux = [](u8 a, u8 b, u8 c, u8 d) {
@@ -328,6 +328,7 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
     w[GPU_ST_KEY_SCALE] = mux(st.key_scale[0], st.key_scale[1], st.key_scale[2], 0);
     w[GPU_ST_K45] = static_cast<u32>(st.k4 & 0x1FF) | static_cast<u32>(st.k5 & 0x1FF) << 16;
     w[GPU_ST_NOISE_SEED] = st.noise_seed;
+    w[GPU_ST_PRIM_Z] = static_cast<u32>(st.prim_depth) | static_cast<u32>(st.prim_dz) << 16;
     w[GPU_ST_LOD] = flag(st.tex_lod_en, GPU_LOD_TEX_EN) | flag(st.sharpen, GPU_LOD_SHARPEN) |
                     flag(st.detail, GPU_LOD_DETAIL) | flag(st.dolod, GPU_LOD_DOLOD) |
                     static_cast<u32>(st.max_level) << 8 | static_cast<u32>(st.min_level) << 16 |
@@ -412,6 +413,10 @@ void RdpRenderer::triangle(HiResTarget* ht, const DrawState& st, u64 serial, u64
     }
     q[24] = fbits(1.0f / area);
     q[25] = fbits(raster::walk_direction(v0, v1, v2));
+    s32 dz = 0;
+    u8 dzc = 0;
+    raster::triangle_depth_slope(st, v0, v1, v2, area, dz, dzc);
+    q[26] = static_cast<u32>(dz) | static_cast<u32>(dzc) << 16;
 }
 
 void RdpRenderer::tex_rect(HiResTarget* ht, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly,

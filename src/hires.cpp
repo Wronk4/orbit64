@@ -32,8 +32,9 @@ struct HiResSink {
     }
 
     // The colour keeps the pixel's coverage in the upper 3 bits of alpha,
-    // like a 32-bit colour image in RDRAM.
-    void write(u32 x, u32 y, u32 c, f32 z, const raster::PixelAux& aux = {}) {
+    // like a 32-bit colour image in RDRAM; the depth, what the RDP stores in
+    // RDRAM (halfword << 2 | ninth bits), as a float (1e30: cleared).
+    void write(u32 x, u32 y, u32 c, const raster::PixelAux& aux = {}) {
         if (x >= width || y >= height) return;
         if (x < sx0 || x >= sx1 || y < sy0 || y >= sy1) return;
         const size_t idx = static_cast<size_t>(y) * width + x;
@@ -44,9 +45,14 @@ struct HiResSink {
         mem.g = static_cast<s32>((d >> 8) & m);
         mem.b = static_cast<s32>(d & m);
         mem.cvg = static_cast<s32>(d >> 29);
+        if (depth && depth[idx] < 1e29f) {
+            const u32 zv = static_cast<u32>(depth[idx]);
+            mem.zword = static_cast<u16>(zv >> 2);
+            mem.zhidden = static_cast<u8>(zv & 3);
+        }
         raster::PixelResult res;
-        if (!raster::pixel_backend(st, c, aux, z, depth ? depth[idx] : raster::kDepthCleared, mem, res)) return;
-        if (res.z_write && depth) depth[idx] = z;
+        if (!raster::pixel_backend(st, c, aux, mem, res)) return;
+        if (res.z_write && depth) depth[idx] = static_cast<f32>((static_cast<u32>(res.zword) << 2) | res.zhidden);
         const u32 a = static_cast<u32>(res.cvg) << 29;
 #ifdef HIRES_EXACT_TEST
         // Test builds: keep exactly what RDRAM holds, so that at scale 1 the
@@ -507,7 +513,11 @@ void CpuHiResRenderer::execute(const Cmd& c, s32 y0, s32 y1) const {
                 const s32 ya = std::max(static_cast<s32>(px[i].y * S), y0);
                 const s32 yb = std::min(static_cast<s32>(px[i].y * S + S), y1);
                 for (s32 y = ya; y < yb; ++y)
-                    for (u32 x = px[i].x * S; x < px[i].x * S + S; ++x) sink.write(x, static_cast<u32>(y), px[i].color, px[i].z);
+                    for (u32 x = px[i].x * S; x < px[i].x * S + S; ++x) {
+                        raster::PixelAux aux;
+                        aux.z = raster::depth18(px[i].z);
+                        sink.write(x, static_cast<u32>(y), px[i].color, aux);
+                    }
             }
             break;
         }
@@ -518,7 +528,7 @@ void CpuHiResRenderer::execute(const Cmd& c, s32 y0, s32 y1) const {
             const s32 yb = std::min(static_cast<s32>((b.y0 + b.h) * S), y1);
             for (s32 y = ya; y < yb; ++y) {
                 const u32* src = b.colors + static_cast<size_t>(y / S - b.y0) * b.w;
-                for (u32 x = 0; x < b.w * S; ++x) sink.write(b.x0 * S + x, static_cast<u32>(y), src[x / S], 0.0f);
+                for (u32 x = 0; x < b.w * S; ++x) sink.write(b.x0 * S + x, static_cast<u32>(y), src[x / S]);
             }
             break;
         }

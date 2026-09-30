@@ -248,6 +248,37 @@ uint combine(uint sb, uint tex0, uint tex1, ivec4 shade, int lod_frac, int noise
     return (uint(cc_clamp(o.a)) << 24u) | (uint(cc_clamp(o.r)) << 16u) | (uint(cc_clamp(o.g)) << 8u) | uint(cc_clamp(o.b));
 }
 
+// ---- Depth (raster::z_decompress and friends) --------------------------------------
+
+int z_decompress(int z) {
+    int exponent = z >> 11, mantissa = z & 0x7FF;
+    int shift = max(6 - exponent, 0);
+    int base = 0x40000 - (0x40000 >> exponent);
+    return (mantissa << shift) + base;
+}
+int z_compress(int z) {
+    int inv_z = max(0x3FFFF - z, 1);
+    int exponent = clamp(17 - findMSB(inv_z), 0, 7);
+    int shift = max(6 - exponent, 0);
+    int mantissa = (z >> shift) & 0x7FF;
+    return (exponent << 11) + mantissa;
+}
+int dz_compress(int dz) { return max(findMSB(dz), 0); }
+int combine_dz(int dz) { return dz != 0 ? 1 << findMSB(dz) : 0; }
+int dz_compress_prim(int dz) {
+    int val = 0;
+    if ((dz & 0xFF00) != 0) val |= 8;
+    if ((dz & 0xF0F0) != 0) val |= 4;
+    if ((dz & 0xCCCC) != 0) val |= 2;
+    if ((dz & 0xAAAA) != 0) val |= 1;
+    return val;
+}
+// raster::depth18(): Vertex::sz as the RDP's 18-bit depth.
+int depth18(float sz) {
+    float v = sz * (1023.0 * 32.0 * 8.0);
+    return !(v > 0.0) ? 0 : v >= 262143.0 ? 0x3FFFF : int(v);
+}
+
 // ---- Memory stage (raster::pixel_backend, HiResSink::write) ----------------------
 
 // The blender's divider (raster::blender_divider()), entry ((sum << 11) | n).
@@ -268,6 +299,7 @@ int bl_divide(int sum, int n) {
 struct Aux {
     uint shade_a, cvg, noise;
     int alpha0; // -1: none
+    int z, dz, dzc;
 };
 
 Aux aux_default() {
@@ -276,10 +308,14 @@ Aux aux_default() {
     a.cvg = 8u;
     a.noise = 0u;
     a.alpha0 = -1;
+    a.z = 0;
+    a.dz = 1;
+    a.dzc = 0;
     return a;
 }
 
-ivec3 blend_cycle(uint sb, uint mux, bool final_cycle, bool blend_en, bool overflow, ivec4 px, ivec4 memc, uint shade_a) {
+ivec3 blend_cycle(uint sb, uint mux, bool final_cycle, bool blend_en, bool overflow, ivec4 px, ivec4 memc, uint shade_a,
+                  int shift_a, int shift_b) {
     uint p = mux & 3u, a = (mux >> 8u) & 3u, m = (mux >> 16u) & 3u, b = (mux >> 24u) & 3u;
     uint bc = D[sb + 8u], fc = D[sb + 9u];
     ivec4 blc = ivec4(int(bc >> 24u), int((bc >> 16u) & 0xFFu), int((bc >> 8u) & 0xFFu), int(bc & 0xFFu));
@@ -293,8 +329,8 @@ ivec3 blend_cycle(uint sb, uint mux, bool final_cycle, bool blend_en, bool overf
     a0 >>= 3;
     a1 >>= 3;
     if (b == 1u) {
-        a0 &= 0x3C;
-        a1 |= 3;
+        a0 = (a0 >> shift_a) & 0x3C;
+        a1 = (a1 >> shift_b) | 3;
     }
     ivec3 v = src0.rgb * a0 + src1.rgb * (a1 + 1);
     if (!final_cycle || (D[sb] & GPU_ST_FORCE_BLEND) != 0u) return (v >> 5) & 0xFF;
@@ -302,8 +338,10 @@ ivec3 blend_cycle(uint sb, uint mux, bool final_cycle, bool blend_en, bool overf
     return ivec3(bl_divide(sum, (v.r >> 2) & 0x7FF), bl_divide(sum, (v.g >> 2) & 0x7FF), bl_divide(sum, (v.b >> 2) & 0x7FF));
 }
 
-// The colour keeps the pixel's coverage in the upper 3 bits of alpha.
-void sink_write(uint sb, uint x, uint y, uint src, float fz, Aux aux, inout uint c, inout float z) {
+// The colour keeps the pixel's coverage in the upper 3 bits of alpha; the
+// depth, what the RDP keeps in RDRAM (halfword << 2 | ninth bits), as a
+// float (1e30: cleared).
+void sink_write(uint sb, uint x, uint y, uint src, Aux aux, inout uint c, inout float zbuf) {
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
     uint flags = D[sb];
     int in_a = int(src >> 24u);
@@ -340,19 +378,55 @@ void sink_write(uint sb, uint x, uint y, uint src, float fz, Aux aux, inout uint
     bool overflow = cvg + mem_cvg >= 8;
     bool blend_en;
     bool force = (flags & GPU_ST_FORCE_BLEND) != 0u, aa = (flags & GPU_ST_AA) != 0u;
+    int z = aux.z;
+    int shift_a = 0, shift_b = 0;
     if ((flags & GPU_ST_Z_COMPARE) != 0u) {
-        uint zmode = (w1 >> 8u) & 3u;
-        bool max_z = z >= 1e30;
-        bool front = fz < z;
-        float slack = zmode == 3u ? 2.0 / 1023.0 : 1.0 / (1023.0 * 32.0);
-        bool farther = fz + slack >= z, nearer = fz - slack <= z;
+        int zv = zbuf < 1e29 ? int(zbuf) : (0xFFFC << 2);
+        int cur_depth = zv >> 4;
+        int cur_dz = zv & 15;
+        int memory_z = z_decompress(cur_depth);
+        int memory_dz = 1 << cur_dz;
+        int prec = (cur_depth >> 11) & 0xF;
+        bool coplanar = false;
+        shift_a = clamp(aux.dzc - cur_dz, 0, 4);
+        shift_b = clamp(cur_dz - aux.dzc, 0, 4);
+        if (prec < 3) {
+            if (memory_dz != 0x8000) {
+                memory_dz = max(memory_dz << 1, 16 >> prec);
+            } else {
+                coplanar = true;
+                memory_dz = 0xFFFF;
+            }
+        }
+        int combined_dz = combine_dz(aux.dz | memory_dz);
+        int combined_dz_ip = combined_dz;
+        combined_dz <<= 3;
+        bool farther = coplanar || (z + combined_dz) >= memory_z;
         blend_en = force || (!overflow && aa && farther);
+        bool max_z = memory_z == 0x3FFFF;
+        bool front = z < memory_z;
+        bool nearer = coplanar || (z - combined_dz) <= memory_z;
+        uint zmode = (w1 >> 8u) & 3u;
         bool pass;
-        if (zmode <= 1u) pass = max_z || (overflow ? front : nearer);
-        else if (zmode == 2u) pass = front || max_z;
-        else pass = farther && nearer && !max_z;
-        if (!pass) return;
+        if (zmode == 0u) {
+            pass = max_z || (overflow ? front : nearer);
+        } else if (zmode == 1u) {
+            if (!front || !farther || !overflow) {
+                pass = max_z || (overflow ? front : nearer);
+            } else {
+                int cdz = dz_compress(combined_dz_ip & 0xFFFF);
+                int coeff = ((memory_z >> cdz) - (z >> cdz)) & 0xF;
+                cvg = min((coeff * cvg) >> 3, 8);
+                pass = true;
+            }
+        } else if (zmode == 2u) {
+            pass = front || max_z;
+        } else {
+            pass = farther && nearer && !max_z;
+        }
+        if (!pass || (aa && cvg == 0)) return;
     } else {
+        shift_b = min(0xF - aux.dzc, 4);
         blend_en = force || (!overflow && aa);
     }
 
@@ -361,11 +435,11 @@ void sink_write(uint sb, uint x, uint y, uint src, float fz, Aux aux, inout uint
     ivec4 memc = ivec4(int((c >> 16u) & mm), int((c >> 8u) & mm), int(c & mm), mem_cvg << 5);
     ivec3 rgb;
     if ((flags & GPU_ST_TWO_CYCLE) != 0u) {
-        rgb = blend_cycle(sb, D[sb + 10u], false, blend_en, overflow, px, memc, aux.shade_a);
+        rgb = blend_cycle(sb, D[sb + 10u], false, blend_en, overflow, px, memc, aux.shade_a, shift_a, shift_b);
         px.rgb = rgb;
-        rgb = blend_cycle(sb, D[sb + GPU_ST_BLEND2], true, blend_en, overflow, px, memc, aux.shade_a);
+        rgb = blend_cycle(sb, D[sb + GPU_ST_BLEND2], true, blend_en, overflow, px, memc, aux.shade_a, shift_a, shift_b);
     } else {
-        rgb = blend_cycle(sb, D[sb + 10u], true, blend_en, overflow, px, memc, aux.shade_a);
+        rgb = blend_cycle(sb, D[sb + 10u], true, blend_en, overflow, px, memc, aux.shade_a, shift_a, shift_b);
     }
     int ncvg;
     uint cmode = (w1 >> 10u) & 3u;
@@ -374,45 +448,60 @@ void sink_write(uint sb, uint x, uint y, uint src, float fz, Aux aux, inout uint
     else if (cmode == 2u) ncvg = 7;
     else ncvg = mem_cvg;
     c = (uint(ncvg) << 29u) | (uint(rgb.r) << 16u) | (uint(rgb.g) << 8u) | uint(rgb.b);
-    if ((flags & GPU_ST_Z_UPDATE) != 0u) z = fz;
+    if ((flags & GPU_ST_Z_UPDATE) != 0u) zbuf = float((z_compress(z) << 4) | aux.dzc);
 }
 
 // ---- Primitives -------------------------------------------------------------------
 
-// A corner exactly on an edge belongs to the triangle on its right (or
-// below a horizontal one), see raster::triangle().
+// Coverage as raster::triangle() works it out: 8 samples per pixel, a sample
+// on an edge belonging to the triangle on its right (or below a horizontal
+// one); attributes at the first covered sample.
+const float kSampleX[8] = float[8](0.0, 0.5, 0.25, 0.75, 0.0, 0.5, 0.25, 0.75);
+const float kSampleY[8] = float[8](0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75);
 bool edge_tie(float a, float b, float sgn) { return a * sgn > 0.0 || (a == 0.0 && b * sgn > 0.0); }
-bool edge_in(float e, bool t, float sgn) { return e * sgn > 0.0 || (e == 0.0 && t); }
+bool edge_in(float e, bool t) { return e > 0.0 || (e == 0.0 && t); }
 
 void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z) {
-    // The pixel's upper-left corner, where the RDP samples it.
     float px = float(x) * P.inv_scale;
     float py = float(y) * P.inv_scale;
     float x0 = fword(pb + 3u), y0 = fword(pb + 4u);
     float x1 = fword(pb + 10u), y1 = fword(pb + 11u);
     float x2 = fword(pb + 17u), y2 = fword(pb + 18u);
     float inv_area = fword(pb + 24u);
+    float area = 1.0 / inv_area;
     float sgn = inv_area > 0.0 ? 1.0 : -1.0;
-    float e0 = (x1 - px) * (y2 - py) - (x2 - px) * (y1 - py);
-    float e1 = (x2 - px) * (y0 - py) - (x0 - px) * (y2 - py);
-    float e2 = 1.0 / inv_area - e0 - e1;
-    if (!(edge_in(e0, edge_tie(y1 - y2, x2 - x1, sgn), sgn) && edge_in(e1, edge_tie(y2 - y0, x0 - x2, sgn), sgn) &&
-          edge_in(e2, edge_tie(y0 - y1, x1 - x0, sgn), sgn)))
-        return;
-    float w0 = e0 * inv_area;
-    float w1 = e1 * inv_area;
+    vec3 ea = vec3(y1 - y2, y2 - y0, y0 - y1);
+    vec3 eb = vec3(x2 - x1, x0 - x2, x1 - x0);
+    bvec3 ties = bvec3(edge_tie(ea.x, eb.x, sgn), edge_tie(ea.y, eb.y, sgn), edge_tie(ea.z, eb.z, sgn));
+    vec3 e;
+    e.x = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * sgn;
+    e.y = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * sgn;
+    e.z = area * sgn - e.x - e.y;
+    uint mask = 0u;
+    for (int i = 0; i < 8; ++i) {
+        vec3 d = (ea * kSampleX[i] + eb * kSampleY[i]) * P.inv_scale * sgn;
+        vec3 es = e + d;
+        if (edge_in(es.x, ties.x) && edge_in(es.y, ties.y) && edge_in(es.z, ties.z)) mask |= 1u << uint(i);
+    }
+    uint flags = D[sb];
+    if ((flags & GPU_ST_AA) != 0u ? mask == 0u : (mask & 1u) == 0u) return;
+    int first = findLSB(mask);
+    if (first != 0) {
+        px += kSampleX[first] * P.inv_scale;
+        py += kSampleY[first] * P.inv_scale;
+        e += (ea * kSampleX[first] + eb * kSampleY[first]) * P.inv_scale * sgn;
+    }
+    float w0 = e.x * sgn * inv_area;
+    float w1 = e.y * sgn * inv_area;
     float w2 = 1.0 - w0 - w1;
 
-    uint flags = D[sb];
-    float fz = w0 * fword(pb + 5u) + w1 * fword(pb + 12u) + w2 * fword(pb + 19u);
-    // What fails the depth test whatever its coverage and colour isn't shaded.
-    if ((flags & GPU_ST_Z_COMPARE) != 0u) {
-        uint zmode = (D[sb + 1u] >> 8u) & 3u;
-        bool max_z = z >= 1e30;
-        float slack = zmode == 3u ? 2.0 / 1023.0 : 1.0 / (1023.0 * 32.0);
-        if (zmode <= 1u && !max_z && fz - slack > z) return;
-        if (zmode == 2u && !max_z && !(fz < z)) return;
-    }
+    Aux aux = aux_default();
+    aux.cvg = uint(bitCount(mask));
+    uint pz = D[sb + GPU_ST_PRIM_Z];
+    aux.z = (flags & GPU_ST_Z_PRIM) != 0u ? int(pz & 0x7FFFu) << 3
+                                          : depth18(w0 * fword(pb + 5u) + w1 * fword(pb + 12u) + w2 * fword(pb + 19u));
+    aux.dz = int(D[pb + 26u] & 0xFFFFu);
+    aux.dzc = int(D[pb + 26u] >> 16u);
     uint c0 = D[pb + 9u], c1 = D[pb + 16u], c2 = D[pb + 23u];
     ivec4 shade;
     if ((flags & GPU_ST_SMOOTH) != 0u) {
@@ -424,7 +513,6 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
     } else {
         shade = ivec4(int(c0 & 0xFFu), int((c0 >> 8u) & 0xFFu), int((c0 >> 16u) & 0xFFu), int(c0 >> 24u));
     }
-    Aux aux = aux_default();
     aux.shade_a = uint(shade.a);
     int noise = (flags & GPU_ST_NOISE) != 0u ? int(((pixel_noise(sb, x, y) & 7u) << 6u) | 0x20u) : 0;
 
@@ -485,7 +573,7 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
         color = (uint(shade.a) << 24u) | (uint(shade.r) << 16u) | (uint(shade.g) << 8u) | uint(shade.b);
     }
     if ((flags & GPU_ST_ALPHA_DITHER) != 0u) aux.noise = (pixel_noise(sb, x, y) >> 8u) & 0xFFu;
-    sink_write(sb, x, y, color, fz, aux, c, z);
+    sink_write(sb, x, y, color, aux, c, z);
 }
 
 void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint c, inout float z) {
@@ -501,7 +589,13 @@ void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint 
     uint lt = D[pb + 13u];
     uint t0 = lt & 15u, t1 = (lt >> 4u) & 15u;
     Aux aux = aux_default();
-    aux.shade_a = 0u; // rectangles have no shade
+    aux.shade_a = 0u; // rectangles have no shade, nor depth (but the primitive's)
+    if ((flags & GPU_ST_Z_PRIM) != 0u) {
+        uint pz = D[sb + GPU_ST_PRIM_Z];
+        aux.z = int(pz & 0x7FFFu) << 3;
+        aux.dz = int(pz >> 16u);
+    }
+    aux.dzc = dz_compress_prim(aux.dz);
     uint color;
     if ((flags & GPU_ST_COMBINED) == 0u || (flags & GPU_ST_COPY) != 0u) {
         color = sample_texture(sb, t0, ss, st, false);
@@ -516,7 +610,7 @@ void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint 
         if ((flags & GPU_ST_TWO_CYCLE) == 0u) aux.alpha0 = -1;
     }
     if ((flags & GPU_ST_ALPHA_DITHER) != 0u) aux.noise = (pixel_noise(sb, x, y) >> 8u) & 0xFFu;
-    sink_write(sb, x, y, color, 0.0, aux, c, z);
+    sink_write(sb, x, y, color, aux, c, z);
 }
 
 void main() {
@@ -551,11 +645,13 @@ void main() {
         } else if (type == GPU_PRIM_FILL) {
             c = D[pb + 3u];
         } else if (type == GPU_PRIM_BLOCK) {
-            sink_write(sb, x, y, D[pb + 3u], fword(pb + 4u), aux_default(), c, z);
+            Aux a = aux_default();
+            a.z = depth18(fword(pb + 4u));
+            sink_write(sb, x, y, D[pb + 3u], a, c, z);
         } else if (type == GPU_PRIM_BLIT) {
             uint w = D[pb + 4u];
             uint src = D[pb + 3u] + (y / S - D[pb + 6u]) * w + (x - D[pb + 5u] * S) / S;
-            sink_write(sb, x, y, D[src], 0.0, aux_default(), c, z);
+            sink_write(sb, x, y, D[src], aux_default(), c, z);
         } else if (type == GPU_PRIM_UPLOAD) {
             uint w = D[pb + 4u];
             uint e = D[pb + 3u] + ((y / S - D[pb + 6u]) * w + (x / S - D[pb + 5u])) * 2u;

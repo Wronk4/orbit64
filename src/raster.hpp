@@ -145,6 +145,8 @@ struct DrawState {
     u32 noise_seed{0}; // varies the combiner's NOISE input between draws
     u32 scissor_ulx{0}, scissor_uly{0}, scissor_lrx{0}, scissor_lry{0};
     u32 fb_addr{0};   // colour image address (physical)
+    u32 zb_addr{0};   // depth image address (physical)
+    u16 prim_depth{0}, prim_dz{0}; // gDPSetPrimDepth: Z_SOURCE_PRIM's depth and slope
     u32 fb_w{320};    // colour image width in pixels
     u8 fb_size{2};    // colour image pixel size: 2 = RGBA5551, 3 = RGBA8888
     bool combine_set{false};
@@ -188,6 +190,7 @@ struct DrawState {
     // (full inside a primitive), not what the combiner worked out.
     bool alpha_from_cvg{false};
     bool z_compare{false}, z_update{false};
+    bool z_source_prim{false}; // G_ZS_PRIM: every pixel has the primitive depth
     bool z_decal{false}; // ZMODE_DEC: passes when about as deep as what is there
     // The memory stage as the hardware has it (pixel_backend()).
     bool aa_en{false}, image_read{false}, color_on_cvg{false}, cvg_times_alpha{false}, alpha_cvg_select{false};
@@ -333,6 +336,7 @@ struct DrawState {
         alpha_test = other_mode_l & 1;
         alpha_test_dither = (other_mode_l >> 1) & 1;
         z_compare = (other_mode_l & 0x10) != 0;
+        z_source_prim = (other_mode_l >> 2) & 1;
         z_update = (other_mode_l & 0x20) != 0;
         z_decal = ((other_mode_l >> 10) & 3) == 3;
 
@@ -388,15 +392,6 @@ inline void lod_tiles(const DrawState& st, f32 delta, u32 prim_tile, u32& t0, u3
         t0 = (prim_tile + l_tile + (magnify ? 0 : 1)) & 7;
         t1 = (prim_tile + l_tile + ((!distant && !magnify) ? 2 : 1)) & 7;
     }
-}
-
-// The depth test. Decals (ZMODE_DEC) are drawn on a surface at about its
-// depth: they pass within a small distance either way.
-constexpr f32 kDecalDepth = 2.0f / 1023.0f;
-inline bool depth_fails(const DrawState& st, f32 z, f32 stored) {
-    if (!st.z_compare) return false;
-    if (st.z_decal) return std::fabs(z - stored) > kDecalDepth;
-    return z > stored;
 }
 
 // 5-bit texel channel -> 8 bits, as the texture unit expands it: the upper
@@ -751,23 +746,73 @@ inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb,
            (static_cast<u32>(cc_clamp(out[1])) << 8) | static_cast<u32>(cc_clamp(out[2]));
 }
 
+// ---- Depth as the RDP keeps it: 18 bits (15.3) per pixel, stored as a
+// 14-bit floating point value (3-bit exponent) plus 4 bits of depth slope
+// (log2), the slope's lower 2 bits in the halfword's ninth bits.
+inline s32 find_msb(s32 v) { return v > 0 ? 31 - __builtin_clz(static_cast<u32>(v)) : -1; }
+inline s32 z_decompress(u32 z) {
+    const s32 exponent = static_cast<s32>(z >> 11), mantissa = static_cast<s32>(z & 0x7FF);
+    const s32 shift = std::max(6 - exponent, 0);
+    const s32 base = 0x40000 - (0x40000 >> exponent);
+    return (mantissa << shift) + base;
+}
+inline u16 z_compress(s32 z) {
+    const s32 inv_z = std::max(0x3FFFF - z, 1);
+    const s32 exponent = std::clamp(17 - find_msb(inv_z), 0, 7);
+    const s32 shift = std::max(6 - exponent, 0);
+    const s32 mantissa = (z >> shift) & 0x7FF;
+    return static_cast<u16>((exponent << 11) + mantissa);
+}
+inline s32 dz_compress(s32 dz) { return std::max(find_msb(dz), 0); }
+inline s32 combine_dz(s32 dz) { return dz != 0 ? 1 << find_msb(dz) : 0; }
+// A primitive's depth slope (|dz/dx| + |dz/dy|, integer depth units per
+// pixel) as the RDP rounds it: a power of two.
+inline s32 normalize_dzpix(s32 dz) {
+    if (dz >= 0x8000) return 0x8000;
+    if (dz == 0) return 1;
+    return 1 << (find_msb(dz) + 1);
+}
+inline u8 dz_compress_prim(s32 dz) {
+    int val = 0;
+    if (dz & 0xFF00) val |= 8;
+    if (dz & 0xF0F0) val |= 4;
+    if (dz & 0xCCCC) val |= 2;
+    if (dz & 0xAAAA) val |= 1;
+    return static_cast<u8>(val);
+}
+// Vertex::sz (0..1, the viewport's 0..1023) in the RDP's 15-bit depth units.
+constexpr f32 kDepthUnits = 1023.0f * 32.0f;
+// A depth in Vertex::sz units as the RDP's 18-bit per-pixel depth.
+inline s32 depth18(f32 sz) {
+    const f32 v = sz * (kDepthUnits * 8.0f);
+    return !(v > 0.0f) ? 0 : v >= 262143.0f ? 0x3FFFF : static_cast<s32>(v);
+}
+
 // What a pixel brings to the memory stage besides its colour.
 struct PixelAux {
     u8 shade_a{0xFF}; // the blender's A_SHADE (shade alpha)
     u8 cvg{8};        // how many of its 8 coverage samples the primitive covers
     s16 alpha0{-1};   // 2-cycle mode: the first cycle's alpha, which the alpha compare sees
     u8 noise{0};      // the dithered alpha compare's threshold
+    u8 dzc{0};        // the primitive's depth slope, compressed (log2)
+    s32 z{0};         // depth, 18 bits
+    s32 dz{1};        // the primitive's depth slope (normalize_dzpix)
 };
 // The frame buffer pixel as the blender reads it: 8-bit channels (the upper
-// 5 bits of a 16-bit pixel) and its coverage (0..7).
+// 5 bits of a 16-bit pixel) and its coverage (0..7); and the depth buffer's
+// halfword and its ninth bits.
 struct MemPixel {
     s32 r{0}, g{0}, b{0};
     s32 cvg{7};
+    u16 zword{0xFFFC};
+    u8 zhidden{0};
 };
 struct PixelResult {
     u8 r{0}, g{0}, b{0};
     u8 cvg{7};         // coverage to store with the colour
     bool z_write{false};
+    u16 zword{0};      // the depth buffer halfword to store (z_write)
+    u8 zhidden{0};     // and its ninth bits
 };
 
 // The blender's divider (4-bit denominator, 11-bit numerator): a
@@ -792,19 +837,12 @@ inline const u8* blender_divider() {
     return lut.data();
 }
 
-// Depth slack of the tests that allow for the primitives' depth slopes
-// (nearer/farther), in the units of Vertex::sz (1023 = the viewport's range).
-constexpr f32 kDepthSlack = 1.0f / (1023.0f * 32.0f);
-// What the depth buffer holds where nothing has been drawn since it was cleared.
-constexpr f32 kDepthCleared = 1e30f;
-
 // The memory stage of a 1- or 2-cycle pixel (not FILL; COPY writes the
 // texel as it is): coverage and alpha, the alpha compare, the depth test,
 // the blender (both cycles) and the coverage stored with the colour, in the
-// hardware's integer arithmetic. `color` is the combiner's output (ARGB),
-// `mem_z` the depth buffer's value. False when the pixel is not written.
-inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, f32 z, f32 mem_z, const MemPixel& mem,
-                          PixelResult& out) {
+// hardware's integer arithmetic. `color` is the combiner's output (ARGB).
+// False when the pixel is not written.
+inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, const MemPixel& mem, PixelResult& out) {
     const s32 in_r = (color >> 16) & 0xFF, in_g = (color >> 8) & 0xFF, in_b = color & 0xFF, in_a = color >> 24;
     if (st.copy_mode) {
         if (st.alpha_test && in_a == 0) return false;
@@ -841,21 +879,54 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, f
     // Depth
     const s32 mem_cvg = st.image_read ? mem.cvg : 7;
     const bool overflow = cvg + mem_cvg >= 8;
+    const s32 z = aux.z;
     bool blend_en;
+    s32 shift_a = 0, shift_b = 0; // the blender's A_MEM factors, by depth slope
     if (st.z_compare) {
-        const bool max_z = mem_z >= kDepthCleared;
-        const bool front = z < mem_z;
-        const f32 slack = st.z_mode == 3 ? kDecalDepth : kDepthSlack;
-        const bool farther = z + slack >= mem_z, nearer = z - slack <= mem_z;
+        const s32 cur_depth = mem.zword >> 2;
+        const s32 cur_dz = mem.zhidden | ((mem.zword & 3) << 2);
+        const s32 memory_z = z_decompress(static_cast<u32>(cur_depth));
+        s32 memory_dz = 1 << cur_dz;
+        const s32 precision = (cur_depth >> 11) & 0xF;
+        bool coplanar = false;
+        shift_a = std::clamp(static_cast<s32>(aux.dzc) - cur_dz, 0, 4);
+        shift_b = std::clamp(cur_dz - static_cast<s32>(aux.dzc), 0, 4);
+        if (precision < 3) {
+            if (memory_dz != 0x8000) {
+                memory_dz = std::max(memory_dz << 1, 16 >> precision);
+            } else {
+                coplanar = true;
+                memory_dz = 0xFFFF;
+            }
+        }
+        s32 combined_dz = combine_dz(aux.dz | memory_dz);
+        const s32 combined_dz_ip = combined_dz;
+        combined_dz <<= 3;
+        const bool farther = coplanar || (z + combined_dz) >= memory_z;
         blend_en = st.force_blend || (!overflow && st.aa_en && farther);
+        const bool max_z = memory_z == 0x3FFFF;
+        const bool front = z < memory_z;
+        const bool nearer = coplanar || (z - combined_dz) <= memory_z;
         bool pass;
         switch (st.z_mode) {
-            case 0: case 1: pass = max_z || (overflow ? front : nearer); break;
+            case 0: pass = max_z || (overflow ? front : nearer); break;
+            case 1:
+                if (!front || !farther || !overflow) {
+                    pass = max_z || (overflow ? front : nearer);
+                } else {
+                    // Interpenetrating: the coverage is scaled by how far in front it is.
+                    const s32 cdz = dz_compress(combined_dz_ip & 0xFFFF);
+                    const s32 coeff = ((memory_z >> cdz) - (z >> cdz)) & 0xF;
+                    cvg = std::min((coeff * cvg) >> 3, 8);
+                    pass = true;
+                }
+                break;
             case 2: pass = front || max_z; break;
             default: pass = farther && nearer && !max_z; break;
         }
-        if (!pass) return false;
+        if (!pass || (st.aa_en && cvg == 0)) return false;
     } else {
+        shift_b = std::min(0xF - static_cast<s32>(aux.dzc), 4);
         blend_en = st.force_blend || (!overflow && st.aa_en);
     }
 
@@ -883,8 +954,8 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, f
         a0 >>= 3;
         a1 >>= 3;
         if (b == 1) {
-            a0 &= 0x3C;
-            a1 |= 3;
+            a0 = (a0 >> shift_a) & 0x3C;
+            a1 = (a1 >> shift_b) | 3;
         }
         if (!final_cycle || st.force_blend) {
             for (int i = 0; i < 3; ++i) res[i] = ((src0[i] * a0 + src1[i] * (a1 + 1)) >> 5) & 0xFF;
@@ -914,6 +985,10 @@ inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, f
         default: out.cvg = static_cast<u8>(mem_cvg); break;
     }
     out.z_write = st.z_update;
+    if (st.z_update) {
+        out.zword = static_cast<u16>((z_compress(z) << 2) | (aux.dzc >> 2));
+        out.zhidden = aux.dzc & 3;
+    }
     return true;
 }
 
@@ -933,6 +1008,23 @@ inline f32 walk_direction(const V& v0, const V& v1, const V& v2) {
     return m->sx >= major_x ? 1.0f : -1.0f;
 }
 
+// The depth slope the RDP gets from the microcode: |dz/dx| + |dz/dy| (whole
+// depth units per pixel), rounded to a power of two; and compressed. With
+// Z_SOURCE_PRIM, the primitive depth's.
+template <class V>
+inline void triangle_depth_slope(const DrawState& st, const V& v0, const V& v1, const V& v2, f32 area, s32& dz, u8& dzc) {
+    if (st.z_source_prim) {
+        dz = st.prim_dz;
+    } else {
+        const f32 inv_area = 1.0f / area;
+        const f32 dzdx = ((v1.sy - v2.sy) * v0.sz + (v2.sy - v0.sy) * v1.sz + (v0.sy - v1.sy) * v2.sz) * inv_area;
+        const f32 dzdy = ((v2.sx - v1.sx) * v0.sz + (v0.sx - v2.sx) * v1.sz + (v1.sx - v0.sx) * v2.sz) * inv_area;
+        auto whole = [](f32 d) { return static_cast<s32>(std::min(std::fabs(d) * kDepthUnits, 32767.0f)); };
+        dz = normalize_dzpix(whole(dzdx) + whole(dzdy));
+    }
+    dzc = dz_compress_prim(dz);
+}
+
 // Signed screen-space area (twice the triangle's area); its sign is the winding.
 template <class V>
 inline f32 triangle_area(const V& v0, const V& v1, const V& v2) {
@@ -942,7 +1034,7 @@ inline f32 triangle_area(const V& v0, const V& v1, const V& v2) {
 // Rasterizes one (already culled) triangle at `scale` times the frame buffer
 // resolution, visiting only output rows [row_begin, row_end). Pixels whose
 // centre lies inside the triangle are shaded and handed to
-// sink.write(x, y, colour, z, shade alpha). V is any vertex type with the screen-space
+// sink.write(x, y, colour, PixelAux). V is any vertex type with the screen-space
 // fields of Vertex. Returns false when the scissor leaves nothing to draw.
 // The scissored bounding box triangle() scans at `scale`; false if it is
 // empty (nothing is drawn). Rows int(min_y) .. int(max_y) are the only ones
@@ -1005,34 +1097,79 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
     const f32 dvw_dx = ddx(v_over_w0, v_over_w1, v_over_w2), dvw_dy = ddy(v_over_w0, v_over_w1, v_over_w2);
     const f32 diw_dx = ddx(inv_w0, inv_w1, inv_w2), diw_dy = ddy(inv_w0, inv_w1, inv_w2);
     const f32 walk_dir = st.pipelined_tex1 ? walk_direction(v0, v1, v2) : 1.0f;
+    s32 tri_dz;
+    u8 tri_dzc;
+    triangle_depth_slope(st, v0, v1, v2, area, tri_dz, tri_dzc);
 
-    // The RDP samples a pixel at its upper-left corner: that point decides
-    // whether the pixel is drawn, and the attributes are taken there. A
-    // corner exactly on an edge belongs to the triangle on the edge's right
-    // (or, for a horizontal edge, below it): left and top edges are
-    // inclusive, right and bottom ones exclusive.
+    // Coverage: the RDP samples each pixel at 8 points, two per quarter
+    // scanline (offsets below, in pixels; sample 0 is the upper-left
+    // corner). A sample exactly on an edge belongs to the triangle on the
+    // edge's right (or, for a horizontal edge, below it): left and top edges
+    // are inclusive, right and bottom ones exclusive. Without anti-aliasing
+    // a pixel is drawn when its corner is covered; with it, when any sample
+    // is. Its attributes are taken at the first covered sample.
+    static constexpr f32 kSampleX[8] = {0.0f, 0.5f, 0.25f, 0.75f, 0.0f, 0.5f, 0.25f, 0.75f};
+    static constexpr f32 kSampleY[8] = {0.0f, 0.0f, 0.25f, 0.25f, 0.5f, 0.5f, 0.75f, 0.75f};
     const f32 sgn = area > 0.0f ? 1.0f : -1.0f;
     auto tie = [&](f32 a, f32 b) { return a * sgn > 0.0f || (a == 0.0f && b * sgn > 0.0f); };
-    const bool tie0 = tie(v1.sy - v2.sy, v2.sx - v1.sx);
-    const bool tie1 = tie(v2.sy - v0.sy, v0.sx - v2.sx);
-    const bool tie2 = tie(v0.sy - v1.sy, v1.sx - v0.sx);
-    auto inside = [&](f32 e, bool t) { return e * sgn > 0.0f || (e == 0.0f && t); };
+    // Each edge function's change per pixel right (a) and down (b).
+    const f32 ea[3] = {v1.sy - v2.sy, v2.sy - v0.sy, v0.sy - v1.sy};
+    const f32 eb[3] = {v2.sx - v1.sx, v0.sx - v2.sx, v1.sx - v0.sx};
+    const bool ties[3] = {tie(ea[0], eb[0]), tie(ea[1], eb[1]), tie(ea[2], eb[2])};
+    // Per edge and sample: how far the sample is from the corner (edge
+    // function units, sign-adjusted), and the smallest and largest of those.
+    f32 sdelta[3][8], dmin[3], dmax[3];
+    for (int k = 0; k < 3; ++k) {
+        dmin[k] = dmax[k] = 0.0f;
+        for (int i = 0; i < 8; ++i) {
+            sdelta[k][i] = (ea[k] * kSampleX[i] + eb[k] * kSampleY[i]) * inv_scale * sgn;
+            dmin[k] = std::min(dmin[k], sdelta[k][i]);
+            dmax[k] = std::max(dmax[k], sdelta[k][i]);
+        }
+    }
+    auto in_edge = [&](f32 e, bool t) { return e > 0.0f || (e == 0.0f && t); };
+    const bool aa = st.aa_en;
 
     for (int y = y_first; y <= y_last; ++y) {
         for (int x = static_cast<int>(min_x); x <= static_cast<int>(max_x); ++x) {
             f32 px = x * inv_scale;
             f32 py = y * inv_scale;
 
-            // Edge functions (twice the areas of the sub-triangles), then barycentric coordinates.
-            const f32 e0 = (v1.sx - px) * (v2.sy - py) - (v2.sx - px) * (v1.sy - py);
-            const f32 e1 = (v2.sx - px) * (v0.sy - py) - (v0.sx - px) * (v2.sy - py);
-            const f32 e2 = area - e0 - e1;
-            f32 w0 = e0 * inv_area;
-            f32 w1 = e1 * inv_area;
-            f32 w2 = 1.0f - w0 - w1;
-
-            if (inside(e0, tie0) && inside(e1, tie1) && inside(e2, tie2)) {
-                f32 z = w0 * v0.sz + w1 * v1.sz + w2 * v2.sz;
+            // Edge functions at the corner (twice the areas of the sub-triangles), sign-adjusted.
+            f32 e[3];
+            e[0] = ((v1.sx - px) * (v2.sy - py) - (v2.sx - px) * (v1.sy - py)) * sgn;
+            e[1] = ((v2.sx - px) * (v0.sy - py) - (v0.sx - px) * (v2.sy - py)) * sgn;
+            e[2] = area * sgn - e[0] - e[1];
+            u32 mask;
+            if (e[0] + dmin[0] > 0.0f && e[1] + dmin[1] > 0.0f && e[2] + dmin[2] > 0.0f) {
+                mask = 0xFF; // every sample well inside
+            } else if (e[0] + dmax[0] < 0.0f || e[1] + dmax[1] < 0.0f || e[2] + dmax[2] < 0.0f) {
+                continue; // every sample outside one edge
+            } else {
+                mask = 0;
+                for (int i = 0; i < 8; ++i)
+                    if (in_edge(e[0] + sdelta[0][i], ties[0]) && in_edge(e[1] + sdelta[1][i], ties[1]) &&
+                        in_edge(e[2] + sdelta[2][i], ties[2]))
+                        mask |= 1u << i;
+            }
+            if (aa ? mask == 0 : (mask & 1) == 0) continue;
+            const int first = __builtin_ctz(mask);
+            if (first != 0) {
+                px += kSampleX[first] * inv_scale;
+                py += kSampleY[first] * inv_scale;
+                for (int k = 0; k < 3; ++k) e[k] += sdelta[k][first];
+            }
+            // Barycentric coordinates of the point the attributes are taken at.
+            const f32 w0 = e[0] * sgn * inv_area;
+            const f32 w1 = e[1] * sgn * inv_area;
+            const f32 w2 = 1.0f - w0 - w1;
+            {
+                PixelAux aux;
+                aux.cvg = static_cast<u8>(__builtin_popcount(mask));
+                aux.z = st.z_source_prim ? static_cast<s32>(st.prim_depth & 0x7FFF) << 3
+                                         : depth18(w0 * v0.sz + w1 * v1.sz + w2 * v2.sz);
+                aux.dz = tri_dz;
+                aux.dzc = tri_dzc;
 
                 u8 r, g, b, a;
                 if (smooth_shading) {
@@ -1046,7 +1183,6 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     b = v0.b;
                     a = v0.a;
                 }
-                PixelAux aux;
                 aux.shade_a = a; // the blender's A_SHADE
 
                 u32 color;
@@ -1108,7 +1244,7 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                 }
 
                 if (st.alpha_test_dither) aux.noise = static_cast<u8>(pixel_noise(st, static_cast<u32>(x), static_cast<u32>(y)) >> 8);
-                sink.write(static_cast<u32>(x), static_cast<u32>(y), color, z, aux);
+                sink.write(static_cast<u32>(x), static_cast<u32>(y), color, aux);
             }
         }
     }
@@ -1156,8 +1292,15 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
     s32 lod_frac = 0;
     if (st.dolod) lod_tiles(st, std::max(std::fabs(dsdx), std::fabs(dtdy)), tile_idx, t0, t1, lod_frac);
     // Rectangles have no shade: the combiner's SHADE input is 0.
+    // No depth of their own: 0 (or the primitive depth), slope 1.
+    const s32 rect_z = st.z_source_prim ? static_cast<s32>(st.prim_depth & 0x7FFF) << 3 : 0;
+    const s32 rect_dz = st.z_source_prim ? st.prim_dz : 1;
+    const u8 rect_dzc = dz_compress_prim(rect_dz);
     auto shade = [&](f32 cur_s, f32 cur_t, u32 x, u32 y, PixelAux& aux) -> u32 {
         aux.shade_a = 0;
+        aux.z = rect_z;
+        aux.dz = rect_dz;
+        aux.dzc = rect_dzc;
         if (st.alpha_test_dither) aux.noise = static_cast<u8>(pixel_noise(st, x, y) >> 8);
         f32 sample_s = flip ? cur_t : cur_s;
         f32 sample_t = flip ? cur_s : cur_t;
@@ -1183,7 +1326,7 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
                 for (u32 x = ulx; x < max_x; ++x) {
                     PixelAux aux;
                     const u32 c = shade(cur_s, cur_t, x, y, aux);
-                    sink.write(x, y, c, 0.0f, aux);
+                    sink.write(x, y, c, aux);
                     cur_s += dsdx;
                 }
             }
@@ -1209,7 +1352,7 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
             const f32 cur_s = std::clamp(s + static_cast<f32>(x - x0) * dsdx_hr, cl.s_min, cl.s_max);
             PixelAux aux;
             const u32 c = shade(cur_s, cur_t, static_cast<u32>(x), static_cast<u32>(y), aux);
-            sink.write(static_cast<u32>(x), static_cast<u32>(y), c, 0.0f, aux);
+            sink.write(static_cast<u32>(x), static_cast<u32>(y), c, aux);
         }
     }
 }

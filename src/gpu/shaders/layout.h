@@ -35,17 +35,18 @@
 // word 31: word offset of its draw state (FILL and UPLOAD have none)
 #define GPU_PRIM_STATE 31u
 #define GPU_PRIM_TRI 1u    // 3..23: per vertex sx, sy, sz, 1/w, u/w, v/w, rgba (r in bits 0-7); 24: 1/area,
-                           // 25: the direction rows are walked in (1.0 or -1.0)
+                           // 25: the direction rows are walked in (1.0 or -1.0),
+                           // 26: depth slope (raster::normalize_dzpix) | compressed << 16
 #define GPU_PRIM_RECT 2u   // 3: tile, 4: s, 5: t, 6: ds per pixel, 7: dt per row (both at scale S), 8: flip,
                            // 9..12: S min/max, T min/max (the native rectangle's range),
                            // 13: TEXEL0 tile | TEXEL1 tile << 4 | LOD fraction << 8 (raster::lod_tiles)
 #define GPU_PRIM_FILL 3u   // 3: ARGB (written as it is)
-#define GPU_PRIM_BLOCK 4u  // 3: ARGB, 4: z   (one native pixel through the pixel pipeline)
+#define GPU_PRIM_BLOCK 4u  // 3: ARGB, 4: z (Vertex::sz) (one native pixel through the pixel pipeline)
 #define GPU_PRIM_BLIT 5u   // 3: data offset, 4: width, 5: x0, 6: y0 (native): ARGB per native pixel, depth 0
 #define GPU_PRIM_UPLOAD 6u // 3: data offset, 4: width, 5: x0, 6: y0 (native): (valid, ARGB) per native pixel
 
 // ---- Draw states -------------------------------------------------------------
-#define GPU_STATE_WORDS 102u
+#define GPU_STATE_WORDS 103u
 // word 0: flags
 #define GPU_ST_TWO_CYCLE (1u << 0)
 #define GPU_ST_COPY (1u << 1)
@@ -72,6 +73,7 @@
 #define GPU_ST_ALPHA_TEST (1u << 22)
 #define GPU_ST_ALPHA_DITHER (1u << 23)
 #define GPU_ST_NOISE (1u << 24)        // DrawState::uses_noise
+#define GPU_ST_Z_PRIM (1u << 25)       // DrawState::z_source_prim
 // word 1: tlut type | active tile << 4 | z mode << 8 | coverage mode << 10 | alpha threshold << 16
 // words 2-5: combiner inputs (raster::CcIn) of cycle 1: colour A, B, C, D bytes, then alpha;
 //            then cycle 2's (1-cycle mode runs cycle 2's)
@@ -83,12 +85,14 @@
 // word 96: level of detail: flags | max level << 8 | min level << 16 | PRIM_LOD_FRAC << 24
 // word 98: key centre r, g, b (bytes 0-2); word 99: key scale r, g, b; word 100: K4 | K5 << 16
 // word 101: the seed of the combiner's noise (DrawState::noise_seed)
+// word 102: primitive depth | its slope << 16 (gDPSetPrimDepth)
 #define GPU_ST_LOD 96u
 #define GPU_ST_BLEND2 97u
 #define GPU_ST_KEY_CENTER 98u
 #define GPU_ST_KEY_SCALE 99u
 #define GPU_ST_K45 100u
 #define GPU_ST_NOISE_SEED 101u
+#define GPU_ST_PRIM_Z 102u
 #define GPU_LOD_TEX_EN (1u << 0)
 #define GPU_LOD_SHARPEN (1u << 1)
 #define GPU_LOD_DETAIL (1u << 2)

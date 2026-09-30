@@ -462,7 +462,8 @@ private:
     void s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size);
     void s2dex_load_txtr(u32 tx_addr, u8* rdram, size_t rdram_size);
 
-    // Internal Z-buffer (for depth testing)
+    // The depth buffer the renderer once kept apart from RDRAM (the RDP's own
+    // is in RDRAM now); still in save states, so that older ones load.
     std::vector<f32> internal_zbuffer;
 
     u32 segment_to_physical(u32 seg_addr) const;
@@ -490,7 +491,7 @@ private:
     // Draws one pixel through the current colour image's blending/depth/
     // coverage rules; the short form uses hires_shadow_ and the global counters.
     void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size);
-    void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
+    void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, size_t rdram_size,
                      u32* shadow, size_t shadow_len, PixelStats& stats, const raster::PixelAux& aux);
     // The ninth bits of RDRAM (coverage) this renderer writes too: the
     // bit-exact RDP's store, as the memory is the same.
@@ -535,6 +536,7 @@ private:
     };
     std::vector<NativeCmd> native_queue_;
     u32 native_fb_lo_{0}, native_fb_hi_{0}; // RDRAM bytes the queue can write: [lo, hi)
+    u32 native_z_lo_{0}, native_z_hi_{0};   // and of the depth buffer
     u64 native_work_{0};                    // rough pixel count of the queue, to skip threading tiny flushes
     u8* native_rdram_{nullptr};
     size_t native_rdram_size_{0};
@@ -559,7 +561,8 @@ private:
     void flush_native();
     // Flushes if [lo, hi) of RDRAM - about to be read - may still be written by the queue.
     void native_before_read(u64 lo, u64 hi) {
-        if (!native_queue_.empty() && lo < native_fb_hi_ && hi > native_fb_lo_) flush_native();
+        if (!native_queue_.empty() && ((lo < native_fb_hi_ && hi > native_fb_lo_) || (lo < native_z_hi_ && hi > native_z_lo_)))
+            flush_native();
     }
 
     // Decoded-texel tables (raster::TexCache): a textured draw samples a

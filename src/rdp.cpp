@@ -44,8 +44,8 @@ struct RDP::NativeSink {
     u32* shadow;
     size_t shadow_len;
     PixelStats& stats;
-    void write(u32 x, u32 y, u32 color, f32 z, const raster::PixelAux& aux = {}) {
-        rdp.write_pixel(st, x, y, color, z, rdram, rdram_size, shadow, shadow_len, stats, aux);
+    void write(u32 x, u32 y, u32 color, const raster::PixelAux& aux = {}) {
+        rdp.write_pixel(st, x, y, color, rdram, rdram_size, shadow, shadow_len, stats, aux);
     }
 };
 
@@ -322,9 +322,10 @@ void RDP::recreate_hires() {
     hires_ = make_hires(scale);
 }
 
+// The depth buffer is in RDRAM, as the RDP has it; this clears the
+// high-resolution pass's copies.
 void RDP::clear_zbuffer() {
     flush_native();
-    std::fill(internal_zbuffer.begin(), internal_zbuffer.end(), 1e30f);
     if (hires_) hires_->clear_depth();
 }
 
@@ -376,6 +377,9 @@ const DrawState& RDP::draw_state() {
         s.scissor_lrx = scissor_lrx;
         s.scissor_lry = scissor_lry;
         s.fb_addr = color_image_addr;
+        s.zb_addr = depth_image_addr;
+        s.prim_depth = static_cast<u16>(prim_depth);
+        s.prim_dz = static_cast<u16>(prim_dz);
         s.fb_w = color_image_width ? color_image_width : 320;
         s.fb_size = color_image_size;
         s.combine_set = combine_mode_set;
@@ -408,8 +412,8 @@ static bool keeps_draw_state(u8 opcode) {
         case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F:
         case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB8: case 0xBC: case 0xBD:
         case 0xBE: case 0xBF: case 0xC0: case 0xD8: case 0xDA: case 0xDB: case 0xDC: case 0xDE: case 0xDF:
-        case 0xE1: case 0xE4: case 0xE5: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xEE:
-        case 0xF0: case 0xF1: case 0xF3: case 0xF4: case 0xF6: case 0xF7: case 0xFD: case 0xFE:
+        case 0xE1: case 0xE4: case 0xE5: case 0xE6: case 0xE7: case 0xE8: case 0xE9:
+        case 0xF0: case 0xF1: case 0xF3: case 0xF4: case 0xF6: case 0xF7: case 0xFD:
             return true;
         default:
             return false;
@@ -2087,12 +2091,14 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                         s16 vtrans_y = static_cast<s16>((rdram[src_addr + 10] << 8) | rdram[src_addr + 11]);
                         s16 vtrans_z = static_cast<s16>((rdram[src_addr + 12] << 8) | rdram[src_addr + 13]);
 
+                        // X and Y have 2 fraction bits; Z has none (G_MAXZ / 2
+                        // each maps the clip range onto the RDP's 0..1023).
                         vp_scale_x = vscale_x / 4.0f;
                         vp_scale_y = std::abs(vscale_y / 4.0f);
-                        vp_scale_z = (vscale_z != 0) ? (vscale_z / 4.0f) : 511.5f;
+                        vp_scale_z = (vscale_z != 0) ? static_cast<f32>(vscale_z) : 511.5f;
                         vp_trans_x = vtrans_x / 4.0f;
                         vp_trans_y = vtrans_y / 4.0f;
-                        vp_trans_z = (vtrans_z != 0) ? (vtrans_z / 4.0f) : 511.5f;
+                        vp_trans_z = (vtrans_z != 0) ? static_cast<f32>(vtrans_z) : 511.5f;
                     }
                 } else if (is_light) {
                     if (src_addr + 16 <= rdram_size) {
@@ -2992,13 +2998,15 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
 }
 
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size) {
-    write_pixel(st, x, y, color, z, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels, raster::PixelAux{});
+    raster::PixelAux aux;
+    aux.z = raster::depth18(z);
+    write_pixel(st, x, y, color, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels, aux);
 }
 
 // Thread-safe for pixels of distinct rows of one colour image (the native
-// pass's bands): it only touches that pixel's RDRAM, depth, ninth bits and
-// shadow entry.
-void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
+// pass's bands): it only touches that pixel's RDRAM (colour and depth),
+// ninth bits and shadow entry.
+void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, size_t rdram_size,
                       u32* shadow, size_t shadow_len, PixelStats& stats, const raster::PixelAux& aux) {
     u32 fb_w = st.fb_w;
     if (x >= fb_w || y >= kMaxFbLines) return;
@@ -3007,9 +3015,15 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
     if (x < st.scissor_ulx || x >= eff_lrx || y < st.scissor_uly || y >= eff_lry) return;
 
     const u32 pixel_idx = y * fb_w + x;
-    f32* const zp = pixel_idx < internal_zbuffer.size() ? &internal_zbuffer[pixel_idx] : nullptr;
     raster::MemPixel mem;
     raster::PixelResult res;
+    // The depth buffer: 16 bits per pixel, the same width as the colour image.
+    const u32 zidx = st.zb_addr + pixel_idx * 2;
+    const bool z_ok = (st.z_compare || st.z_update) && zidx + 1 < rdram_size;
+    if (z_ok) {
+        mem.zword = static_cast<u16>((rdram[zidx] << 8) | rdram[zidx + 1]);
+        mem.zhidden = hle_hidden_->hidden_at(zidx >> 1, mem.zword);
+    }
     if (st.fb_size == 2) { // 16-bit RGBA 5-5-5-1, coverage in the alpha bit and the two ninth bits
         const u32 idx = st.fb_addr + pixel_idx * 2;
         if (idx + 1 >= rdram_size) return;
@@ -3018,7 +3032,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
         mem.g = (word >> 3) & 0xF8;
         mem.b = (word << 2) & 0xF8;
         mem.cvg = ((word & 1) << 2) | hle_hidden_->hidden_at(idx >> 1, word);
-        if (!raster::pixel_backend(st, color, aux, z, zp ? *zp : raster::kDepthCleared, mem, res)) {
+        if (!raster::pixel_backend(st, color, aux, mem, res)) {
             stats.z_fail++;
             return;
         }
@@ -3034,7 +3048,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
         mem.g = rdram[idx + 1];
         mem.b = rdram[idx + 2];
         mem.cvg = rdram[idx + 3] >> 5;
-        if (!raster::pixel_backend(st, color, aux, z, zp ? *zp : raster::kDepthCleared, mem, res)) {
+        if (!raster::pixel_backend(st, color, aux, mem, res)) {
             stats.z_fail++;
             return;
         }
@@ -3048,7 +3062,11 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* r
     } else {
         return;
     }
-    if (res.z_write && zp) *zp = z;
+    if (res.z_write && z_ok) {
+        rdram[zidx] = static_cast<u8>(res.zword >> 8);
+        rdram[zidx + 1] = static_cast<u8>(res.zword);
+        hle_hidden_->force_hidden(zidx >> 1, res.zhidden, res.zword);
+    }
     stats.drawn++;
 }
 
@@ -3109,17 +3127,31 @@ DrawState* RDP::native_snapshot(u32 tile0, bool use0, bool use1) {
 
 void RDP::queue_native(NativeCmd& cmd, u8* rdram, size_t rdram_size) {
     const DrawState& st = *cmd.st;
-    // Bytes of the colour image this command's rows can write.
+    // Bytes of the colour image (and depth buffer) this command's rows can write.
     const u32 bpp = st.fb_size == 3 ? 4 : 2;
+    auto clamp32 = [](u64 v) { return static_cast<u32>(std::min<u64>(v, 0xFFFFFFFFu)); };
     const u64 lo = st.fb_addr + static_cast<u64>(cmd.y_first) * st.fb_w * bpp;
     const u64 hi = st.fb_addr + (static_cast<u64>(cmd.y_last) + 1) * st.fb_w * bpp;
+    const bool depth = st.z_compare || st.z_update;
+    const u64 zlo = st.zb_addr + static_cast<u64>(cmd.y_first) * st.fb_w * 2;
+    const u64 zhi = st.zb_addr + (static_cast<u64>(cmd.y_last) + 1) * st.fb_w * 2;
     if (native_queue_.empty()) {
-        native_fb_lo_ = static_cast<u32>(std::min<u64>(lo, 0xFFFFFFFFu));
-        native_fb_hi_ = static_cast<u32>(std::min<u64>(hi, 0xFFFFFFFFu));
+        native_fb_lo_ = clamp32(lo);
+        native_fb_hi_ = clamp32(hi);
+        native_z_lo_ = native_z_hi_ = 0;
         native_work_ = 0;
     } else {
-        native_fb_lo_ = std::min(native_fb_lo_, static_cast<u32>(std::min<u64>(lo, 0xFFFFFFFFu)));
-        native_fb_hi_ = std::max(native_fb_hi_, static_cast<u32>(std::min<u64>(hi, 0xFFFFFFFFu)));
+        native_fb_lo_ = std::min(native_fb_lo_, clamp32(lo));
+        native_fb_hi_ = std::max(native_fb_hi_, clamp32(hi));
+    }
+    if (depth) {
+        if (native_z_hi_ == native_z_lo_) {
+            native_z_lo_ = clamp32(zlo);
+            native_z_hi_ = clamp32(zhi);
+        } else {
+            native_z_lo_ = std::min(native_z_lo_, clamp32(zlo));
+            native_z_hi_ = std::max(native_z_hi_, clamp32(zhi));
+        }
     }
     native_work_ += static_cast<u64>(cmd.y_last - cmd.y_first + 1) * st.fb_w;
     native_rdram_ = rdram;
