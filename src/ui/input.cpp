@@ -8,6 +8,32 @@
 
 namespace ui {
 
+namespace {
+// The N64 stick moves inside an octagonal gate: about ±80 along the axes and
+// (±70, ±70) in the corners. Returns the distance from the centre to that
+// gate along the unit direction (ux, uy).
+float n64_gate_radius(float ux, float uy) {
+    constexpr float kAxis = 80.0f, kCorner = 70.0f;
+    constexpr float kQuarter = 1.57079633f / 2.0f; // 45 degrees
+    float ang = std::atan2(uy, ux);
+    if (ang < 0) ang += 4.0f * 1.57079633f;
+    const int k = static_cast<int>(ang / kQuarter) % 8;
+    auto vertex = [&](int i, float& x, float& y) {
+        const float a = (i % 8) * kQuarter;
+        const float r = (i % 2 == 0) ? kAxis : kCorner * 1.41421356f;
+        x = std::cos(a) * r;
+        y = std::sin(a) * r;
+    };
+    float ax, ay, bx, by;
+    vertex(k, ax, ay);
+    vertex(k + 1, bx, by);
+    // Where the ray t * (ux, uy) crosses the gate edge from A to B.
+    const float ex = bx - ax, ey = by - ay;
+    const float den = ux * ey - uy * ex;
+    return den != 0.0f ? (ax * ey - ay * ex) / den : kAxis;
+}
+} // namespace
+
 InputManager::~InputManager() {
     for (auto& p : pads_) SDL_CloseGamepad(p.handle);
 }
@@ -165,16 +191,32 @@ ControllerSnapshot InputManager::poll(const PortConfig& cfg, bool keyboard_enabl
         if (values[i] > 0.5f) s.buttons |= kMasks[i];
     }
 
-    auto shape = [&](float v) {
-        if (v < cfg.deadzone) return 0.0f;
-        return std::min(1.0f, (v - cfg.deadzone) / (1.0f - cfg.deadzone));
-    };
-    float x = shape(values[(int)N64Input::StickRight]) - shape(values[(int)N64Input::StickLeft]);
-    float y = shape(values[(int)N64Input::StickUp]) - shape(values[(int)N64Input::StickDown]);
-    // The real N64 stick range is roughly ±80 on each axis.
-    const float range = 80.0f * cfg.sensitivity;
-    s.stick_x = static_cast<std::int8_t>(std::clamp(x * range, -127.0f, 127.0f));
-    s.stick_y = static_cast<std::int8_t>(std::clamp(y * range, -127.0f, 127.0f));
+    // Radial dead zone: nothing inside the circle, so diagonals don't snap to
+    // the axes. The travel past it is stretched back to 0..1 (unless rescaling
+    // is off), keeping the direction. With the octagonal gate on, the unit
+    // circle is mapped onto the N64's gate; off, each axis reaches ±80 on its
+    // own (a square range, as the host stick reports it).
+    const float x = values[(int)N64Input::StickRight] - values[(int)N64Input::StickLeft];
+    const float y = values[(int)N64Input::StickUp] - values[(int)N64Input::StickDown];
+    const float mag = std::sqrt(x * x + y * y);
+    float sx = 0.0f, sy = 0.0f;
+    const float dz = std::clamp(cfg.deadzone, 0.0f, 0.95f);
+    if (mag > dz) {
+        const float m = cfg.deadzone_rescale ? (mag - dz) / (1.0f - dz) : mag;
+        const float ux = x / mag, uy = y / mag;
+        if (cfg.octagon) {
+            const float r = n64_gate_radius(ux, uy) * std::min(1.0f, m);
+            sx = ux * r;
+            sy = uy * r;
+        } else {
+            sx = std::clamp(ux * m, -1.0f, 1.0f) * 80.0f;
+            sy = std::clamp(uy * m, -1.0f, 1.0f) * 80.0f;
+        }
+        sx *= cfg.sensitivity;
+        sy *= cfg.sensitivity;
+    }
+    s.stick_x = static_cast<std::int8_t>(std::clamp(std::round(sx), -127.0f, 127.0f));
+    s.stick_y = static_cast<std::int8_t>(std::clamp(std::round(sy), -127.0f, 127.0f));
     return s;
 }
 

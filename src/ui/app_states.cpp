@@ -179,10 +179,10 @@ void App::draw_state_menu() {
     const bool loaded = core_.loaded();
     if (loaded) refresh_state_slots();
     const std::string slot = std::to_string(state_slot_);
-    if (ImGui::MenuItem(("Save State (Slot " + slot + ")").c_str(), shortcut_label(true, false, false, "S").c_str(), false,
+    if (ImGui::MenuItem(("Save State (Slot " + slot + ")").c_str(), hotkey_label(Hotkey::SaveState).c_str(), false,
                         loaded))
         save_state(state_slot_);
-    if (ImGui::MenuItem(("Load State (Slot " + slot + ")").c_str(), shortcut_label(true, true, false, "L").c_str(), false,
+    if (ImGui::MenuItem(("Load State (Slot " + slot + ")").c_str(), hotkey_label(Hotkey::LoadState).c_str(), false,
                         loaded && state_slots_[state_slot_].exists))
         load_state(state_slot_);
     state_slot_tooltip(state_slot_);

@@ -419,6 +419,10 @@ void App::main_loop() {
 
 void App::process_event(const SDL_Event& e) {
     // Rebinding capture takes priority over everything else.
+    if (hotkey_capture_ >= 0 && e.type == SDL_EVENT_KEY_DOWN) {
+        capture_hotkey(e.key);
+        return;
+    }
     if (input_.capturing() && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION)) {
         input_.handle_event(e);
         int port, in, key, pad;
@@ -442,6 +446,9 @@ void App::process_event(const SDL_Event& e) {
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             if (e.window.windowID != SDL_GetWindowID(window_)) break;
             window_focused_ = false;
+            // Clicking into another app stops recording a binding, like a click elsewhere in ours.
+            hotkey_capture_ = -1;
+            input_.cancel_capture();
             if (settings_.pause_on_focus_loss && core_.state() == RunState::Running && !native_job_) {
                 core_.pause(true);
                 auto_paused_ = true;
@@ -486,98 +493,82 @@ void App::process_event(const SDL_Event& e) {
     }
 }
 
-std::vector<Shortcut> App::shortcuts() const {
-    using platform::shortcut_label;
-    bool mac = platform::current_os() == platform::OS::MacOS;
-    return {
-        {"Open ROM", shortcut_label(true, false, false, "O")},
-        {"Add ROM folder", shortcut_label(true, true, false, "O")},
-        {"Toggle Library / Game", shortcut_label(true, false, false, "L")},
-        {"Pause / Resume", shortcut_label(true, false, false, "P") + "  or  F5"},
-        {"Stop emulation", shortcut_label(true, false, false, ".") + "  or  Shift+F5"},
-        {"Reset", shortcut_label(true, false, false, "R")},
-        {"Save state to the current slot", shortcut_label(true, false, false, "S") + "  or  F2"},
-        {"Load state from the current slot", shortcut_label(true, true, false, "L") + "  or  F4"},
-        {"Choose state slot", shortcut_label(true, false, false, "1\xE2\x80\x93" "9")},
-        {"Fast forward (hold)", "Tab"},
-        {"Fullscreen", mac ? "Cmd+Ctrl+F  or  F11" : "F11  or  Alt+Enter"},
-        {"Exit fullscreen", "Esc"},
-        {"Screenshot", "F12"},
-        {"Game info panel", shortcut_label(true, false, false, "I")},
-        {"Settings", shortcut_label(true, false, false, ",")},
-        {"Quit", mac ? "Cmd+Q" : "Ctrl+Q  or  Alt+F4"},
-    };
+std::string App::hotkey_label(Hotkey h) const {
+    for (const KeyCombo& c : settings_.hotkeys[static_cast<int>(h)])
+        if (c.key) return key_combo_label(c);
+    return "";
+}
+
+std::string App::hotkey_hint(Hotkey h) const {
+    std::string s;
+    for (const KeyCombo& c : settings_.hotkeys[static_cast<int>(h)]) {
+        if (!c.key) continue;
+        if (!s.empty()) s += " or ";
+        s += key_combo_label(c);
+    }
+    return s;
 }
 
 bool App::handle_shortcut(const SDL_KeyboardEvent& k) {
-    if (k.repeat) return false;
-    const unsigned mod = k.mod;
-    const bool primary = platform::primary_mod_down(mod);
-    const bool shift = (mod & SDL_KMOD_SHIFT) != 0;
-    const bool alt = (mod & SDL_KMOD_ALT) != 0;
-    const bool mac = platform::current_os() == platform::OS::MacOS;
-    const SDL_Keycode key = k.key;
+    if (k.repeat || is_modifier_key(static_cast<int>(k.key))) return false;
+    const KeyCombo pressed{static_cast<int>(k.key), key_mods_from_sdl(k.mod)};
     const bool modal_open = settings_open_ || about_open_ || confirm_open_ || browser_.is_open() || props_open_ || error_open_;
 
-    if (primary) {
-        switch (key) {
-            case SDLK_O:
-                if (modal_open) return false;
-                if (shift) action_add_folder(); else action_open_rom();
-                return true;
-            case SDLK_L:
-                if (modal_open) return false;
-                if (shift) load_state(state_slot_);
-                else view_ = view_ == View::Library ? View::Game : View::Library;
-                return true;
-            case SDLK_S:
-                if (modal_open || shift) return false;
-                save_state(state_slot_);
-                return true;
-            case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
-            case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
-                if (modal_open || shift) return false;
-                select_state_slot(static_cast<int>(key - SDLK_0));
-                return true;
-            case SDLK_P: if (!modal_open) toggle_pause(); return true;
-            case SDLK_R: if (!modal_open) reset_game(); return true;
-            case SDLK_PERIOD: if (!modal_open) request_stop(); return true;
-            case SDLK_I: settings_.show_info_panel = !settings_.show_info_panel; return true;
-            case SDLK_COMMA: if (!modal_open) open_settings(SettingsPage::General); return true;
-            case SDLK_Q: request_quit(); return true;
-            case SDLK_F:
-                // macOS: Cmd+Ctrl+F is the system-standard fullscreen shortcut.
-                if (mac && (mod & SDL_KMOD_CTRL)) { toggle_fullscreen(); return true; }
-                return false;
-            default: break;
-        }
+    for (int h = 0; h < kHotkeyCount; ++h)
+        for (const KeyCombo& c : settings_.hotkeys[h])
+            if (c.key && c == pressed) return run_hotkey(static_cast<Hotkey>(h), modal_open);
+
+    // Fixed shortcuts: state slots and leaving fullscreen.
+    if (pressed.mods == kModPrimary && k.key >= SDLK_1 && k.key <= SDLK_9) {
+        if (modal_open) return false;
+        select_state_slot(static_cast<int>(k.key - SDLK_0));
+        return true;
     }
-    switch (key) {
-        case SDLK_F11: toggle_fullscreen(); return true;
-        case SDLK_RETURN:
-            if (alt && !mac) { toggle_fullscreen(); return true; }
-            return false;
-        case SDLK_F5:
+    if (k.key == SDLK_ESCAPE && fullscreen_ && !modal_open && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        set_fullscreen(false);
+        return true;
+    }
+    return false;
+}
+
+bool App::run_hotkey(Hotkey h, bool modal_open) {
+    switch (h) {
+        case Hotkey::OpenRom: if (modal_open) return false; action_open_rom(); return true;
+        case Hotkey::AddFolder: if (modal_open) return false; action_add_folder(); return true;
+        case Hotkey::ToggleView:
             if (modal_open) return false;
-            if (shift) request_stop(); else toggle_pause();
+            view_ = view_ == View::Library ? View::Game : View::Library;
             return true;
-        case SDLK_F12: take_screenshot(); return true;
-        case SDLK_F2:
-            if (modal_open) return false;
-            save_state(state_slot_);
-            return true;
-        case SDLK_F4:
-            if (modal_open || alt) return false; // Alt+F4 closes the window
-            load_state(state_slot_);
-            return true;
-        case SDLK_ESCAPE:
-            if (fullscreen_ && !modal_open && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
-                set_fullscreen(false);
-                return true;
-            }
-            return false;
+        case Hotkey::Pause: if (modal_open) return false; toggle_pause(); return true;
+        case Hotkey::Stop: if (modal_open) return false; request_stop(); return true;
+        case Hotkey::Reset: if (modal_open) return false; reset_game(); return true;
+        case Hotkey::SaveState: if (modal_open) return false; save_state(state_slot_); return true;
+        case Hotkey::LoadState: if (modal_open) return false; load_state(state_slot_); return true;
+        case Hotkey::FastForward: return false; // held, see update_input()
+        case Hotkey::Fullscreen: toggle_fullscreen(); return true;
+        case Hotkey::Screenshot: take_screenshot(); return true;
+        case Hotkey::InfoPanel: settings_.show_info_panel = !settings_.show_info_panel; return true;
+        case Hotkey::Settings: if (modal_open) return false; open_settings(SettingsPage::General); return true;
+        case Hotkey::Quit: request_quit(); return true;
         default: return false;
     }
+}
+
+void App::capture_hotkey(const SDL_KeyboardEvent& k) {
+    if (k.repeat || is_modifier_key(static_cast<int>(k.key))) return; // wait for the actual key
+    const int h = hotkey_capture_ / kHotkeySlots, slot = hotkey_capture_ % kHotkeySlots;
+    hotkey_capture_ = -1;
+    const KeyCombo combo{static_cast<int>(k.key), key_mods_from_sdl(k.mod)};
+    if (combo.key == SDLK_ESCAPE && combo.mods == 0) return; // cancel
+    // One combination does one thing: take it away from any other shortcut.
+    for (int o = 0; o < kHotkeyCount; ++o)
+        for (int j = 0; j < kHotkeySlots; ++j)
+            if ((o != h || j != slot) && settings_.hotkeys[o][j] == combo) {
+                settings_.hotkeys[o][j] = {};
+                if (o != h) toast(key_combo_label(combo) + " removed from \xE2\x80\x9C" + hotkey_name(static_cast<Hotkey>(o)) + "\xE2\x80\x9D");
+            }
+    settings_.hotkeys[h][slot] = combo;
+    save_settings();
 }
 
 void App::update_input() {
@@ -594,9 +585,17 @@ void App::update_input() {
         input_.rumble(p, pc, motor ? pc.rumble_strength / 100.0f : 0.0f);
     }
 
-    // Fast-forward while Tab is held (only when the game has keyboard focus).
+    // Fast-forward while its shortcut is held (only when the game has keyboard
+    // focus). Extra modifiers are allowed, since games may use them as buttons.
     const bool* keys = SDL_GetKeyboardState(nullptr);
-    core_.set_fast_forward(keyboard_to_game && keys[SDL_SCANCODE_TAB]);
+    const int mods = key_mods_from_sdl(SDL_GetModState());
+    bool ff = false;
+    for (const KeyCombo& c : settings_.hotkeys[static_cast<int>(Hotkey::FastForward)]) {
+        if (!c.key) continue;
+        const SDL_Scancode sc = SDL_GetScancodeFromKey(static_cast<SDL_Keycode>(c.key), nullptr);
+        if (sc != SDL_SCANCODE_UNKNOWN && keys[sc] && (mods & c.mods) == c.mods) ff = true;
+    }
+    core_.set_fast_forward(keyboard_to_game && hotkey_capture_ < 0 && ff);
     core_.set_ff_multiplier(settings_.ff_speed);
     core_.set_limit_speed(settings_.limit_speed);
     core_.set_fps_limit(settings_.fps_limit);
@@ -986,6 +985,7 @@ void App::confirm(const std::string& title, const std::string& message, const st
 void App::open_settings(SettingsPage page) {
     settings_page_ = page;
     settings_open_ = true;
+    profiles_scanned_ = false;
 }
 
 } // namespace ui

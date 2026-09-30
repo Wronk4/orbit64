@@ -32,10 +32,6 @@ enum class View { Library, Game };
 enum class LibraryFilter { All, Favorites, Recent, Homebrew, RegionUSA, RegionEUR, RegionJPN, Folder };
 enum class SettingsPage { General, Graphics, Audio, Controller, Emulation, Library, Shortcuts, Count };
 
-struct Shortcut {
-    const char* action;
-    std::string keys;
-};
 
 class App {
 public:
@@ -51,6 +47,9 @@ private:
     void main_loop();
     void process_event(const SDL_Event& e);
     bool handle_shortcut(const SDL_KeyboardEvent& k);
+    bool run_hotkey(Hotkey h, bool modal_open);
+    void capture_hotkey(const SDL_KeyboardEvent& k);
+    int hotkey_capture_ = -1; // hotkey * kHotkeySlots + slot being rebound, -1 = none
     bool create_renderer();
     void destroy_renderer();
     void pump_video();
@@ -67,7 +66,10 @@ private:
     void close_audio();
     void save_settings();
     void apply_window_settings();
-    std::vector<Shortcut> shortcuts() const;
+    // Shortcut labels for menus and hints: the first binding ("" when unbound),
+    // or every binding joined with "or".
+    std::string hotkey_label(Hotkey h) const;
+    std::string hotkey_hint(Hotkey h) const;
 
     // ---- actions (app.cpp)
     void action_open_rom();
@@ -139,6 +141,8 @@ private:
     void settings_graphics();
     void settings_audio();
     void settings_controller();
+    void controller_profile_row(PortConfig& pc, float control_w);
+    void scan_controller_profiles();
     void settings_emulation();
     void settings_library();
     void settings_shortcuts();
@@ -274,6 +278,16 @@ private:
     bool settings_open_ = false;
     SettingsPage settings_page_ = SettingsPage::General;
     int settings_port_ = 0;
+    // Controller profiles (config_dir()/controller_profiles/<name>.ini),
+    // rescanned whenever Settings opens.
+    struct ControllerProfile {
+        std::string name;
+        PortConfig cfg;
+    };
+    std::vector<ControllerProfile> profiles_;
+    bool profiles_scanned_ = false;
+    char profile_name_[64] = {};
+    std::string profile_to_delete_;
     int gb_pick_port_ = 0; // port whose Game Boy ROM the file picker chooses
     int ui_test_pak_ = 3; // UI walkthrough: port 2's accessory while it shows the Transfer Pak
     bool about_open_ = false;

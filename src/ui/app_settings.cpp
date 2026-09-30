@@ -11,6 +11,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
+#include <cstring>
 
 namespace ui {
 
@@ -29,9 +31,38 @@ const PageInfo kPages[] = {
     {"Controllers", "Map keyboards and gamepads to the four N64 controller ports.", Icon::Gamepad},
     {"Emulation", "Speed, fast-forward and core options.", Icon::Cpu},
     {"Library", "Where Orbit64 looks for your ROMs.", Icon::Library},
-    {"Shortcuts", "Keyboard shortcuts for this platform.", Icon::Keyboard},
+    {"Shortcuts", "Keyboard shortcuts for the app. Click one to change it.", Icon::Keyboard},
 };
 constexpr float kControlW = 260.0f;
+
+// The controller preview is drawn in "diagram units": 100 across the canvas,
+// kPadHeight down. The pad itself is laid out in "body units" (0..100 across
+// the shell, 0 at the top of the centre hump) traced from a photo of the real
+// controller, and mapped into the canvas with a margin for the shoulder
+// buttons and the drop shadow.
+constexpr float kPadHeight = 100.0f;
+constexpr float kPadMarginX = 3.0f, kPadMarginY = 5.0f, kPadScale = 0.94f;
+
+// Left half of the shell outline in body units, from the top of the centre
+// hump round the left handle to the tip of the centre prong. The right half
+// is its mirror image; the closed outline is a Catmull-Rom curve through
+// these points.
+const ImVec2 kPadLeft[] = {
+    {50.0f, 0.0f},   {44.0f, 0.5f},   {40.0f, 1.25f},  {36.0f, 2.0f},   {33.5f, 3.0f},   {31.75f, 4.25f}, {30.9f, 5.6f},
+    {30.5f, 6.5f},   {28.25f, 7.0f},  {26.0f, 7.5f},   {22.5f, 8.0f},   {20.0f, 8.5f},   {17.25f, 9.0f},  {15.5f, 9.5f},
+    {13.0f, 10.5f},  {11.5f, 11.2f},  {9.5f, 13.5f},   {7.25f, 16.0f},  {5.5f, 18.5f},   {4.25f, 21.0f},  {3.5f, 23.5f},
+    {2.75f, 28.5f},  {2.25f, 33.5f},  {1.25f, 38.5f},  {0.5f, 43.5f},   {0.2f, 48.0f},   {0.0f, 53.5f},   {0.5f, 58.5f},
+    {1.0f, 63.5f},   {2.0f, 68.5f},   {3.5f, 73.0f},   {5.0f, 75.2f},   {7.0f, 76.6f},   {8.6f, 77.0f},   {10.2f, 76.6f},
+    {11.7f, 75.2f},  {12.75f, 73.5f}, {14.75f, 68.5f}, {16.5f, 63.5f},  {18.0f, 58.5f},  {19.25f, 53.5f}, {20.2f, 50.5f},
+    {21.6f, 48.6f},  {24.0f, 47.6f},  {26.6f, 48.3f},  {30.0f, 49.0f},  {32.2f, 49.6f},  {33.7f, 50.6f},  {34.6f, 51.8f},
+    {35.3f, 53.5f},  {36.5f, 58.5f},  {37.25f, 63.5f}, {38.0f, 68.5f},  {39.25f, 73.5f}, {40.0f, 78.0f},  {40.9f, 81.5f},
+    {41.6f, 84.5f},  {42.5f, 88.3f},  {43.6f, 91.3f},  {44.7f, 93.3f},  {46.0f, 95.3f},  {47.8f, 96.9f},  {50.0f, 97.5f},
+};
+// kPadLeft indices: the hump's top edge ends here, and the L button runs
+// along the shoulder between these two points.
+constexpr int kPadHumpEnd = 7;
+constexpr int kPadShoulderBegin = 8, kPadShoulderEnd = 17;
+constexpr int kPadCurveSteps = 4; // curve samples per outline point
 } // namespace
 
 void App::draw_settings() {
@@ -103,7 +134,7 @@ void App::draw_settings() {
 
     // Footer
     modal_footer_begin(footer);
-    bool resettable = settings_page_ != SettingsPage::Shortcuts && settings_page_ != SettingsPage::Library;
+    bool resettable = settings_page_ != SettingsPage::Library;
     if (resettable && button("Restore Defaults", Icon::Refresh, ButtonKind::Ghost)) {
         switch (settings_page_) {
             case SettingsPage::General: settings_.reset_general(); break;
@@ -113,6 +144,7 @@ void App::draw_settings() {
                 break;
             case SettingsPage::Audio: settings_.reset_audio(); open_audio(); break;
             case SettingsPage::Controller: settings_.reset_port(settings_port_); break;
+            case SettingsPage::Shortcuts: settings_.reset_shortcuts(); hotkey_capture_ = -1; break;
             case SettingsPage::Emulation: settings_.reset_emulation(); core_.set_ucode_override(0); core_.set_cpu_core(settings_.cpu_core); core_.set_rsp_mode(settings_.rsp_mode); core_.set_rdp_exact(settings_.rdp_exact); break;
             default: break;
         }
@@ -131,8 +163,10 @@ void App::draw_settings() {
     }
     draw_picker_dialogs(); // "Add Folder…" / "Choose…" pickers stack on top of Settings
     end_modal();
+    if (settings_page_ != SettingsPage::Shortcuts) hotkey_capture_ = -1;
     if (!settings_open_) {
         input_.cancel_capture();
+        hotkey_capture_ = -1;
         save_settings();
     }
 }
@@ -441,80 +475,398 @@ void App::settings_audio() {
 
 void App::draw_controller_diagram(ImVec2 o, float W, const ControllerSnapshot& s) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float H = W * 0.68f;
-    auto P = [&](float x, float y) { return ImVec2(o.x + x * W, o.y + y * H); };
+    const float u = W / 100.0f;
+    const float bu = u * kPadScale; // one body unit in pixels
+    const float H = kPadHeight * u;
+    const float alpha = ImGui::GetStyle().Alpha; // dimmed while the port is unplugged
+    auto B = [&](float x, float y) { return ImVec2(o.x + (kPadMarginX + x * kPadScale) * u, o.y + (kPadMarginY + y * kPadScale) * u); };
+    auto rgba = [&](int r, int g, int b, float a = 1.0f) { return IM_COL32(r, g, b, static_cast<int>(255.0f * a * alpha)); };
+    auto theme = [&](const ImVec4& c, float a = 1.0f) { return col(c, a * alpha); };
     auto pressed = [&](std::uint16_t m) { return (s.buttons & m) != 0; };
-    ImU32 body = col(g_pal.bg4), body_edge = col(g_pal.border_strong);
 
-    // Shoulder buttons
-    auto shoulder = [&](float x0, float x1, bool on, const char* t) {
-        dl->AddRectFilled(P(x0, 0.02f), P(x1, 0.13f), on ? col(g_pal.accent) : col(g_pal.bg3), dp(6));
-        ImVec2 c((P(x0, 0).x + P(x1, 0).x) * 0.5f, P(0, 0.075f).y);
-        ImVec2 ts = g_fonts.small_bold->CalcTextSizeA(font_px(g_fonts.small_bold), FLT_MAX, 0, t);
-        dl->AddText(g_fonts.small_bold, font_px(g_fonts.small_bold), ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col(on ? ImVec4(1, 1, 1, 1) : g_pal.text_dim), t);
+    // Vertical gradient over the vertices added since v0.
+    auto shade = [&](int v0, float y0, float y1, ImU32 top, ImU32 bot) {
+        ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, ImVec2(0, y0), ImVec2(0, y1), top, bot);
     };
-    shoulder(0.10f, 0.30f, pressed(Button::L), "L");
-    shoulder(0.70f, 0.90f, pressed(Button::R), "R");
-
-    // Body: three prongs joined by a top band
-    dl->AddRectFilled(P(0.06f, 0.10f), P(0.94f, 0.52f), body, W * 0.12f);
-    dl->AddRectFilled(P(0.07f, 0.30f), P(0.30f, 0.92f), body, W * 0.1f);
-    dl->AddRectFilled(P(0.39f, 0.36f), P(0.61f, 1.00f), body, W * 0.1f);
-    dl->AddRectFilled(P(0.70f, 0.30f), P(0.93f, 0.92f), body, W * 0.1f);
-    dl->AddRect(P(0.06f, 0.10f), P(0.94f, 0.52f), body_edge, W * 0.12f);
-
-    // D-pad
-    ImVec2 dc = P(0.19f, 0.32f);
-    float a = W * 0.028f, b = W * 0.075f;
-    ImU32 dbase = col(g_pal.bg1);
-    dl->AddRectFilled(ImVec2(dc.x - a, dc.y - b), ImVec2(dc.x + a, dc.y + b), dbase, dp(3));
-    dl->AddRectFilled(ImVec2(dc.x - b, dc.y - a), ImVec2(dc.x + b, dc.y + a), dbase, dp(3));
-    ImU32 hi = col(g_pal.accent);
-    if (pressed(Button::D_UP)) dl->AddRectFilled(ImVec2(dc.x - a, dc.y - b), ImVec2(dc.x + a, dc.y - a), hi, dp(3));
-    if (pressed(Button::D_DOWN)) dl->AddRectFilled(ImVec2(dc.x - a, dc.y + a), ImVec2(dc.x + a, dc.y + b), hi, dp(3));
-    if (pressed(Button::D_LEFT)) dl->AddRectFilled(ImVec2(dc.x - b, dc.y - a), ImVec2(dc.x - a, dc.y + a), hi, dp(3));
-    if (pressed(Button::D_RIGHT)) dl->AddRectFilled(ImVec2(dc.x + a, dc.y - a), ImVec2(dc.x + b, dc.y + a), hi, dp(3));
-
-    // Start
-    ImVec2 sc = P(0.5f, 0.28f);
-    dl->AddCircleFilled(sc, W * 0.03f, pressed(Button::START) ? IM_COL32(255, 90, 90, 255) : IM_COL32(150, 40, 45, 255), 24);
-    dl->AddText(g_fonts.small, font_px(g_fonts.small) * 0.85f, ImVec2(sc.x - dp(13), sc.y + W * 0.04f), col(g_pal.text_faint), "START");
-
-    // Analog stick
-    ImVec2 ac = P(0.5f, 0.56f);
-    float ar = W * 0.07f;
-    dl->AddCircleFilled(ac, ar, col(g_pal.bg1), 32);
-    dl->AddCircle(ac, ar, body_edge, 32, dp(1));
-    ImVec2 knob(ac.x + (s.stick_x / 80.0f) * ar * 0.7f, ac.y - (s.stick_y / 80.0f) * ar * 0.7f);
-    bool moved = s.stick_x != 0 || s.stick_y != 0;
-    dl->AddCircleFilled(knob, ar * 0.5f, moved ? col(g_pal.accent) : col(g_pal.text_faint), 32);
-
-    // Z trigger (underside) shown as a pill on the centre prong
-    ImVec2 zc = P(0.5f, 0.86f);
-    dl->AddRectFilled(ImVec2(zc.x - W * 0.04f, zc.y - W * 0.022f), ImVec2(zc.x + W * 0.04f, zc.y + W * 0.022f),
-                      pressed(Button::Z) ? col(g_pal.accent) : col(g_pal.bg3), W * 0.022f);
-    dl->AddText(g_fonts.small_bold, font_px(g_fonts.small_bold), ImVec2(zc.x - dp(4), zc.y - font_px(g_fonts.small_bold) * 0.5f),
-                col(pressed(Button::Z) ? ImVec4(1, 1, 1, 1) : g_pal.text_dim), "Z");
-
-    // A / B
-    auto round_button = [&](ImVec2 c, float r, bool on, ImU32 on_col, ImU32 off_col, const char* t) {
-        dl->AddCircleFilled(c, r, on ? on_col : off_col, 32);
-        ImVec2 ts = g_fonts.small_bold->CalcTextSizeA(font_px(g_fonts.small_bold), FLT_MAX, 0, t);
-        dl->AddText(g_fonts.small_bold, font_px(g_fonts.small_bold), ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(255, 255, 255, on ? 255 : 170), t);
+    auto white = [&](ImU32 c) { return (c & IM_COL32_A_MASK) | 0x00FFFFFFu; };
+    auto poly_grad = [&](const ImVec2* pts, int n, ImU32 top, ImU32 bot) {
+        float y0 = FLT_MAX, y1 = -FLT_MAX;
+        for (int i = 0; i < n; ++i) y0 = std::min(y0, pts[i].y), y1 = std::max(y1, pts[i].y);
+        int v0 = dl->VtxBuffer.Size;
+        dl->AddConcavePolyFilled(pts, n, white(top));
+        shade(v0, y0, y1, top, bot);
     };
-    round_button(P(0.73f, 0.42f), W * 0.038f, pressed(Button::A), IM_COL32(90, 140, 255, 255), IM_COL32(40, 70, 150, 255), "A");
-    round_button(P(0.655f, 0.33f), W * 0.034f, pressed(Button::B), IM_COL32(80, 210, 110, 255), IM_COL32(30, 110, 55, 255), "B");
+    auto circle_grad = [&](ImVec2 c, float r, ImU32 top, ImU32 bot) {
+        int v0 = dl->VtxBuffer.Size;
+        dl->AddCircleFilled(c, r, white(top), 0);
+        shade(v0, c.y - r, c.y + r, top, bot);
+    };
+    auto rect_grad = [&](ImVec2 a, ImVec2 b, float rounding, ImU32 top, ImU32 bot, float y0, float y1) {
+        int v0 = dl->VtxBuffer.Size;
+        dl->AddRectFilled(a, b, white(top), rounding);
+        shade(v0, y0, y1, top, bot);
+    };
+    auto label = [&](ImFont* f, float size, ImVec2 c, ImU32 color, const char* t) {
+        ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0, t);
+        dl->AddText(f, size, ImVec2(std::floor(c.x - ts.x * 0.5f), std::floor(c.y - ts.y * 0.5f)), color, t);
+    };
+    // Round face button: drop shadow, domed face, gloss, a halo when held.
+    auto face_button = [&](ImVec2 c, float r, bool on, ImU32 top, ImU32 bot, ImU32 halo) {
+        if (on) {
+            dl->AddCircleFilled(c, r + 2.0f * bu, (halo & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, static_cast<int>(80 * alpha)), 0);
+            c.y += 0.4f * bu;
+        } else {
+            dl->AddCircleFilled(ImVec2(c.x, c.y + 0.8f * bu), r + 0.2f * bu, rgba(40, 42, 50, 0.45f), 0);
+        }
+        circle_grad(c, r, top, bot);
+        dl->AddCircle(c, r, rgba(0, 0, 0, 0.3f), 0, dp(1));
+        dl->AddCircleFilled(ImVec2(c.x - r * 0.28f, c.y - r * 0.42f), r * 0.36f, rgba(255, 255, 255, on ? 0.32f : 0.24f), 0);
+        return c;
+    };
 
-    // C buttons
-    ImVec2 cc = P(0.83f, 0.26f);
-    float co = W * 0.042f, cr = W * 0.022f;
-    ImU32 yon = IM_COL32(255, 210, 60, 255), yoff = IM_COL32(140, 110, 20, 255);
-    dl->AddCircleFilled(ImVec2(cc.x, cc.y - co), cr, pressed(Button::C_UP) ? yon : yoff, 20);
-    dl->AddCircleFilled(ImVec2(cc.x, cc.y + co), cr, pressed(Button::C_DOWN) ? yon : yoff, 20);
-    dl->AddCircleFilled(ImVec2(cc.x - co, cc.y), cr, pressed(Button::C_LEFT) ? yon : yoff, 20);
-    dl->AddCircleFilled(ImVec2(cc.x + co, cc.y), cr, pressed(Button::C_RIGHT) ? yon : yoff, 20);
+    const ImU32 edge = rgba(16, 17, 22, 0.9f);
+    ImFont* fb = g_fonts.small_bold;
+    const float fbs = font_px(fb);
+
+    // ---- Shell outline: mirror the traced half into a closed clockwise loop,
+    // then smooth it with a Catmull-Rom curve.
+    constexpr int kHalf = IM_ARRAYSIZE(kPadLeft);
+    constexpr int kLoop = 2 * kHalf - 2;
+    auto loop_point = [&](int i) {
+        i = (i % kLoop + kLoop) % kLoop;
+        if (i < kHalf) return ImVec2(100.0f - kPadLeft[i].x, kPadLeft[i].y); // right half, top to bottom
+        return kPadLeft[kLoop - i];                                          // left half, bottom to top
+    };
+    // Loop index of a kPadLeft point on the right (mirrored) or left side.
+    auto right_index = [](int i) { return i; };
+    auto left_index = [](int i) { return i == 0 ? 0 : kLoop - i; };
+    ImVector<ImVec2> body;
+    body.reserve(kLoop * kPadCurveSteps);
+    for (int i = 0; i < kLoop; ++i) {
+        ImVec2 p0 = loop_point(i - 1), p1 = loop_point(i), p2 = loop_point(i + 1), p3 = loop_point(i + 2);
+        for (int k = 0; k < kPadCurveSteps; ++k) {
+            float t = static_cast<float>(k) / kPadCurveSteps, t2 = t * t, t3 = t2 * t;
+            auto cr = [&](float a, float b, float c, float d) {
+                return 0.5f * (2.0f * b + (c - a) * t + (2.0f * a - 5.0f * b + 4.0f * c - d) * t2 + (3.0f * b - a - 3.0f * c + d) * t3);
+            };
+            body.push_back(B(cr(p0.x, p1.x, p2.x, p3.x), cr(p0.y, p1.y, p2.y, p3.y)));
+        }
+    }
+    // Outward normal of the smoothed outline at sample i (the loop runs clockwise).
+    auto normal = [&](int i) {
+        ImVec2 a = body[(i + body.Size - 1) % body.Size], b = body[(i + 1) % body.Size];
+        ImVec2 d(b.x - a.x, b.y - a.y);
+        float len = std::sqrt(d.x * d.x + d.y * d.y);
+        return len > 0 ? ImVec2(d.y / len, -d.x / len) : ImVec2(0, -1);
+    };
+
+    // ---- Shoulder buttons: bands hugging the shell between the hump and the
+    // outer corner, peeking out from behind it.
+    auto shoulder = [&](int from, int to, bool on, const char* t) {
+        if (from > to) std::swap(from, to);
+        ImVector<ImVec2> band;
+        const float depth = (on ? 3.6f : 4.4f) * bu;
+        for (int i = from * kPadCurveSteps; i <= to * kPadCurveSteps; ++i) {
+            ImVec2 n = normal(i);
+            band.push_back(ImVec2(body[i].x + n.x * depth, body[i].y + n.y * depth));
+        }
+        for (int i = to * kPadCurveSteps; i >= from * kPadCurveSteps; --i) {
+            ImVec2 n = normal(i);
+            band.push_back(ImVec2(body[i].x - n.x * bu, body[i].y - n.y * bu));
+        }
+        // The band must wind clockwise for anti-aliasing; flip it if not.
+        float area = 0.0f;
+        for (int i = 0; i < band.Size; ++i) {
+            const ImVec2 &a = band[i], &b = band[(i + 1) % band.Size];
+            area += a.x * b.y - b.x * a.y;
+        }
+        if (area < 0) std::reverse(band.begin(), band.end());
+        if (on) poly_grad(band.Data, band.Size, theme(g_pal.accent_hover), theme(g_pal.accent_active));
+        else poly_grad(band.Data, band.Size, rgba(150, 153, 162), rgba(104, 107, 116));
+        dl->AddPolyline(band.Data, band.Size, edge, ImDrawFlags_Closed, dp(1));
+        const int mid = (from + to) * kPadCurveSteps / 2;
+        ImVec2 n = normal(mid);
+        ImVec2 c(body[mid].x + n.x * depth * 0.5f, body[mid].y + n.y * depth * 0.5f);
+        label(fb, fbs, c, on ? rgba(255, 255, 255) : rgba(40, 42, 50), t);
+    };
+    shoulder(left_index(kPadShoulderBegin), left_index(kPadShoulderEnd), pressed(Button::L), "L");
+    shoulder(right_index(kPadShoulderBegin), right_index(kPadShoulderEnd), pressed(Button::R), "R");
+
+    // ---- Shell: soft drop shadow, gradient, silhouette, rim light
+    for (int i = 3; i >= 1; --i) {
+        ImVector<ImVec2> sh = body;
+        for (ImVec2& v : sh) v.y += i * 0.7f * bu;
+        dl->AddConcavePolyFilled(sh.Data, sh.Size, rgba(0, 0, 0, 0.16f));
+    }
+    poly_grad(body.Data, body.Size, rgba(202, 204, 211), rgba(146, 149, 158));
+    dl->AddPolyline(body.Data, body.Size, edge, ImDrawFlags_Closed, dp(1.3f));
+    {
+        const int a = left_index(kPadHumpEnd) * kPadCurveSteps, b = right_index(kPadHumpEnd) * kPadCurveSteps;
+        dl->PathClear();
+        for (int i = a; i != b; i = (i + 1) % body.Size) dl->PathLineTo(ImVec2(body[i].x, body[i].y + 0.8f * bu));
+        dl->PathStroke(rgba(255, 255, 255, 0.5f), 0, dp(1));
+    }
+    // Recessed badge on the hump.
+    {
+        ImVec2 a = B(40.5f, 7.8f), b = B(59.5f, 13.4f);
+        const float r = (b.y - a.y) * 0.5f;
+        rect_grad(a, b, r, rgba(160, 163, 172), rgba(196, 198, 206), a.y, b.y);
+        dl->AddRect(a, b, rgba(90, 93, 102, 0.6f), r, 0, dp(1));
+    }
+
+    // ---- D-pad
+    {
+        ImVec2 dc = B(20.0f, 30.5f);
+        const float a = 2.9f * bu, l = 8.4f * bu, rr = 1.0f * bu;
+        const float y0 = dc.y - l, y1 = dc.y + l;
+        auto cross = [&](float dy, ImU32 top, ImU32 bot) {
+            rect_grad(ImVec2(dc.x - a, dc.y - l + dy), ImVec2(dc.x + a, dc.y + l + dy), rr, top, bot, y0 + dy, y1 + dy);
+            rect_grad(ImVec2(dc.x - l, dc.y - a + dy), ImVec2(dc.x + l, dc.y + a + dy), rr, top, bot, y0 + dy, y1 + dy);
+        };
+        circle_grad(dc, 10.4f * bu, rgba(176, 179, 188), rgba(204, 206, 213)); // shallow dish
+        cross(0.9f * bu, rgba(30, 32, 38, 0.5f), rgba(30, 32, 38, 0.5f));
+        cross(0.0f, rgba(110, 113, 122), rgba(62, 65, 73));
+        struct Arm {
+            std::uint16_t mask;
+            float dx, dy;
+        };
+        const Arm arms[] = {{Button::D_UP, 0, -1}, {Button::D_DOWN, 0, 1}, {Button::D_LEFT, -1, 0}, {Button::D_RIGHT, 1, 0}};
+        for (const Arm& arm : arms) {
+            const bool on = pressed(arm.mask);
+            if (on) {
+                ImVec2 mn(dc.x + (arm.dx != 0 ? std::min(arm.dx * a, arm.dx * l) : -a), dc.y + (arm.dy != 0 ? std::min(arm.dy * a, arm.dy * l) : -a));
+                ImVec2 mx(dc.x + (arm.dx != 0 ? std::max(arm.dx * a, arm.dx * l) : a), dc.y + (arm.dy != 0 ? std::max(arm.dy * a, arm.dy * l) : a));
+                rect_grad(mn, mx, rr, theme(g_pal.accent_hover), theme(g_pal.accent_active), mn.y, mx.y);
+            }
+            // Embossed arrow near the end of each arm.
+            ImVec2 tip(dc.x + arm.dx * 6.9f * bu, dc.y + arm.dy * 6.9f * bu);
+            ImVec2 base(dc.x + arm.dx * 4.9f * bu, dc.y + arm.dy * 4.9f * bu);
+            ImVec2 side(-arm.dy * 1.4f * bu, arm.dx * 1.4f * bu);
+            dl->AddTriangleFilled(tip, ImVec2(base.x + side.x, base.y + side.y), ImVec2(base.x - side.x, base.y - side.y),
+                                  on ? rgba(255, 255, 255, 0.95f) : rgba(20, 22, 28, 0.45f));
+        }
+        circle_grad(dc, 2.0f * bu, rgba(52, 55, 62), rgba(96, 99, 108)); // centre dimple
+    }
+
+    // ---- Start
+    {
+        const bool on = pressed(Button::START);
+        face_button(B(50.3f, 32.0f), 3.4f * bu, on, on ? rgba(255, 110, 105) : rgba(222, 52, 56), on ? rgba(232, 56, 58) : rgba(150, 22, 30),
+                    rgba(255, 90, 90));
+        label(g_fonts.small, font_px(g_fonts.small) * 0.72f, B(50.3f, 38.0f), rgba(70, 72, 82), "START");
+    }
+
+    // ---- Analog stick: dark collar, octagonal gate, light concave cap
+    {
+        ImVec2 ac = B(50.0f, 53.0f);
+        circle_grad(ac, 9.6f * bu, rgba(98, 101, 114), rgba(132, 135, 148));
+        dl->AddCircle(ac, 9.6f * bu, rgba(40, 42, 52, 0.7f), 0, dp(1));
+        const float gr = 7.4f * bu;
+        ImVec2 gate[8];
+        for (int i = 0; i < 8; ++i) {
+            float ang = (i * 45.0f - 90.0f + 22.5f) * 3.14159265f / 180.0f;
+            gate[i] = ImVec2(ac.x + std::cos(ang) * gr, ac.y + std::sin(ang) * gr);
+        }
+        poly_grad(gate, 8, rgba(46, 48, 58), rgba(82, 85, 97));
+        const float sx = std::clamp(s.stick_x / 80.0f, -1.0f, 1.0f), sy = std::clamp(s.stick_y / 80.0f, -1.0f, 1.0f);
+        const bool moved = s.stick_x != 0 || s.stick_y != 0;
+        ImVec2 knob(ac.x + sx * 3.0f * bu, ac.y - sy * 3.0f * bu);
+        if (moved) {
+            dl->AddLine(ac, knob, theme(g_pal.accent, 0.9f), dp(2));
+            dl->AddCircleFilled(ac, 0.9f * bu, theme(g_pal.accent), 12);
+        }
+        const float kr = 4.6f * bu;
+        dl->AddCircleFilled(ImVec2(knob.x, knob.y + 0.9f * bu), kr, rgba(0, 0, 0, 0.45f), 0);
+        circle_grad(knob, kr, rgba(236, 237, 240), rgba(176, 178, 186));
+        dl->AddCircle(knob, kr, moved ? theme(g_pal.accent) : rgba(60, 62, 72, 0.8f), 0, dp(moved ? 1.6f : 1.0f));
+        circle_grad(knob, kr * 0.62f, rgba(182, 184, 192), rgba(232, 233, 237)); // concave top
+        dl->AddCircle(knob, kr * 0.62f, rgba(0, 0, 0, 0.18f), 0, dp(1));
+        circle_grad(knob, kr * 0.26f, rgba(160, 162, 170), rgba(214, 215, 220));
+    }
+
+    // ---- Z trigger (under the centre prong; shown on top of it)
+    {
+        const bool on = pressed(Button::Z);
+        ImVec2 a = B(45.0f, on ? 74.4f : 74.0f), b = B(55.0f, on ? 80.4f : 80.0f);
+        const float r = (b.y - a.y) * 0.5f;
+        if (!on) dl->AddRectFilled(ImVec2(a.x, a.y + 0.7f * bu), ImVec2(b.x, b.y + 0.7f * bu), rgba(40, 42, 50, 0.4f), r);
+        if (on) rect_grad(a, b, r, theme(g_pal.accent_hover), theme(g_pal.accent_active), a.y, b.y);
+        else rect_grad(a, b, r, rgba(150, 153, 162), rgba(112, 115, 124), a.y, b.y);
+        dl->AddRect(a, b, rgba(30, 32, 40, 0.6f), r, 0, dp(1));
+        label(fb, fbs, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), on ? rgba(255, 255, 255) : rgba(40, 42, 50), "Z");
+    }
+
+    // ---- B and A
+    {
+        const bool bon = pressed(Button::B);
+        ImVec2 bc = face_button(B(68.3f, 32.0f), 3.8f * bu, bon, bon ? rgba(120, 236, 150) : rgba(46, 184, 88), bon ? rgba(46, 186, 90) : rgba(18, 112, 50),
+                                rgba(80, 220, 120));
+        label(fb, fbs, bc, rgba(255, 255, 255, bon ? 1.0f : 0.8f), "B");
+        const bool aon = pressed(Button::A);
+        ImVec2 acn = face_button(B(76.1f, 38.6f), 3.9f * bu, aon, aon ? rgba(140, 180, 255) : rgba(62, 116, 232), aon ? rgba(70, 122, 246) : rgba(26, 60, 160),
+                                 rgba(100, 150, 255));
+        label(fb, fbs, acn, rgba(255, 255, 255, aon ? 1.0f : 0.8f), "A");
+    }
+
+    // ---- C buttons
+    {
+        ImVec2 cc = B(83.5f, 25.8f);
+        const float off = 5.8f * bu, r = 2.75f * bu;
+        struct CBtn {
+            std::uint16_t mask;
+            float dx, dy;
+        };
+        label(g_fonts.small, font_px(g_fonts.small) * 0.7f, cc, rgba(80, 82, 92), "C");
+        const CBtn cs[] = {{Button::C_UP, 0, -1}, {Button::C_DOWN, 0, 1}, {Button::C_LEFT, -1, 0}, {Button::C_RIGHT, 1, 0}};
+        for (const CBtn& c : cs) {
+            const bool on = pressed(c.mask);
+            ImVec2 p = face_button(ImVec2(cc.x + c.dx * off, cc.y + c.dy * off), r, on, on ? rgba(255, 236, 130) : rgba(252, 204, 40),
+                                   on ? rgba(250, 196, 40) : rgba(200, 136, 8), rgba(255, 215, 70));
+            ImVec2 tip(p.x + c.dx * 1.2f * bu, p.y + c.dy * 1.2f * bu);
+            ImVec2 base(p.x - c.dx * 0.8f * bu, p.y - c.dy * 0.8f * bu);
+            ImVec2 side(-c.dy * 1.1f * bu, c.dx * 1.1f * bu);
+            dl->AddTriangleFilled(tip, ImVec2(base.x + side.x, base.y + side.y), ImVec2(base.x - side.x, base.y - side.y), rgba(140, 92, 0, 0.75f));
+        }
+    }
 
     ImGui::Dummy(ImVec2(W, H + dp(4)));
+}
+
+namespace {
+fs::path controller_profiles_dir() { return platform::config_dir() / "controller_profiles"; }
+
+// A profile name usable as a file name on every platform.
+std::string sanitize_profile_name(const char* in) {
+    std::string out;
+    for (const char* c = in; *c; ++c) {
+        const unsigned char ch = static_cast<unsigned char>(*c);
+        if (ch < 32 || std::strchr("<>:\"/\\|?*", ch)) continue;
+        out += *c;
+    }
+    const size_t a = out.find_first_not_of(" ."), b = out.find_last_not_of(" .");
+    out = a == std::string::npos ? std::string() : out.substr(a, b - a + 1);
+    if (out.size() > 48) out.resize(48); // may cut a UTF-8 sequence only in pathological names
+    return out;
+}
+
+bool same_name(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+} // namespace
+
+void App::scan_controller_profiles() {
+    profiles_.clear();
+    profiles_scanned_ = true;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(controller_profiles_dir(), ec)) {
+        if (!e.is_regular_file(ec) || e.path().extension() != ".ini") continue;
+        ControllerProfile p;
+        p.name = platform::path_to_utf8(e.path().stem());
+        p.cfg.keys.fill(0);
+        p.cfg.pad.fill(-1);
+        if (load_controller_profile(p.cfg, platform::path_to_utf8(e.path()))) profiles_.push_back(std::move(p));
+    }
+    std::sort(profiles_.begin(), profiles_.end(), [](const ControllerProfile& a, const ControllerProfile& b) {
+        return std::lexicographical_compare(a.name.begin(), a.name.end(), b.name.begin(), b.name.end(), [](char x, char y) {
+            return std::tolower(static_cast<unsigned char>(x)) < std::tolower(static_cast<unsigned char>(y));
+        });
+    });
+}
+
+void App::controller_profile_row(PortConfig& pc, float cw) {
+    if (!profiles_scanned_) scan_controller_profiles();
+    row_begin("Profile", "Save this port's bindings, dead zone and stick options under a name, and load them into any port.", cw);
+    int match = -1;
+    for (int i = 0; i < static_cast<int>(profiles_.size()); ++i)
+        if (same_controller_profile(profiles_[i].cfg, pc)) {
+            match = i;
+            break;
+        }
+    const float gap = dp(6), save_w = dp(72);
+    const float del_w = ImGui::GetFontSize() + dp(14); // square, as tall as the combo
+    std::vector<const char*> items;
+    if (match < 0) items.push_back(profiles_.empty() ? "No saved profiles" : "Not saved");
+    for (const auto& p : profiles_) items.push_back(p.name.c_str());
+    int cur = match < 0 ? 0 : match;
+    if (combo("profile", &cur, items.data(), static_cast<int>(items.size()), cw - save_w - del_w - gap * 2)) {
+        const int idx = match < 0 ? cur - 1 : cur;
+        if (idx >= 0 && idx < static_cast<int>(profiles_.size())) {
+            apply_controller_profile(pc, profiles_[idx].cfg);
+            toast("Loaded \xE2\x80\x9C" + profiles_[idx].name + "\xE2\x80\x9D into Port " + std::to_string(settings_port_ + 1), ToastKind::Success);
+        }
+    }
+    ImGui::SameLine(0, gap);
+    if (button("Save\xE2\x80\xA6", Icon::None, ButtonKind::Subtle, save_w, true, del_w)) {
+        std::snprintf(profile_name_, sizeof profile_name_, "%s", match >= 0 ? profiles_[match].name.c_str() : "");
+        ImGui::OpenPopup("##save_profile");
+    }
+    ImGui::SameLine(0, gap);
+    if (icon_button("delete_profile", Icon::Trash, del_w, match >= 0 ? "Delete this profile" : nullptr, false, match >= 0,
+                    ButtonKind::Subtle) && match >= 0) {
+        profile_to_delete_ = profiles_[match].name;
+        ImGui::OpenPopup("##delete_profile");
+    }
+    // Both popups open under the row's controls, right-aligned with them.
+    const ImVec2 anchor(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + dp(6));
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, dp(14, 12));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, dp(10));
+    ImGui::SetNextWindowPos(anchor, ImGuiCond_Appearing, ImVec2(1, 0));
+    if (ImGui::BeginPopup("##save_profile")) {
+        const float w = dp(260);
+        ImGui::PushFont(g_fonts.small_bold);
+        ImGui::TextColored(g_pal.text_faint, "SAVE PROFILE");
+        ImGui::PopFont();
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(w);
+        const bool enter = ImGui::InputTextWithHint("##name", "Profile name", profile_name_, sizeof profile_name_,
+                                                    ImGuiInputTextFlags_EnterReturnsTrue);
+        const std::string name = sanitize_profile_name(profile_name_);
+        const bool exists = std::any_of(profiles_.begin(), profiles_.end(), [&](const ControllerProfile& p) { return same_name(p.name, name); });
+        ImGui::PushFont(g_fonts.small);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        ImGui::TextColored(exists ? g_pal.warning : g_pal.text_faint, "%s",
+                           exists ? "Replaces the saved profile with this name."
+                                  : "Bindings, dead zone, range, stick options and rumble strength.");
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+        if ((button("Save profile", Icon::Check, ButtonKind::Primary, w, !name.empty()) || enter) && !name.empty()) {
+            std::error_code ec;
+            fs::create_directories(controller_profiles_dir(), ec);
+            const fs::path path = controller_profiles_dir() / platform::utf8_to_path(name + ".ini");
+            if (save_controller_profile(pc, platform::path_to_utf8(path))) {
+                toast("Saved profile \xE2\x80\x9C" + name + "\xE2\x80\x9D", ToastKind::Success);
+                scan_controller_profiles();
+            } else {
+                toast("Couldn't save the profile", ToastKind::Error);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SetNextWindowPos(anchor, ImGuiCond_Appearing, ImVec2(1, 0));
+    if (ImGui::BeginPopup("##delete_profile")) {
+        const float w = dp(240);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        ImGui::Text("Delete \xE2\x80\x9C%s\xE2\x80\x9D?", profile_to_delete_.c_str());
+        ImGui::PushFont(g_fonts.small);
+        ImGui::TextColored(g_pal.text_faint, "The profile file is removed. Ports using it keep their current settings.");
+        ImGui::PopFont();
+        ImGui::PopTextWrapPos();
+        if (button("Delete", Icon::Trash, ButtonKind::Danger, w)) {
+            std::error_code ec;
+            fs::remove(controller_profiles_dir() / platform::utf8_to_path(profile_to_delete_ + ".ini"), ec);
+            if (ec) toast("Couldn't delete the profile", ToastKind::Error);
+            else toast("Deleted profile \xE2\x80\x9C" + profile_to_delete_ + "\xE2\x80\x9D");
+            scan_controller_profiles();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
+    row_end();
 }
 
 void App::settings_controller() {
@@ -540,6 +892,8 @@ void App::settings_controller() {
         combo("device", &pc.device, items.data(), static_cast<int>(items.size()), cw);
     }
     row_end();
+
+    controller_profile_row(pc, cw);
 
     row_begin("Accessory", "Controller Pak: game saves, kept in a .mpk file next to the ROM. Rumble Pak: vibrates your gamepad. "
               "Transfer Pak: a Game Boy cartridge (Pok\xC3\xA9mon Stadium, Mario Golf...). Games check the slot when they start.", cw);
@@ -599,6 +953,17 @@ void App::settings_controller() {
     ImGui::PushFont(g_fonts.small_bold);
     ImGui::TextColored(g_pal.text_faint, "ANALOG STICK");
     ImGui::PopFont();
+    {
+        char pos[32];
+        std::snprintf(pos, sizeof pos, "X %+d  Y %+d", live.stick_x, live.stick_y);
+        ImFont* f = g_fonts.mono_small;
+        float tw = f->CalcTextSizeA(font_px(f), FLT_MAX, 0, pos).x;
+        ImGui::SameLine(0, 0);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(dp(8), diag_w - tw - ImGui::GetItemRectSize().x));
+        ImGui::PushFont(f);
+        ImGui::TextColored(live.stick_x || live.stick_y ? g_pal.accent_hover : g_pal.text_faint, "%s", pos);
+        ImGui::PopFont();
+    }
     ImGui::PushFont(g_fonts.small);
     ImGui::TextColored(g_pal.text_dim, "Dead zone");
     ImGui::PopFont();
@@ -607,6 +972,22 @@ void App::settings_controller() {
     ImGui::TextColored(g_pal.text_dim, "Range");
     ImGui::PopFont();
     slider_float("sens", &pc.sensitivity, 0.5f, 1.5f, "%.2f\xC3\x97", diag_w);
+    ImGui::Dummy(dp(0, 4));
+    auto stick_option = [&](const char* id, bool* v, const char* text, const char* tip) {
+        const float y = ImGui::GetCursorPosY();
+        toggle(id, v);
+        const bool hov = ImGui::IsItemHovered();
+        ImGui::SameLine(0, dp(10));
+        ImGui::SetCursorPosY(y + (dp(22) - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::TextColored(g_pal.text_dim, "%s", text);
+        if (hov || ImGui::IsItemHovered()) tooltip(tip);
+    };
+    stick_option("octagon", &pc.octagon, "Octagonal gate",
+                 "Limit the stick to the N64's octagonal range: \xC2\xB1""80 along the axes and 70 on each axis in the corners, "
+                 "like the original controller. Off: each axis reaches \xC2\xB1""80 on its own (a square range).");
+    stick_option("dzscale", &pc.deadzone_rescale, "Rescale past dead zone",
+                 "Stretch the travel past the dead zone back to the full range, so movement starts smoothly from zero. "
+                 "Off: the stick jumps straight to the dead-zone value as it leaves the dead zone.");
     ImGui::EndGroup();
 
     if (two_col) ImGui::SameLine(0, dp(28));
@@ -624,6 +1005,7 @@ void App::settings_controller() {
     float cell_w = (list_w - (cols - 1) * dp(12)) / cols;
     ImVec2 origin = ImGui::GetCursorScreenPos();
     const float rh = dp(36);
+    bool any_bind_hovered = false;
     for (int i = 0; i < kN64InputCount; ++i) {
         int c = i % cols, r = i / cols;
         ImVec2 p(origin.x + c * (cell_w + dp(12)), origin.y + r * (rh + dp(4)));
@@ -634,6 +1016,7 @@ void App::settings_controller() {
         bool hov = ImGui::IsItemHovered();
         bool right = ImGui::IsItemClicked(ImGuiMouseButton_Right);
         ImGui::PopID();
+        any_bind_hovered |= hov;
         float pulse = capturing ? 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 6.0f) : 0.0f;
         dl->AddRectFilled(p, ImVec2(p.x + cell_w, p.y + rh), col(capturing ? mix(g_pal.bg3, g_pal.accent_soft, 1.0f) : (hov ? g_pal.bg3 : g_pal.bg2)), dp(8));
         dl->AddRect(p, ImVec2(p.x + cell_w, p.y + rh), col(capturing ? with_alpha(g_pal.accent, 0.5f + 0.5f * pulse) : g_pal.border), dp(8));
@@ -652,16 +1035,24 @@ void App::settings_controller() {
         }
         text_ellipsis(dl, f, ImVec2(kmn.x + dp(7), (kmn.y + kmx.y) * 0.5f - ts.y * 0.5f), kw - dp(10),
                       col(capturing ? g_pal.accent_hover : (unbound ? g_pal.text_faint : g_pal.text)), b.c_str());
-        if (clicked) input_.begin_capture(settings_port_, i);
+        if (clicked) {
+            hotkey_capture_ = -1;
+            input_.begin_capture(settings_port_, i);
+        }
         if (right) {
             if (keyboard) pc.keys[i] = 0;
             else pc.pad[i] = -1;
         }
         if (hov && !capturing) tooltip("Click to rebind \xC2\xB7 right-click to clear \xC2\xB7 Esc cancels");
     }
+    // A click anywhere else stops recording and keeps the previous binding.
+    if (input_.capturing() && !any_bind_hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)))
+        input_.cancel_capture();
     int rows = (kN64InputCount + cols - 1) / cols;
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (rh + dp(4))));
     ImGui::Dummy(ImVec2(list_w, dp(4)));
+    // Wrap to the column so the page never gets wider than the window.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + list_w);
     if (!keyboard && input_.gamepads().empty()) {
         ImGui::TextColored(g_pal.warning, "No gamepads detected. Connect one \xE2\x80\x94 it will appear automatically.");
     } else {
@@ -670,6 +1061,7 @@ void App::settings_controller() {
                            (int)input_.gamepads().size(), input_.gamepads().size() == 1 ? "" : "s");
         ImGui::PopFont();
     }
+    ImGui::PopTextWrapPos();
     ImGui::EndGroup();
     ImGui::EndDisabled();
 }
@@ -862,66 +1254,119 @@ void App::settings_library() {
 }
 
 void App::settings_shortcuts() {
+    const bool mac = platform::current_os() == platform::OS::MacOS;
+    float w = ImGui::GetContentRegionAvail().x;
     ImGui::PushFont(g_fonts.small);
-    ImGui::PushStyleColor(ImGuiCol_Text, g_pal.text_dim);
-    std::string note = std::string("Showing shortcuts for ") + platform::os_display_name() + ". " +
-                       (platform::current_os() == platform::OS::MacOS ? "On Windows and Linux, Ctrl replaces Cmd."
-                                                                       : "On macOS, Cmd replaces Ctrl.");
-    ImGui::TextUnformatted(note.c_str());
-    ImGui::PopStyleColor();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+    ImGui::TextColored(g_pal.text_dim, "Click a shortcut and press the new key combination. Right-click clears it, Esc cancels. %s",
+                       mac ? "Shortcuts with Cmd use Ctrl on Windows and Linux." : "Shortcuts with Ctrl use Cmd on macOS.");
+    ImGui::PopTextWrapPos();
     ImGui::PopFont();
     ImGui::Dummy(dp(0, 8));
 
-    float w = ImGui::GetContentRegionAvail().x;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    auto list = shortcuts();
-    for (size_t i = 0; i < list.size(); ++i) {
+    const float cap_w = std::clamp((w - dp(240)) * 0.5f, dp(110), dp(170));
+    const float cap_gap = dp(8);
+    // Draws a key cap button; returns 1 = clicked, 2 = right-clicked.
+    bool any_cap_hovered = false;
+    auto key_cap = [&](const char* id, ImVec2 p, float cw, float ch, const std::string& text, bool capturing) {
+        ImGui::SetCursorScreenPos(p);
+        const bool clicked = ImGui::InvisibleButton(id, ImVec2(cw, ch));
+        const bool hov = ImGui::IsItemHovered();
+        any_cap_hovered |= hov;
+        const bool right = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+        const bool unbound = !capturing && text.empty();
+        float pulse = capturing ? 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 6.0f) : 0.0f;
+        ImVec2 mx(p.x + cw, p.y + ch);
+        if (!capturing && !unbound) dl->AddRectFilled(p, ImVec2(mx.x, mx.y + dp(2)), col(g_pal.border_strong), dp(6));
+        dl->AddRectFilled(p, mx, col(capturing ? mix(g_pal.bg3, g_pal.accent_soft, 1.0f) : unbound ? (hov ? g_pal.bg3 : g_pal.bg1)
+                                                                                           : (hov ? mix(g_pal.bg4, g_pal.text, 0.06f) : g_pal.bg4)),
+                          dp(6));
+        if (capturing) dl->AddRect(p, mx, col(with_alpha(g_pal.accent, 0.5f + 0.5f * pulse)), dp(6));
+        else if (unbound) dl->AddRect(p, mx, col(g_pal.border), dp(6));
+        ImFont* f = capturing || unbound ? g_fonts.small : g_fonts.mono_small;
+        const char* t = capturing ? "Press keys\xE2\x80\xA6" : unbound ? "Add" : text.c_str();
+        ImVec2 ts = f->CalcTextSizeA(font_px(f), FLT_MAX, 0, t);
+        if (ts.x > cw - dp(12)) text_ellipsis(dl, f, ImVec2(p.x + dp(6), p.y + (ch - ts.y) * 0.5f), cw - dp(12), col(g_pal.text), t);
+        else dl->AddText(f, font_px(f), ImVec2(p.x + (cw - ts.x) * 0.5f, p.y + (ch - ts.y) * 0.5f),
+                         col(capturing ? g_pal.accent_hover : unbound ? g_pal.text_faint : g_pal.text), t);
+        if (hov && !capturing) tooltip(unbound ? "Click to add a shortcut" : "Click to change \xC2\xB7 right-click to clear");
+        return clicked ? 1 : right ? 2 : 0;
+    };
+
+    for (int h = 0; h < kHotkeyCount; ++h) {
+        // A plain key that is also a game control on a keyboard port does both.
+        std::string warn;
+        for (const KeyCombo& c : settings_.hotkeys[h]) {
+            if (!c.key || c.mods || !warn.empty()) continue;
+            const SDL_Scancode sc = SDL_GetScancodeFromKey(static_cast<SDL_Keycode>(c.key), nullptr);
+            for (int port = 0; port < 4 && warn.empty(); ++port) {
+                const PortConfig& pc = settings_.ports[port];
+                if (!pc.plugged || pc.device != 0) continue;
+                for (int i = 0; i < kN64InputCount; ++i)
+                    if (pc.keys[i] == static_cast<int>(sc)) {
+                        warn = key_combo_label(c) + " is also " + n64_input_name(static_cast<N64Input>(i)) + " on Port " + std::to_string(port + 1);
+                        break;
+                    }
+            }
+        }
         ImVec2 p = ImGui::GetCursorScreenPos();
-        float h = dp(40);
-        if (i % 2 == 0) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(g_pal.bg2), dp(6));
-        dl->AddText(g_fonts.body, font_px(g_fonts.body), ImVec2(p.x + dp(14), p.y + (h - font_px(g_fonts.body)) * 0.5f), col(g_pal.text),
-                    list[i].action);
-        // Render each alternative ("A  or  B") as key caps, right-aligned.
-        std::vector<std::string> alts;
-        std::string k = list[i].keys;
-        size_t pos;
-        while ((pos = k.find("  or  ")) != std::string::npos) {
-            alts.push_back(k.substr(0, pos));
-            k = k.substr(pos + 6);
-        }
-        alts.push_back(k);
-        float x = p.x + w - dp(12);
-        for (int a = static_cast<int>(alts.size()) - 1; a >= 0; --a) {
-            // split on '+'
-            std::vector<std::string> keys;
-            std::string s = alts[a];
-            size_t start = 0;
-            while (true) {
-                size_t plus = s.find('+', start == 0 ? 0 : start);
-                if (plus == std::string::npos || plus == s.size() - 1) { keys.push_back(s.substr(start)); break; }
-                keys.push_back(s.substr(start, plus - start));
-                start = plus + 1;
-            }
-            for (int j = static_cast<int>(keys.size()) - 1; j >= 0; --j) {
-                ImFont* f = g_fonts.mono_small;
-                ImVec2 ts = f->CalcTextSizeA(font_px(f), FLT_MAX, 0, keys[j].c_str());
-                float kw = ts.x + dp(14);
-                ImVec2 kmn(x - kw, p.y + dp(9)), kmx(x, p.y + h - dp(9));
-                dl->AddRectFilled(kmn, ImVec2(kmx.x, kmx.y + dp(2)), col(g_pal.border_strong), dp(5));
-                dl->AddRectFilled(kmn, kmx, col(g_pal.bg4), dp(5));
-                dl->AddText(f, font_px(f), ImVec2(kmn.x + dp(7), (kmn.y + kmx.y) * 0.5f - ts.y * 0.5f), col(g_pal.text), keys[j].c_str());
-                x -= kw + dp(4);
-            }
-            if (a > 0) {
-                const char* orr = "or";
-                ImVec2 ts = g_fonts.small->CalcTextSizeA(font_px(g_fonts.small), FLT_MAX, 0, orr);
-                x -= dp(6);
-                dl->AddText(g_fonts.small, font_px(g_fonts.small), ImVec2(x - ts.x, p.y + (h - ts.y) * 0.5f), col(g_pal.text_faint), orr);
-                x -= ts.x + dp(10);
+        const float h_row = warn.empty() ? dp(44) : dp(60);
+        if (h % 2 == 0) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h_row), col(g_pal.bg2), dp(6));
+        const float name_y = p.y + (dp(44) - font_px(g_fonts.body)) * 0.5f;
+        dl->AddText(g_fonts.body, font_px(g_fonts.body), ImVec2(p.x + dp(14), name_y), col(g_pal.text), hotkey_name(static_cast<Hotkey>(h)));
+        if (!warn.empty())
+            dl->AddText(g_fonts.small, font_px(g_fonts.small), ImVec2(p.x + dp(14), name_y + font_px(g_fonts.body) + dp(4)), col(g_pal.warning),
+                        warn.c_str());
+        for (int slot = 0; slot < kHotkeySlots; ++slot) {
+            const float x = p.x + w - dp(8) - (kHotkeySlots - slot) * cap_w - (kHotkeySlots - 1 - slot) * cap_gap;
+            ImGui::PushID(h * kHotkeySlots + slot);
+            const bool capturing = hotkey_capture_ == h * kHotkeySlots + slot;
+            const int r = key_cap("##hk", ImVec2(x, p.y + dp(7)), cap_w, dp(30), key_combo_label(settings_.hotkeys[h][slot]), capturing);
+            ImGui::PopID();
+            if (r == 1) {
+                input_.cancel_capture();
+                hotkey_capture_ = capturing ? -1 : h * kHotkeySlots + slot;
+            } else if (r == 2) {
+                settings_.hotkeys[h][slot] = {};
+                if (capturing) hotkey_capture_ = -1;
+                save_settings();
             }
         }
-        ImGui::Dummy(ImVec2(w, h));
+        ImGui::SetCursorScreenPos(p);
+        ImGui::Dummy(ImVec2(w, h_row));
     }
+
+    // A click anywhere else stops recording and keeps the previous shortcut.
+    if (hotkey_capture_ >= 0 && !any_cap_hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)))
+        hotkey_capture_ = -1;
+
+    // Fixed shortcuts.
+    ImGui::Dummy(dp(0, 10));
+    ImGui::PushFont(g_fonts.small_bold);
+    ImGui::TextColored(g_pal.text_faint, "FIXED");
+    ImGui::PopFont();
+    ImGui::Dummy(dp(0, 2));
+    const std::string slot_keys = std::string(platform::primary_mod_name()) + "+1\xE2\x80\x93" "9";
+    const struct {
+        const char* action;
+        std::string keys;
+    } fixed[] = {{"Choose state slot", slot_keys}, {"Exit fullscreen", "Esc"}};
+    for (size_t i = 0; i < std::size(fixed); ++i) {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        const float h_row = dp(40);
+        if (i % 2 == 0) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h_row), col(g_pal.bg2), dp(6));
+        dl->AddText(g_fonts.body, font_px(g_fonts.body), ImVec2(p.x + dp(14), p.y + (h_row - font_px(g_fonts.body)) * 0.5f), col(g_pal.text_dim),
+                    fixed[i].action);
+        ImFont* f = g_fonts.mono_small;
+        ImVec2 ts = f->CalcTextSizeA(font_px(f), FLT_MAX, 0, fixed[i].keys.c_str());
+        ImVec2 kmn(p.x + w - dp(8) - ts.x - dp(14), p.y + dp(9)), kmx(p.x + w - dp(8), p.y + h_row - dp(9));
+        dl->AddRectFilled(kmn, ImVec2(kmx.x, kmx.y + dp(2)), col(g_pal.border_strong), dp(5));
+        dl->AddRectFilled(kmn, kmx, col(g_pal.bg4), dp(5));
+        dl->AddText(f, font_px(f), ImVec2(kmn.x + dp(7), (kmn.y + kmx.y) * 0.5f - ts.y * 0.5f), col(g_pal.text_dim), fixed[i].keys.c_str());
+        ImGui::Dummy(ImVec2(w, h_row));
+    }
+
     ImGui::Dummy(dp(0, 10));
     ImGui::PushFont(g_fonts.small_bold);
     ImGui::TextColored(g_pal.text_faint, "GAME CONTROLS (PORT 1, KEYBOARD)");

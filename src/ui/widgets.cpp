@@ -84,8 +84,9 @@ bool icon_button(const char* id, Icon icon, float size, const char* tip, bool ac
     }
     if (held && kind != ButtonKind::Primary) bg = mix(bg, p.bg4, 0.6f);
     if (!enabled) fg = p.text_faint;
-    if (bg.w > 0.001f) dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), col(bg), dp(7));
-    draw_icon(dl, icon, ImVec2(pos.x + size * 0.5f, pos.y + size * 0.5f + (held ? 0.5f : 0.0f)), size * 0.5f, col(fg));
+    const float alpha = ImGui::GetStyle().Alpha; // fades with the surrounding UI (overlays, chrome)
+    if (bg.w > 0.001f) dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), col(bg, alpha), dp(7));
+    draw_icon(dl, icon, ImVec2(pos.x + size * 0.5f, pos.y + size * 0.5f + (held ? 0.5f : 0.0f)), size * 0.5f, col(fg, alpha));
     if (tip && hovered) tooltip(tip);
     ImGui::PopID();
     return pressed;
@@ -127,6 +128,11 @@ bool button(const char* label, Icon icon, ButtonKind kind, float width, bool ena
             bg = with_alpha(p.bg4, h * 0.8f);
             fg = mix(p.text_dim, p.text, h);
             break;
+        case ButtonKind::DangerSubtle:
+            bg = held ? with_alpha(p.danger, 0.26f) : mix(with_alpha(p.danger, 0.08f), with_alpha(p.danger, 0.18f), h);
+            fg = mix(p.danger, ImVec4(1, 1, 1, 1), 0.2f * h);
+            border = with_alpha(p.danger, 0.55f + 0.3f * h);
+            break;
         case ButtonKind::Subtle:
         default:
             bg = held ? p.bg4 : mix(p.bg3, p.bg4, h);
@@ -140,22 +146,23 @@ bool button(const char* label, Icon icon, ButtonKind kind, float width, bool ena
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 end(pos.x + w, pos.y + hgt);
+    const float alpha = ImGui::GetStyle().Alpha; // fades with the surrounding UI (overlays, chrome)
     if (kind == ButtonKind::Primary && enabled) {
         // Soft glow under primary actions.
         dl->AddRectFilled(ImVec2(pos.x + dp(2), pos.y + dp(3)), ImVec2(end.x - dp(2), end.y + dp(3)),
-                          col(p.accent, 0.18f + 0.12f * h), dp(8));
+                          col(p.accent, (0.18f + 0.12f * h) * alpha), dp(8));
     }
-    dl->AddRectFilled(pos, end, col(bg), dp(8));
-    if (border.w > 0) dl->AddRect(pos, end, col(border, 0.6f), dp(8));
+    dl->AddRectFilled(pos, end, col(bg, alpha), dp(8));
+    if (border.w > 0) dl->AddRect(pos, end, col(border, 0.6f * alpha), dp(8));
 
     float content_w = ts.x + (icon != Icon::None ? icon_sz + gap : 0);
     float x = pos.x + (w - content_w) * 0.5f;
     float cy = pos.y + hgt * 0.5f;
     if (icon != Icon::None) {
-        draw_icon(dl, icon, ImVec2(x + icon_sz * 0.5f, cy), icon_sz, col(fg));
+        draw_icon(dl, icon, ImVec2(x + icon_sz * 0.5f, cy), icon_sz, col(fg, alpha));
         x += icon_sz + gap;
     }
-    dl->AddText(font, font_px(font), ImVec2(x, cy - ts.y * 0.5f), col(fg), label, label_end);
+    dl->AddText(font, font_px(font), ImVec2(x, cy - ts.y * 0.5f), col(fg, alpha), label, label_end);
     ImGui::PopID();
     return pressed;
 }

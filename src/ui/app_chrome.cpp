@@ -117,7 +117,6 @@ void App::internal_resolution_menu() {
 }
 
 void App::draw_menubar() {
-    using platform::shortcut_label;
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, dp(10, 7));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, dp(10, 8));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, dp(8));
@@ -137,8 +136,8 @@ void App::draw_menubar() {
     const bool running = core_.state() == RunState::Running;
 
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Open ROM\xE2\x80\xA6", shortcut_label(true, false, false, "O").c_str())) action_open_rom();
-        if (ImGui::MenuItem("Add ROM Folder\xE2\x80\xA6", shortcut_label(true, true, false, "O").c_str())) action_add_folder();
+        if (ImGui::MenuItem("Open ROM\xE2\x80\xA6", hotkey_label(Hotkey::OpenRom).c_str())) action_open_rom();
+        if (ImGui::MenuItem("Add ROM Folder\xE2\x80\xA6", hotkey_label(Hotkey::AddFolder).c_str())) action_add_folder();
         auto recent = library_.recent(10);
         if (ImGui::BeginMenu("Open Recent", !recent.empty())) {
             for (const GameEntry* g : recent) {
@@ -156,14 +155,14 @@ void App::draw_menubar() {
         if (ImGui::MenuItem("Show Save States Folder")) reveal_states_folder();
         if (ImGui::MenuItem("Show Configuration Folder")) platform::reveal_in_file_manager(platform::config_dir());
         ImGui::Separator();
-        if (ImGui::MenuItem("Quit", platform::current_os() == platform::OS::MacOS ? "Cmd+Q" : "Ctrl+Q")) request_quit();
+        if (ImGui::MenuItem("Quit", hotkey_label(Hotkey::Quit).c_str())) request_quit();
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu("Emulation")) {
-        if (ImGui::MenuItem(running ? "Pause" : "Resume", shortcut_label(true, false, false, "P").c_str(), false, loaded)) toggle_pause();
-        if (ImGui::MenuItem("Stop", shortcut_label(true, false, false, ".").c_str(), false, loaded)) request_stop();
-        if (ImGui::MenuItem("Reset", shortcut_label(true, false, false, "R").c_str(), false, loaded)) reset_game();
+        if (ImGui::MenuItem(running ? "Pause" : "Resume", hotkey_label(Hotkey::Pause).c_str(), false, loaded)) toggle_pause();
+        if (ImGui::MenuItem("Stop", hotkey_label(Hotkey::Stop).c_str(), false, loaded)) request_stop();
+        if (ImGui::MenuItem("Reset", hotkey_label(Hotkey::Reset).c_str(), false, loaded)) reset_game();
         ImGui::Separator();
         draw_state_menu();
         ImGui::Separator();
@@ -176,18 +175,18 @@ void App::draw_menubar() {
         }
         ImGui::MenuItem("Limit Speed", nullptr, &settings_.limit_speed);
         ImGui::Separator();
-        if (ImGui::MenuItem("Take Screenshot", "F12", false, loaded)) take_screenshot();
+        if (ImGui::MenuItem("Take Screenshot", hotkey_label(Hotkey::Screenshot).c_str(), false, loaded)) take_screenshot();
         ImGui::Separator();
         if (ImGui::MenuItem("Emulation Settings\xE2\x80\xA6")) open_settings(SettingsPage::Emulation);
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu("View")) {
-        if (ImGui::MenuItem("Game Library", shortcut_label(true, false, false, "L").c_str(), view_ == View::Library)) view_ = View::Library;
+        if (ImGui::MenuItem("Game Library", hotkey_label(Hotkey::ToggleView).c_str(), view_ == View::Library)) view_ = View::Library;
         if (ImGui::MenuItem("Game Screen", nullptr, view_ == View::Game)) view_ = View::Game;
         ImGui::Separator();
-        if (ImGui::MenuItem("Fullscreen", platform::current_os() == platform::OS::MacOS ? "Cmd+Ctrl+F" : "F11", fullscreen_)) toggle_fullscreen();
-        ImGui::MenuItem("Game Info Panel", shortcut_label(true, false, false, "I").c_str(), &settings_.show_info_panel);
+        if (ImGui::MenuItem("Fullscreen", hotkey_label(Hotkey::Fullscreen).c_str(), fullscreen_)) toggle_fullscreen();
+        ImGui::MenuItem("Game Info Panel", hotkey_label(Hotkey::InfoPanel).c_str(), &settings_.show_info_panel);
         ImGui::MenuItem("Status Bar", nullptr, &settings_.show_status_bar);
         ImGui::MenuItem("Library Sidebar", nullptr, &library_sidebar_);
         ImGui::Separator();
@@ -234,7 +233,7 @@ void App::draw_menubar() {
         };
         for (auto& p : pages) {
             std::string label = std::string(p.name) + "\xE2\x80\xA6";
-            if (ImGui::MenuItem(label.c_str(), p.page == SettingsPage::General ? shortcut_label(true, false, false, ",").c_str() : nullptr))
+            if (ImGui::MenuItem(label.c_str(), p.page == SettingsPage::General ? hotkey_label(Hotkey::Settings).c_str() : nullptr))
                 open_settings(p.page);
         }
         ImGui::EndMenu();

@@ -20,6 +20,30 @@ constexpr int kN64InputCount = static_cast<int>(N64Input::Count);
 const char* n64_input_name(N64Input in);
 const char* n64_input_id(N64Input in);
 
+// App shortcuts that can be rebound in Settings > Shortcuts.
+enum class Hotkey {
+    OpenRom, AddFolder, ToggleView, Pause, Stop, Reset, SaveState, LoadState,
+    FastForward, Fullscreen, Screenshot, InfoPanel, Settings, Quit,
+    Count
+};
+constexpr int kHotkeyCount = static_cast<int>(Hotkey::Count);
+constexpr int kHotkeySlots = 2; // a binding and an alternative
+const char* hotkey_name(Hotkey h);
+
+// Modifier bits of a KeyCombo. "Primary" is Cmd on macOS and Ctrl elsewhere;
+// kModCtrl is the Control key on macOS only (elsewhere Ctrl is primary).
+constexpr int kModPrimary = 1, kModShift = 2, kModAlt = 4, kModCtrl = 8;
+
+// A key plus modifiers. `key` is an SDL_Keycode, 0 = unbound.
+struct KeyCombo {
+    int key = 0;
+    int mods = 0;
+    bool operator==(const KeyCombo& o) const { return key == o.key && mods == o.mods; }
+};
+int key_mods_from_sdl(unsigned sdl_mod);
+bool is_modifier_key(int key);
+std::string key_combo_label(const KeyCombo& c); // "Cmd+Shift+O", "" when unbound
+
 // Gamepad binding encoding: -1 = unbound, 0..(SDL_GAMEPAD_BUTTON_COUNT-1) = button,
 // kPadAxisBase + axis*2 + (0 = negative, 1 = positive) = analog axis direction.
 constexpr int kPadAxisBase = 100;
@@ -29,8 +53,10 @@ struct PortConfig {
     int device = 0; // 0 = keyboard, 1 = first gamepad, 2 = second gamepad...
     std::array<int, kN64InputCount> keys{};  // SDL_Scancode
     std::array<int, kN64InputCount> pad{};   // see encoding above
-    float deadzone = 0.15f;
+    float deadzone = 0.05f;
     float sensitivity = 1.0f;  // analog scale, 1.0 = full N64 range (±80)
+    bool octagon = true;          // clip the stick to the N64's octagonal gate (70 on the diagonals)
+    bool deadzone_rescale = true; // stretch the travel past the dead zone back to the full range
     // Accessory slot: 0 None, 1 Controller Pak (saved as <rom>.mpk, or
     // <rom>.pN.mpk for port N > 1), 2 Rumble Pak (vibrates the gamepad),
     // 3 Transfer Pak (holds the Game Boy ROM `gb_rom`).
@@ -38,6 +64,14 @@ struct PortConfig {
     int rumble_strength = 100; // 0..100 %
     std::string gb_rom;        // UTF-8 path, "" = no cartridge
 };
+
+// Controller profiles hold the device-independent part of a PortConfig
+// (bindings, stick shaping, rumble strength) as a small INI file, so it can
+// be loaded into any port.
+bool save_controller_profile(const PortConfig& p, const std::string& path);
+bool load_controller_profile(PortConfig& p, const std::string& path); // reads into the profile fields only
+void apply_controller_profile(PortConfig& dst, const PortConfig& src); // copies the profile fields
+bool same_controller_profile(const PortConfig& a, const PortConfig& b);
 
 struct Settings {
     // General
@@ -94,6 +128,9 @@ struct Settings {
     // Input
     std::array<PortConfig, 4> ports{};
 
+    // Shortcuts
+    std::array<std::array<KeyCombo, kHotkeySlots>, kHotkeyCount> hotkeys{};
+
     // Library
     std::vector<std::string> rom_dirs;
     std::string boxart_dir; // empty = auto-detect inside ROM folders
@@ -108,6 +145,7 @@ struct Settings {
     void reset_audio();
     void reset_emulation();
     void reset_port(int port);
+    void reset_shortcuts();
 
     bool load(const std::string& path);
     bool save(const std::string& path) const;

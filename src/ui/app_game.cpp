@@ -103,16 +103,15 @@ void App::draw_game_view(ImVec2 pos, ImVec2 size) {
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, g_pal.bg4);
         ImGui::SetNextWindowSizeConstraints(ImVec2(dp(240), 0), ImVec2(FLT_MAX, FLT_MAX));
         if (ImGui::BeginPopupContextItem("##viewport_ctx")) {
-            using platform::shortcut_label;
             bool running = core_.state() == RunState::Running;
-            if (ImGui::MenuItem(running ? "Pause" : "Resume", shortcut_label(true, false, false, "P").c_str())) toggle_pause();
-            if (ImGui::MenuItem("Reset", shortcut_label(true, false, false, "R").c_str())) reset_game();
-            if (ImGui::MenuItem("Stop", shortcut_label(true, false, false, ".").c_str())) request_stop();
+            if (ImGui::MenuItem(running ? "Pause" : "Resume", hotkey_label(Hotkey::Pause).c_str())) toggle_pause();
+            if (ImGui::MenuItem("Reset", hotkey_label(Hotkey::Reset).c_str())) reset_game();
+            if (ImGui::MenuItem("Stop", hotkey_label(Hotkey::Stop).c_str())) request_stop();
             ImGui::Separator();
             draw_state_menu();
             ImGui::Separator();
-            if (ImGui::MenuItem("Take Screenshot", "F12")) take_screenshot();
-            if (ImGui::MenuItem(fullscreen_ ? "Exit Fullscreen" : "Fullscreen", "F11")) toggle_fullscreen();
+            if (ImGui::MenuItem("Take Screenshot", hotkey_label(Hotkey::Screenshot).c_str())) take_screenshot();
+            if (ImGui::MenuItem(fullscreen_ ? "Exit Fullscreen" : "Fullscreen", hotkey_label(Hotkey::Fullscreen).c_str())) toggle_fullscreen();
             ImGui::Separator();
             if (ImGui::BeginMenu("Internal Resolution")) {
                 internal_resolution_menu();
@@ -242,7 +241,9 @@ void App::draw_no_game(ImVec2 pos, ImVec2 size) {
     }
 
     // Keyboard hint at the bottom.
-    std::string hint = "Tip: press " + platform::shortcut_label(true, false, false, "O") + " to open a ROM, or drop a file onto this window";
+    const std::string open_key = hotkey_label(Hotkey::OpenRom);
+    std::string hint = open_key.empty() ? "Tip: drop a ROM file onto this window to play it"
+                                        : "Tip: press " + open_key + " to open a ROM, or drop a file onto this window";
     ImVec2 ts = g_fonts.small->CalcTextSizeA(font_px(g_fonts.small), FLT_MAX, 0, hint.c_str());
     if (size.y > dp(520))
         dl->AddText(g_fonts.small, font_px(g_fonts.small), ImVec2(c.x - ts.x * 0.5f, pos.y + size.y - dp(36)), col(g_pal.text_faint), hint.c_str());
@@ -290,9 +291,10 @@ void App::draw_pause_overlay(ImVec2 mn, ImVec2 mx) {
     ImGui::SameLine(0, dp(10));
     if (button("Settings", Icon::Settings, ButtonKind::Subtle, half, true, dp(36))) open_settings(SettingsPage::General);
     ImGui::SetCursorScreenPos(ImVec2(bx, by + dp(94)));
-    if (button("Stop Emulation", Icon::Stop, ButtonKind::Ghost, bw, true, dp(36))) request_stop();
+    if (button("Stop Emulation", Icon::Stop, ButtonKind::DangerSubtle, bw, true, dp(36))) request_stop();
 
-    std::string hint = "Press " + platform::shortcut_label(true, false, false, "P") + " or F5 to resume";
+    const std::string resume_keys = hotkey_hint(Hotkey::Pause);
+    std::string hint = resume_keys.empty() ? "Click Resume to continue" : "Press " + resume_keys + " to resume";
     centered(g_fonts.small, cmx.y - dp(30), g_pal.text_faint, hint.c_str(), cw);
 }
 

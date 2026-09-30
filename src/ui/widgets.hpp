@@ -14,7 +14,9 @@ float anim(ImGuiID id, float target, float speed = 14.0f);
 float anim(const char* str_id, float target, float speed = 14.0f);
 
 // ---- Buttons -------------------------------------------------------------
-enum class ButtonKind { Ghost, Subtle, Primary, Danger };
+// DangerSubtle: a framed button in red for destructive actions that sit next
+// to ordinary ones (the filled Danger is for confirming them).
+enum class ButtonKind { Ghost, Subtle, Primary, Danger, DangerSubtle };
 
 bool icon_button(const char* id, Icon icon, float size, const char* tooltip = nullptr, bool active = false,
                  bool enabled = true, ButtonKind kind = ButtonKind::Ghost);

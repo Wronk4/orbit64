@@ -3,6 +3,7 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -26,6 +27,74 @@ static const char* kInputIds[] = {
 
 const char* n64_input_name(N64Input in) { return kInputNames[static_cast<int>(in)]; }
 const char* n64_input_id(N64Input in) { return kInputIds[static_cast<int>(in)]; }
+
+static const char* kHotkeyNames[] = {
+    "Open ROM", "Add ROM folder", "Toggle Library / Game", "Pause / Resume", "Stop emulation", "Reset",
+    "Save state to the current slot", "Load state from the current slot", "Fast forward (hold)", "Fullscreen",
+    "Screenshot", "Game info panel", "Settings", "Quit",
+};
+static const char* kHotkeyIds[] = {
+    "open_rom", "add_folder", "toggle_view", "pause", "stop", "reset", "save_state", "load_state",
+    "fast_forward", "fullscreen", "screenshot", "info_panel", "settings", "quit",
+};
+static_assert(sizeof(kHotkeyNames) / sizeof(kHotkeyNames[0]) == kHotkeyCount);
+static_assert(sizeof(kHotkeyIds) / sizeof(kHotkeyIds[0]) == kHotkeyCount);
+
+const char* hotkey_name(Hotkey h) { return kHotkeyNames[static_cast<int>(h)]; }
+
+int key_mods_from_sdl(unsigned m) {
+    const bool mac = platform::current_os() == platform::OS::MacOS;
+    int out = 0;
+    if (platform::primary_mod_down(m)) out |= kModPrimary;
+    if (mac && (m & SDL_KMOD_CTRL)) out |= kModCtrl;
+    if (m & SDL_KMOD_SHIFT) out |= kModShift;
+    if (m & SDL_KMOD_ALT) out |= kModAlt;
+    return out;
+}
+
+bool is_modifier_key(int key) {
+    switch (key) {
+        case SDLK_LCTRL: case SDLK_RCTRL: case SDLK_LSHIFT: case SDLK_RSHIFT:
+        case SDLK_LALT: case SDLK_RALT: case SDLK_LGUI: case SDLK_RGUI:
+        case SDLK_MODE: case SDLK_CAPSLOCK:
+            return true;
+        default: return false;
+    }
+}
+
+std::string key_combo_label(const KeyCombo& c) {
+    if (c.key == 0) return "";
+    std::string s;
+    if (c.mods & kModPrimary) s += std::string(platform::primary_mod_name()) + "+";
+    if (c.mods & kModCtrl) s += "Ctrl+";
+    if (c.mods & kModShift) s += "Shift+";
+    if (c.mods & kModAlt) s += std::string(platform::alt_mod_name()) + "+";
+    const char* name = SDL_GetKeyName(static_cast<SDL_Keycode>(c.key));
+    s += name && *name ? name : "?";
+    return s;
+}
+
+void Settings::reset_shortcuts() {
+    const bool mac = platform::current_os() == platform::OS::MacOS;
+    for (auto& h : hotkeys) h = {};
+    auto set = [&](Hotkey h, KeyCombo a, KeyCombo b = {}) { hotkeys[static_cast<int>(h)] = {a, b}; };
+    const int P = kModPrimary, S = kModShift;
+    set(Hotkey::OpenRom, {SDLK_O, P});
+    set(Hotkey::AddFolder, {SDLK_O, P | S});
+    set(Hotkey::ToggleView, {SDLK_L, P});
+    set(Hotkey::Pause, {SDLK_P, P}, {SDLK_F5, 0});
+    set(Hotkey::Stop, {SDLK_PERIOD, P}, {SDLK_F5, S});
+    set(Hotkey::Reset, {SDLK_R, P});
+    set(Hotkey::SaveState, {SDLK_S, P}, {SDLK_F2, 0});
+    set(Hotkey::LoadState, {SDLK_L, P | S}, {SDLK_F4, 0});
+    set(Hotkey::FastForward, {SDLK_TAB, 0});
+    if (mac) set(Hotkey::Fullscreen, {SDLK_F, P | kModCtrl}, {SDLK_F11, 0});
+    else set(Hotkey::Fullscreen, {SDLK_F11, 0}, {SDLK_RETURN, kModAlt});
+    set(Hotkey::Screenshot, {SDLK_F12, 0});
+    set(Hotkey::InfoPanel, {SDLK_I, P});
+    set(Hotkey::Settings, {SDLK_COMMA, P});
+    set(Hotkey::Quit, {SDLK_Q, P});
+}
 
 void Settings::reset_general() {
     Settings d;
@@ -107,6 +176,7 @@ void Settings::reset_port(int port) {
 void Settings::reset_defaults() {
     *this = Settings{};
     for (int i = 0; i < 4; ++i) reset_port(i);
+    reset_shortcuts();
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +209,82 @@ struct Reader {
     void get(const char* k, std::string& v) const { if (auto* s = find(k)) v = *s; }
 };
 
+bool read_ini(const std::string& path, Ini& ini) {
+    std::ifstream f(platform::utf8_to_path(path), std::ios::binary);
+    if (!f) return false;
+    std::string line, sec;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (line[0] == '[') { sec = line.substr(1, line.find(']') - 1); continue; }
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        ini[sec + "." + line.substr(0, eq)] = line.substr(eq + 1);
+    }
+    return true;
+}
+
+// The profile part of a port: shared by settings.ini and controller profiles.
+void write_profile(Writer& w, const PortConfig& p) {
+    w.kv("deadzone", p.deadzone); w.kv("sensitivity", p.sensitivity);
+    w.kv("octagon", p.octagon); w.kv("deadzone_rescale", p.deadzone_rescale);
+    w.kv("rumble_strength", p.rumble_strength);
+    for (int k = 0; k < kN64InputCount; ++k) {
+        w.kv(std::string("key_") + kInputIds[k], p.keys[k]);
+        w.kv(std::string("pad_") + kInputIds[k], p.pad[k]);
+    }
+}
+
+void read_profile(const Reader& r, PortConfig& p) {
+    r.get("deadzone", p.deadzone); r.get("sensitivity", p.sensitivity);
+    r.get("octagon", p.octagon); r.get("deadzone_rescale", p.deadzone_rescale);
+    r.get("rumble_strength", p.rumble_strength);
+    p.deadzone = std::clamp(p.deadzone, 0.0f, 0.5f);
+    p.sensitivity = std::clamp(p.sensitivity, 0.5f, 1.5f);
+    p.rumble_strength = std::clamp(p.rumble_strength, 0, 100);
+    for (int k = 0; k < kN64InputCount; ++k) {
+        r.get((std::string("key_") + kInputIds[k]).c_str(), p.keys[k]);
+        r.get((std::string("pad_") + kInputIds[k]).c_str(), p.pad[k]);
+    }
+}
+
 } // namespace
+
+bool save_controller_profile(const PortConfig& p, const std::string& path) {
+    Writer w;
+    w.out << "; Orbit64 controller profile\n";
+    w.section("profile");
+    write_profile(w, p);
+    std::ofstream f(platform::utf8_to_path(path), std::ios::binary);
+    if (!f) return false;
+    f << w.out.str();
+    return static_cast<bool>(f);
+}
+
+bool load_controller_profile(PortConfig& p, const std::string& path) {
+    Ini ini;
+    if (!read_ini(path, ini)) return false;
+    Reader r{ini, "profile"};
+    if (!r.find("deadzone")) return false; // not a profile
+    read_profile(r, p);
+    return true;
+}
+
+void apply_controller_profile(PortConfig& dst, const PortConfig& src) {
+    dst.keys = src.keys;
+    dst.pad = src.pad;
+    dst.deadzone = src.deadzone;
+    dst.sensitivity = src.sensitivity;
+    dst.octagon = src.octagon;
+    dst.deadzone_rescale = src.deadzone_rescale;
+    dst.rumble_strength = src.rumble_strength;
+}
+
+bool same_controller_profile(const PortConfig& a, const PortConfig& b) {
+    return a.keys == b.keys && a.pad == b.pad && std::abs(a.deadzone - b.deadzone) < 1e-4f &&
+           std::abs(a.sensitivity - b.sensitivity) < 1e-4f && a.octagon == b.octagon &&
+           a.deadzone_rescale == b.deadzone_rescale && a.rumble_strength == b.rumble_strength;
+}
 
 bool Settings::save(const std::string& path) const {
     Writer w;
@@ -175,13 +320,16 @@ bool Settings::save(const std::string& path) const {
         std::string s = "port" + std::to_string(i + 1);
         w.section(s.c_str());
         const PortConfig& p = ports[i];
-        w.kv("plugged", p.plugged); w.kv("device", p.device); w.kv("deadzone", p.deadzone);
-        w.kv("sensitivity", p.sensitivity); w.kv("accessory", p.pak); w.kv("rumble_strength", p.rumble_strength); w.kv("gb_rom", p.gb_rom);
-        for (int k = 0; k < kN64InputCount; ++k) {
-            w.kv(std::string("key_") + kInputIds[k], p.keys[k]);
-            w.kv(std::string("pad_") + kInputIds[k], p.pad[k]);
-        }
+        w.kv("plugged", p.plugged); w.kv("device", p.device); w.kv("accessory", p.pak); w.kv("gb_rom", p.gb_rom);
+        write_profile(w, p);
     }
+
+    w.section("shortcuts");
+    for (int h = 0; h < kHotkeyCount; ++h)
+        for (int k = 0; k < kHotkeySlots; ++k) {
+            const KeyCombo& c = hotkeys[h][k];
+            w.kv(std::string(kHotkeyIds[h]) + (k ? "_2" : ""), std::to_string(c.key) + ":" + std::to_string(c.mods));
+        }
 
     w.section("library");
     w.kv("recursive", scan_recursive); w.kv("view", library_view); w.kv("sort", library_sort);
@@ -198,18 +346,8 @@ bool Settings::save(const std::string& path) const {
 
 bool Settings::load(const std::string& path) {
     reset_defaults();
-    std::ifstream f(platform::utf8_to_path(path), std::ios::binary);
-    if (!f) return false;
     Ini ini;
-    std::string line, sec;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (line[0] == '[') { sec = line.substr(1, line.find(']') - 1); continue; }
-        size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        ini[sec + "." + line.substr(0, eq)] = line.substr(eq + 1);
-    }
+    if (!read_ini(path, ini)) return false;
 
     Reader r{ini, "general"};
     r.get("accent", accent); r.get("ui_scale", ui_scale_pct); r.get("confirm_stop", confirm_stop);
@@ -243,15 +381,20 @@ bool Settings::load(const std::string& path) {
     for (int i = 0; i < 4; ++i) {
         r.sec = "port" + std::to_string(i + 1);
         PortConfig& p = ports[i];
-        r.get("plugged", p.plugged); r.get("device", p.device); r.get("deadzone", p.deadzone);
-        r.get("sensitivity", p.sensitivity); r.get("accessory", p.pak); r.get("rumble_strength", p.rumble_strength); r.get("gb_rom", p.gb_rom);
+        r.get("plugged", p.plugged); r.get("device", p.device); r.get("accessory", p.pak); r.get("gb_rom", p.gb_rom);
         if (p.pak < 0 || p.pak > 3) p.pak = 0;
-        p.rumble_strength = std::clamp(p.rumble_strength, 0, 100);
-        for (int k = 0; k < kN64InputCount; ++k) {
-            r.get((std::string("key_") + kInputIds[k]).c_str(), p.keys[k]);
-            r.get((std::string("pad_") + kInputIds[k]).c_str(), p.pad[k]);
-        }
+        read_profile(r, p);
     }
+
+    r.sec = "shortcuts";
+    for (int h = 0; h < kHotkeyCount; ++h)
+        for (int k = 0; k < kHotkeySlots; ++k) {
+            std::string v;
+            r.get((std::string(kHotkeyIds[h]) + (k ? "_2" : "")).c_str(), v);
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos) continue; // keep the default
+            hotkeys[h][k] = {std::atoi(v.c_str()), std::atoi(v.c_str() + colon + 1) & 15};
+        }
 
     r.sec = "library";
     r.get("recursive", scan_recursive); r.get("view", library_view); r.get("sort", library_sort);
