@@ -44,8 +44,8 @@ struct RDP::NativeSink {
     u32* shadow;
     size_t shadow_len;
     PixelStats& stats;
-    void write(u32 x, u32 y, u32 color, f32 z, u8 shade_a = 255) {
-        rdp.write_pixel(st, x, y, color, z, rdram, rdram_size, shadow, shadow_len, stats, shade_a);
+    void write(u32 x, u32 y, u32 color, f32 z, const raster::PixelAux& aux = {}) {
+        rdp.write_pixel(st, x, y, color, z, rdram, rdram_size, shadow, shadow_len, stats, aux);
     }
 };
 
@@ -115,6 +115,7 @@ bool ucode_banner_is_non(const u8* p, size_t len) {
 }
 
 RDP::RDP(bool geometry_only) : geometry_only_(geometry_only) {
+    hle_hidden_ = &exact_.primary();
     reset();
     if (geometry_only_) return;
     // CPU and DMA writes to RDRAM reset the ninth bits the RDP left there.
@@ -363,6 +364,13 @@ const DrawState& RDP::draw_state() {
         s.env_color = env_color;
         s.blend_color = blend_color;
         s.fog_color = fog_color;
+        for (int i = 0; i < 3; ++i) {
+            s.key_center[i] = key_center_[i];
+            s.key_scale[i] = key_scale_[i];
+        }
+        s.k4 = k4_;
+        s.k5 = k5_;
+        s.noise_seed = static_cast<u32>(draw_state_serial_);
         s.scissor_ulx = scissor_ulx;
         s.scissor_uly = scissor_uly;
         s.scissor_lrx = scissor_lrx;
@@ -656,11 +664,8 @@ void RDP::rdp_triangle(const u64* cmd, u32 op, u8* rdram, size_t rdram_size) {
     // An attribute plane: value, DxDx, DxDe (s15.16 each).
     struct Plane {
         f32 v{0}, dx{0}, de{0};
-        // At pixel (x, y): the rasterizer samples pixel centres, the RDP
-        // the pixel's upper-left corner.
+        // At (x, y) (the rasterizer samples pixels at their upper-left corner, as the RDP does).
         f32 at(f32 x, f32 y, f32 xh, f32 dxhdy, f32 y0) const {
-            x -= 0.5f;
-            y -= 0.5f;
             return v + dx * (x - xh) + (de - dx * dxhdy) * (y - y0);
         }
     };
@@ -2847,8 +2852,18 @@ bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size
         }
 
         case 0xEA: // G_SETKEYGB
+            key_center_[1] = static_cast<u8>(w1 >> 24);
+            key_scale_[1] = static_cast<u8>(w1 >> 16);
+            key_center_[2] = static_cast<u8>(w1 >> 8);
+            key_scale_[2] = static_cast<u8>(w1);
+            break;
         case 0xEB: // G_SETKEYR
-        case 0xEC: // G_SETCONVERT
+            key_center_[0] = static_cast<u8>(w1 >> 8);
+            key_scale_[0] = static_cast<u8>(w1);
+            break;
+        case 0xEC: // G_SETCONVERT (K0..K3 are for YUV textures; K4, K5 are combiner inputs)
+            k4_ = static_cast<u16>((w1 >> 9) & 0x1FF);
+            k5_ = static_cast<u16>(w1 & 0x1FF);
             break;
 
         case 0xEE: { // G_SETPRIMDEPTH
@@ -2944,6 +2959,7 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
     if (start_x >= max_x || start_y >= max_y) return;
 
     HiResTarget* hr = hires_target(rdram, rdram_size);
+    hle_hidden_->ensure_hidden(rdram_size);
     if (color_image_size == 2) { // 16-bit
         u16 color16 = static_cast<u16>(fill_color & 0xFFFF);
         for (u32 y = start_y; y < max_y; ++y) {
@@ -2952,6 +2968,7 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
                 if (idx + 1 < rdram_size) {
                     rdram[idx + 0] = (color16 >> 8) & 0xFF;
                     rdram[idx + 1] = color16 & 0xFF;
+                    hle_hidden_->force_hidden(idx >> 1, (color16 & 1) ? 3 : 0, color16); // coverage: all or nothing
                     if (y * fb_w + x < hires_shadow_len_) hires_shadow_[y * fb_w + x] = color16;
                 }
             }
@@ -2975,97 +2992,64 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
 }
 
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size) {
-    write_pixel(st, x, y, color, z, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels, 255);
+    write_pixel(st, x, y, color, z, rdram, rdram_size, hires_shadow_, hires_shadow_len_, stat_pixels, raster::PixelAux{});
 }
 
 // Thread-safe for pixels of distinct rows of one colour image (the native
-// pass's bands): it only touches that pixel's RDRAM, depth and shadow entry.
+// pass's bands): it only touches that pixel's RDRAM, depth, ninth bits and
+// shadow entry.
 void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
-                      u32* shadow, size_t shadow_len, PixelStats& stats, u8 shade_a) {
+                      u32* shadow, size_t shadow_len, PixelStats& stats, const raster::PixelAux& aux) {
     u32 fb_w = st.fb_w;
     if (x >= fb_w || y >= kMaxFbLines) return;
     u32 eff_lrx = (st.scissor_lrx > st.scissor_ulx) ? st.scissor_lrx : fb_w;
     u32 eff_lry = (st.scissor_lry > st.scissor_uly) ? st.scissor_lry : kMaxFbLines;
     if (x < st.scissor_ulx || x >= eff_lrx || y < st.scissor_uly || y >= eff_lry) return;
 
-    if (st.alpha_from_cvg) color |= 0xFF000000u; // the alpha is the (full) coverage
-    u8 a = (color >> 24) & 0xFF;
-    if (st.alpha_compare == 1) { // G_AC_THRESHOLD
-        if (a < st.alpha_threshold) return;
-    } else if (st.alpha_compare == 3) { // G_AC_DITHER
-        if (a == 0) return;
-    }
-
-    // Alpha check for coverage/blending modes (CVG_X_ALPHA: 0x1000, ALPHA_CVG_SEL: 0x2000, FORCE_BL: 0x4000, ZMODE_XLU: 0x800, IM_RD: 0x40, AA_EN: 0x8)
-    if (a == 0 && st.alpha_zero_kill) {
-        stats.a_fail++;
+    const u32 pixel_idx = y * fb_w + x;
+    f32* const zp = pixel_idx < internal_zbuffer.size() ? &internal_zbuffer[pixel_idx] : nullptr;
+    raster::MemPixel mem;
+    raster::PixelResult res;
+    if (st.fb_size == 2) { // 16-bit RGBA 5-5-5-1, coverage in the alpha bit and the two ninth bits
+        const u32 idx = st.fb_addr + pixel_idx * 2;
+        if (idx + 1 >= rdram_size) return;
+        const u16 word = static_cast<u16>((rdram[idx] << 8) | rdram[idx + 1]);
+        mem.r = (word >> 8) & 0xF8;
+        mem.g = (word >> 3) & 0xF8;
+        mem.b = (word << 2) & 0xF8;
+        mem.cvg = ((word & 1) << 2) | hle_hidden_->hidden_at(idx >> 1, word);
+        if (!raster::pixel_backend(st, color, aux, z, zp ? *zp : raster::kDepthCleared, mem, res)) {
+            stats.z_fail++;
+            return;
+        }
+        const u16 p = static_cast<u16>(((res.r >> 3) << 11) | ((res.g >> 3) << 6) | ((res.b >> 3) << 1) | (res.cvg >> 2));
+        rdram[idx] = static_cast<u8>(p >> 8);
+        rdram[idx + 1] = static_cast<u8>(p);
+        hle_hidden_->force_hidden(idx >> 1, res.cvg & 3, p);
+        if (pixel_idx < shadow_len) shadow[pixel_idx] = p;
+    } else if (st.fb_size == 3) { // 32-bit RGBA, coverage in the upper 3 bits of alpha
+        const u32 idx = st.fb_addr + pixel_idx * 4;
+        if (idx + 3 >= rdram_size) return;
+        mem.r = rdram[idx];
+        mem.g = rdram[idx + 1];
+        mem.b = rdram[idx + 2];
+        mem.cvg = rdram[idx + 3] >> 5;
+        if (!raster::pixel_backend(st, color, aux, z, zp ? *zp : raster::kDepthCleared, mem, res)) {
+            stats.z_fail++;
+            return;
+        }
+        const u8 a = static_cast<u8>(res.cvg << 5);
+        rdram[idx] = res.r;
+        rdram[idx + 1] = res.g;
+        rdram[idx + 2] = res.b;
+        rdram[idx + 3] = a;
+        if (pixel_idx < shadow_len)
+            shadow[pixel_idx] = (static_cast<u32>(res.r) << 24) | (static_cast<u32>(res.g) << 16) | (static_cast<u32>(res.b) << 8) | a;
+    } else {
         return;
     }
-
-    // Depth test
-    u32 pixel_idx = y * fb_w + x;
-    if (st.z_compare && pixel_idx < internal_zbuffer.size()) {
-        if (raster::depth_fails(st, z, internal_zbuffer[pixel_idx])) {
-            stats.z_fail++;
-            return; // Behind existing pixel
-        }
-    }
-    if (st.z_update && pixel_idx < internal_zbuffer.size()) {
-        internal_zbuffer[pixel_idx] = z;
-    }
-
+    if (res.z_write && zp) *zp = z;
     stats.drawn++;
-
-    if (st.fb_size == 2) { // 16-bit RGBA 5-5-5-1
-        u8 r = (color >> 16) & 0xFF;
-        u8 g = (color >> 8) & 0xFF;
-        u8 b = color & 0xFF;
-
-        u32 idx = st.fb_addr + pixel_idx * 2;
-        if (idx + 1 < rdram_size) {
-            const bool blend = st.blend_enabled && a < 255;
-            if (blend || !st.blend_pass_through) {
-                u16 dest_p = (static_cast<u16>(rdram[idx + 0]) << 8) | static_cast<u16>(rdram[idx + 1]);
-                u8 dest_r = ((dest_p >> 11) & 0x1F) * 255 / 31;
-                u8 dest_g = ((dest_p >> 6) & 0x1F) * 255 / 31;
-                u8 dest_b = ((dest_p >> 1) & 0x1F) * 255 / 31;
-                u8 dest_a = (dest_p & 1) ? 255 : 0;
-                raster::blend_pixel(st, color, shade_a, dest_r, dest_g, dest_b, dest_a, blend, r, g, b);
-            }
-
-            u16 p = (((r * 31 / 255) & 0x1F) << 11) |
-                    (((g * 31 / 255) & 0x1F) << 6)  |
-                    (((b * 31 / 255) & 0x1F) << 1)  |
-                    (a > 0 ? 1 : 0);
-
-            rdram[idx + 0] = (p >> 8) & 0xFF;
-            rdram[idx + 1] = p & 0xFF;
-            if (pixel_idx < shadow_len) shadow[pixel_idx] = p;
-        }
-    } else if (st.fb_size == 3) { // 32-bit RGBA
-        u32 idx = st.fb_addr + pixel_idx * 4;
-        if (idx + 3 < rdram_size) {
-            u8 r = (color >> 16) & 0xFF;
-            u8 g = (color >> 8) & 0xFF;
-            u8 b = color & 0xFF;
-
-            const bool blend = st.blend_enabled && a < 255;
-            if (blend || !st.blend_pass_through) {
-                u8 dest_r = rdram[idx + 0];
-                u8 dest_g = rdram[idx + 1];
-                u8 dest_b = rdram[idx + 2];
-                u8 dest_a = rdram[idx + 3];
-                raster::blend_pixel(st, color, shade_a, dest_r, dest_g, dest_b, dest_a, blend, r, g, b);
-            }
-
-            rdram[idx + 0] = r;
-            rdram[idx + 1] = g;
-            rdram[idx + 2] = b;
-            rdram[idx + 3] = a;
-            if (pixel_idx < shadow_len)
-                shadow[pixel_idx] = (static_cast<u32>(r) << 24) | (static_cast<u32>(g) << 16) | (static_cast<u32>(b) << 8) | a;
-        }
-    }
 }
 
 raster::TexCache* RDP::native_tex_cache(const raster::TexUnit& tu, u32 tlut_type) {
@@ -3145,6 +3129,7 @@ void RDP::queue_native(NativeCmd& cmd, u8* rdram, size_t rdram_size) {
 
 void RDP::flush_native() {
     if (native_queue_.empty()) return;
+    hle_hidden_->ensure_hidden(native_rdram_size_);
     constexpr s32 kBandRows = 8;
     constexpr u32 kBands = (kMaxFbLines + kBandRows - 1) / kBandRows;
     // Waking the workers costs more than a handful of small draws.
@@ -3233,12 +3218,19 @@ void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f
     if (hr) hires_->tex_rect(hr, live, draw_state_serial_, tmem_gen_, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip);
 }
 
-void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, u8* rdram, size_t rdram_size) {
+void RDP::rasterize_triangle(const Vertex& in0, const Vertex& in1, const Vertex& in2, u8* rdram, size_t rdram_size) {
     stat_rast_called++;
     ++triangle_count_;
     if (color_image_addr >= rdram_size) return;
 
-    if (v0.w <= 0.0001f || v1.w <= 0.0001f || v2.w <= 0.0001f) return;
+    if (in0.w <= 0.0001f || in1.w <= 0.0001f || in2.w <= 0.0001f) return;
+    // The microcode hands the RDP screen positions in quarter pixels.
+    auto snap = [](Vertex v) {
+        v.sx = std::nearbyint(v.sx * 4.0f) * 0.25f;
+        v.sy = std::nearbyint(v.sy * 4.0f) * 0.25f;
+        return v;
+    };
+    const Vertex v0 = snap(in0), v1 = snap(in1), v2 = snap(in2);
 
     // Backface culling: signed 2D area
     f32 area = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
@@ -3731,7 +3723,7 @@ void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) 
             if (st.combine_set) {
                 if (!have_last || color != last_in) {
                     last_in = color;
-                    last_out = raster::combine(st, color, color, 255, 255, 255, 255);
+                    last_out = raster::combine(st, color, color, 0, 0, 0, 0);
                     have_last = true;
                 }
                 color = last_out;

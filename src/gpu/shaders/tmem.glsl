@@ -4,10 +4,12 @@
 uint tmem_byte(uint tm, uint off) { return (D[tm + (off >> 2u)] >> ((off & 3u) << 3u)) & 0xFFu; }
 bool tmem_dxt(uint tm, uint word) { return ((D[tm + 1024u + (word >> 5u)] >> (word & 31u)) & 1u) != 0u; }
 
+uint five_to_eight(uint c) { return (c << 3u) | (c >> 2u); }
+
 uint rgba16_to_argb(uint p) {
-    uint r = (((p >> 11u) & 31u) * 255u + 15u) / 31u;
-    uint g = (((p >> 6u) & 31u) * 255u + 15u) / 31u;
-    uint b = (((p >> 1u) & 31u) * 255u + 15u) / 31u;
+    uint r = five_to_eight((p >> 11u) & 31u);
+    uint g = five_to_eight((p >> 6u) & 31u);
+    uint b = five_to_eight((p >> 1u) & 31u);
     uint a = (p & 1u) != 0u ? 255u : 0u;
     return (a << 24u) | (r << 16u) | (g << 8u) | b;
 }
@@ -20,29 +22,6 @@ uint lookup_tlut(uint tm, uint index, uint tlut_type) {
     uint p = (tmem_byte(tm, off) << 8u) | tmem_byte(tm, off + 1u);
     if (tlut_type == 3u) return ia_argb((p >> 8u) & 0xFFu, p & 0xFFu);
     return rgba16_to_argb(p);
-}
-
-int wrap_coord(int c, uint mask, bool clamp_en, bool mirror_en, int extent) {
-    int ext = extent > 0 ? extent : 0;
-    if (mask == 0u) return clamp(c, 0, ext);
-    if (clamp_en) c = clamp(c, 0, ext);
-    int period = 1 << int(mask);
-    if (mirror_en) {
-        int span = period * 2;
-        c &= span - 1;
-        if (c >= period) c = span - 1 - c;
-        return c;
-    }
-    return c & (period - 1);
-}
-
-int wrap_s(uint tb, int c) {
-    uint d = D[tb];
-    return wrap_coord(c, (d >> 12u) & 15u, ((d >> 20u) & 1u) != 0u, ((d >> 22u) & 1u) != 0u, int(D[tb + 3u]));
-}
-int wrap_t(uint tb, int c) {
-    uint d = D[tb];
-    return wrap_coord(c, (d >> 16u) & 15u, ((d >> 21u) & 1u) != 0u, ((d >> 23u) & 1u) != 0u, int(D[tb + 4u]));
 }
 
 // fetch_wrapped() of raster.hpp.
@@ -105,8 +84,3 @@ uint fetch_wrapped(uint tb, uint tm, uint tlut_type, int is, int it) {
     }
     return 0u;
 }
-
-uint fetch_texel(uint tb, uint tm, uint tlut_type, int is, int it) {
-    return fetch_wrapped(tb, tm, tlut_type, wrap_s(tb, is), wrap_t(tb, it));
-}
-

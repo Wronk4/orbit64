@@ -276,20 +276,25 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
            flag(st.fill_or_copy, GPU_ST_FILL_OR_COPY) | flag(st.point_sample, GPU_ST_POINT) |
            flag(st.texture_enabled, GPU_ST_TEXTURED) | flag(st.smooth_shading, GPU_ST_SMOOTH) |
            flag(st.combine_set, GPU_ST_COMBINED) | flag(st.need_tex0, GPU_ST_NEED_TEX0) |
-           flag(st.need_tex1, GPU_ST_NEED_TEX1) | flag(st.blend_enabled, GPU_ST_BLEND) |
-           flag(st.alpha_zero_kill, GPU_ST_ZERO_KILL) | flag(st.z_compare, GPU_ST_Z_COMPARE) |
+           flag(st.need_tex1, GPU_ST_NEED_TEX1) | flag(st.pipelined_tex1, GPU_ST_PIPE_TEX1) |
+           flag(st.mid_texel, GPU_ST_MID_TEXEL) | flag(st.z_compare, GPU_ST_Z_COMPARE) |
            flag(st.z_update, GPU_ST_Z_UPDATE) | flag(st.fb_size == 2, GPU_ST_16BIT) |
-           flag(st.blend_pass_through, GPU_ST_PASS_THROUGH) | flag(st.alpha_from_cvg, GPU_ST_ALPHA_CVG) |
-           flag(st.force_blend, GPU_ST_FORCE_BLEND) | flag(st.z_decal, GPU_ST_Z_DECAL);
-    w[1] = (st.tlut_type & 15) | (st.active_tile & 7) << 4 | static_cast<u32>(st.alpha_compare & 3) << 8 |
-           static_cast<u32>(st.alpha_threshold) << 16;
+           flag(st.bilerp0, GPU_ST_BILERP0) | flag(st.bilerp1, GPU_ST_BILERP1) |
+           flag(st.force_blend, GPU_ST_FORCE_BLEND) | flag(st.aa_en, GPU_ST_AA) |
+           flag(st.image_read, GPU_ST_IMAGE_READ) | flag(st.color_on_cvg, GPU_ST_COLOR_ON_CVG) |
+           flag(st.cvg_times_alpha, GPU_ST_CVG_X_ALPHA) | flag(st.alpha_cvg_select, GPU_ST_ALPHA_CVG_SEL) |
+           flag(st.alpha_test, GPU_ST_ALPHA_TEST) | flag(st.alpha_test_dither, GPU_ST_ALPHA_DITHER) |
+           flag(st.uses_noise, GPU_ST_NOISE);
+    w[1] = (st.tlut_type & 15) | (st.active_tile & 7) << 4 | static_cast<u32>(st.z_mode & 3) << 8 |
+           static_cast<u32>(st.cvg_mode & 3) << 10 | static_cast<u32>(st.blend_color & 0xFF) << 16;
     auto mux = [](u8 a, u8 b, u8 c, u8 d) {
         return static_cast<u32>(a) | static_cast<u32>(b) << 8 | static_cast<u32>(c) << 16 | static_cast<u32>(d) << 24;
     };
-    w[2] = mux(st.cc_a0, st.cc_b0, st.cc_c0, st.cc_d0);
-    w[3] = mux(st.ac_a0, st.ac_b0, st.ac_c0, st.ac_d0);
-    w[4] = mux(st.cc_a1, st.cc_b1, st.cc_c1, st.cc_d1);
-    w[5] = mux(st.ac_a1, st.ac_b1, st.ac_c1, st.ac_d1);
+    for (int c = 0; c < 2; ++c) {
+        const auto& sel = st.cc_sel[c];
+        w[2 + 2 * c] = mux(sel[0][0], sel[1][0], sel[2][0], sel[3][0]);
+        w[3 + 2 * c] = mux(sel[0][3], sel[1][3], sel[2][3], sel[3][3]);
+    }
     w[6] = st.prim_color;
     w[7] = st.env_color;
     w[8] = st.blend_color;
@@ -308,20 +313,21 @@ u32 RdpRenderer::recorded_state(const DrawState& st, u64 serial, u64 tmem_gen, b
         const raster::TexUnit& tu = st.tex[i];
         const Tile& tl = tu.tile;
         u32* tw = w + GPU_ST_TILES + i * GPU_TILE_WORDS;
-        tw[0] = (tl.format & 15u) | (tl.size & 15u) << 4 | (tl.palette & 15u) << 8 | (tl.mask_s & 15u) << 12 |
-                (tl.mask_t & 15u) << 16 | (tl.clamp_s ? 1u : 0u) << 20 | (tl.clamp_t ? 1u : 0u) << 21 |
+        tw[0] = (tl.format & 15u) | (tl.size & 15u) << 4 | (tl.palette & 15u) << 8 | (tu.hw_mask_s & 15u) << 12 |
+                (tu.hw_mask_t & 15u) << 16 | (tu.hw_clamp_s ? 1u : 0u) << 20 | (tu.hw_clamp_t ? 1u : 0u) << 21 |
                 (tl.mirror_s ? 1u : 0u) << 22 | (tl.mirror_t ? 1u : 0u) << 23;
         tw[1] = tu.tmem_base;
         tw[2] = tu.row_stride;
-        tw[3] = static_cast<u32>(tu.extent_s);
-        tw[4] = static_cast<u32>(tu.extent_t);
-        tw[5] = fbits(tu.shift_mul_s);
-        tw[6] = fbits(tu.shift_mul_t);
-        tw[7] = fbits(tu.origin_s);
-        tw[8] = fbits(tu.origin_t);
+        tw[3] = static_cast<u32>(tl.sl) | static_cast<u32>(tl.sh) << 16;
+        tw[4] = static_cast<u32>(tl.tl) | static_cast<u32>(tl.th) << 16;
+        tw[5] = static_cast<u32>(tl.shift_s) | static_cast<u32>(tl.shift_t) << 8;
         tw[9] = GPU_NO_TABLE;
     }
     w[GPU_ST_BLEND2] = mux(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b);
+    w[GPU_ST_KEY_CENTER] = mux(st.key_center[0], st.key_center[1], st.key_center[2], 0);
+    w[GPU_ST_KEY_SCALE] = mux(st.key_scale[0], st.key_scale[1], st.key_scale[2], 0);
+    w[GPU_ST_K45] = static_cast<u32>(st.k4 & 0x1FF) | static_cast<u32>(st.k5 & 0x1FF) << 16;
+    w[GPU_ST_NOISE_SEED] = st.noise_seed;
     w[GPU_ST_LOD] = flag(st.tex_lod_en, GPU_LOD_TEX_EN) | flag(st.sharpen, GPU_LOD_SHARPEN) |
                     flag(st.detail, GPU_LOD_DETAIL) | flag(st.dolod, GPU_LOD_DOLOD) |
                     static_cast<u32>(st.max_level) << 8 | static_cast<u32>(st.min_level) << 16 |
@@ -405,6 +411,7 @@ void RdpRenderer::triangle(HiResTarget* ht, const DrawState& st, u64 serial, u64
                static_cast<u32>(v[i]->a) << 24;
     }
     q[24] = fbits(1.0f / area);
+    q[25] = fbits(raster::walk_direction(v0, v1, v2));
 }
 
 void RdpRenderer::tex_rect(HiResTarget* ht, const DrawState& st, u64 serial, u64 tmem_gen, u32 ulx, u32 uly,

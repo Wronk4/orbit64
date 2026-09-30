@@ -31,7 +31,6 @@ layout(std140, UNIFORM(0)) uniform Pass {
     float inv_scale; // 1 / S
 } P;
 
-float unit8(uint b) { return uintBitsToFloat(D[b]); }
 float fword(uint i) { return uintBitsToFloat(D[i]); }
 
 #include "tmem.glsl"
@@ -41,50 +40,79 @@ int floor_to_int(float v) {
     return v < float(i) ? i - 1 : i;
 }
 
-uint lerp8(uint a, uint b, float t) { return uint(clamp(float(a) + t * (float(b) - float(a)), 0.0, 255.0)); }
+// ---- Texture unit (raster::sample_texture) -------------------------------------
 
-uint bilerp_argb(uint c00, uint c10, uint c01, uint c11, float fs, float ft) {
-    uint o = 0u;
-    for (uint sh = 0u; sh < 32u; sh += 8u) {
-        uint top = lerp8((c00 >> sh) & 0xFFu, (c10 >> sh) & 0xFFu, fs);
-        uint bot = lerp8((c01 >> sh) & 0xFFu, (c11 >> sh) & 0xFFu, fs);
-        o |= lerp8(top, bot, ft) << sh;
+// raster::tex_coord(): texels -> s10.5, shifted, clamped, relative to the tile.
+int tex_coord(float c, uint shift, bool clmp, uint lo, uint hi) {
+    float v = c * 32.0;
+    int x = !(v > -32768.0) ? -0x8000 : v >= 32767.0 ? 0x7FFF : floor_to_int(v);
+    if (shift < 11u) x >>= int(shift);
+    else x = int(uint(x) << (32u - shift)) >> 16;
+    int l = int(lo), h = int(hi);
+    if (clmp) {
+        if ((x >> 3) >= h) return (((h >> 2) - (l >> 2)) & 0x3FF) << 5;
+        return max(x - (l << 3), 0);
     }
-    return o;
+    return x - (l << 3);
 }
 
-uint sample_texture(uint sb, uint tile_idx, float s, float t) {
-    uint tb = sb + GPU_ST_TILES + (tile_idx & 7u) * GPU_TILE_WORDS;
-    float ss = s * fword(tb + 5u);
-    float st = t * fword(tb + 6u);
-    ss -= fword(tb + 7u);
-    st -= fword(tb + 8u);
-    bool point = (D[sb] & GPU_ST_POINT) != 0u;
-    int is0 = floor_to_int(ss), it0 = floor_to_int(st);
-    int s0 = wrap_s(tb, is0), t0 = wrap_t(tb, it0);
+int tex_mask(int c, uint mask, bool mirror) {
+    if (mask == 0u) return c;
+    int m = 1 << int(mask);
+    if (mirror) c ^= max((c & m) - 1, 0);
+    return c & (m - 1);
+}
+
+// raster::texel_at(): decoded table (raster::tex_cache_dims) when it covers the texel.
+uint texel_at(uint sb, uint tb, int s, int t) {
     uint table = D[tb + 9u];
     if (table != GPU_NO_TABLE) {
-        // Decoded texels: w is what tex_cache_dims() gives.
         uint d = D[tb];
-        uint mask_s = (d >> 12u) & 15u;
-        uint w = mask_s != 0u ? (1u << mask_s) : uint(int(D[tb + 3u]) + 1);
-        uint c00 = T[table + uint(t0) * w + uint(s0)];
-        if (point) return c00;
-        uint s1 = uint(wrap_s(tb, is0 + 1)), t1 = uint(wrap_t(tb, it0 + 1));
-        uint c10 = T[table + uint(t0) * w + s1];
-        uint c01 = T[table + t1 * w + uint(s0)];
-        uint c11 = T[table + t1 * w + s1];
-        return bilerp_argb(c00, c10, c01, c11, ss - float(is0), st - float(it0));
+        uint ms = (d >> 12u) & 15u, mt = (d >> 16u) & 15u;
+        uint ws = D[tb + 3u], wt = D[tb + 4u];
+        uint w = ms != 0u ? (1u << ms) : ((((ws >> 16u) >> 2u) - ((ws & 0xFFFFu) >> 2u)) & 0x3FFu) + 2u;
+        uint h = mt != 0u ? (1u << mt) : ((((wt >> 16u) >> 2u) - ((wt & 0xFFFFu) >> 2u)) & 0x3FFu) + 2u;
+        if (uint(s) < w && uint(t) < h) return T[table + uint(t) * w + uint(s)];
     }
-    uint tm = D[sb + 15u];
-    uint tlut = D[sb + 1u] & 15u;
-    uint c00 = fetch_wrapped(tb, tm, tlut, s0, t0);
-    if (point) return c00;
-    int s1 = wrap_s(tb, is0 + 1), t1 = wrap_t(tb, it0 + 1);
-    uint c10 = fetch_wrapped(tb, tm, tlut, s1, t0);
-    uint c01 = fetch_wrapped(tb, tm, tlut, s0, t1);
-    uint c11 = fetch_wrapped(tb, tm, tlut, s1, t1);
-    return bilerp_argb(c00, c10, c01, c11, ss - float(is0), st - float(it0));
+    return fetch_wrapped(tb, D[sb + 15u], D[sb + 1u] & 15u, s, t);
+}
+
+uint sample_texture(uint sb, uint tile_idx, float s, float t, bool second) {
+    uint tb = sb + GPU_ST_TILES + (tile_idx & 7u) * GPU_TILE_WORDS;
+    uint d = D[tb], sh = D[tb + 5u];
+    int cs = tex_coord(s, sh & 0xFFu, ((d >> 20u) & 1u) != 0u, D[tb + 3u] & 0xFFFFu, D[tb + 3u] >> 16u);
+    int ct = tex_coord(t, (sh >> 8u) & 0xFFu, ((d >> 21u) & 1u) != 0u, D[tb + 4u] & 0xFFFFu, D[tb + 4u] >> 16u);
+    uint ms = (d >> 12u) & 15u, mt = (d >> 16u) & 15u;
+    bool mirs = ((d >> 22u) & 1u) != 0u, mirt = ((d >> 23u) & 1u) != 0u;
+    int is = cs >> 5, it = ct >> 5;
+    int s0 = tex_mask(is, ms, mirs), t0r = tex_mask(it, mt, mirt);
+    uint flags = D[sb];
+    if ((flags & GPU_ST_POINT) != 0u) return texel_at(sb, tb, s0, t0r & 0xFF);
+    int fs = cs & 31, ft = ct & 31;
+    int s1 = tex_mask(is + 1, ms, mirs), t1r = tex_mask(it + 1, mt, mirt);
+    int t0 = t0r & 0xFF, t1 = t0 + max(t1r - t0r, -255);
+    bool bilerp = (flags & (second ? GPU_ST_BILERP1 : GPU_ST_BILERP0)) != 0u;
+    bool upper = fs + ft >= 32;
+    if (!bilerp) return upper ? texel_at(sb, tb, s1, t1) : texel_at(sb, tb, s0, t0);
+    uint c10 = texel_at(sb, tb, s1, t0);
+    uint c01 = texel_at(sb, tb, s0, t1);
+    uint o = 0u;
+    if ((flags & GPU_ST_MID_TEXEL) != 0u && fs == 16 && ft == 16) {
+        uint c00 = texel_at(sb, tb, s0, t0), c11 = texel_at(sb, tb, s1, t1);
+        for (uint b = 0u; b < 32u; b += 8u) {
+            uint sum = ((c00 >> b) & 0xFFu) + ((c10 >> b) & 0xFFu) + ((c01 >> b) & 0xFFu) + ((c11 >> b) & 0xFFu);
+            o |= ((sum + 2u) >> 2u) << b;
+        }
+        return o;
+    }
+    uint base = upper ? texel_at(sb, tb, s1, t1) : texel_at(sb, tb, s0, t0);
+    int f0 = upper ? 32 - ft : fs, f1 = upper ? 32 - fs : ft;
+    for (uint b = 0u; b < 32u; b += 8u) {
+        int bv = int((base >> b) & 0xFFu);
+        int v = (((int((c10 >> b) & 0xFFu) - bv) * f0 + (int((c01 >> b) & 0xFFu) - bv) * f1 + 0x10) >> 5) + bv;
+        o |= uint(v & 0xFF) << b;
+    }
+    return o;
 }
 
 // ---- Level of detail (raster::lod_tiles) ----------------------------------------
@@ -132,205 +160,273 @@ void lod_tiles(uint sb, float delta, uint prim_tile, out uint t0, out uint t1, o
     }
 }
 
-// ---- Colour combiner ----------------------------------------------------------
+// ---- Colour combiner (raster::combine) -------------------------------------------
 
-vec3 rgb_of(uint c) { return vec3(unit8((c >> 16u) & 0xFFu), unit8((c >> 8u) & 0xFFu), unit8(c & 0xFFu)); }
-vec3 rgb_of_rdp(uint c) { return vec3(unit8((c >> 24u) & 0xFFu), unit8((c >> 16u) & 0xFFu), unit8((c >> 8u) & 0xFFu)); }
+int sext9(int v) { return int(uint(v) << 23u) >> 23; }
+int cc_expand(int v) { return sext9(v - 0x80) + 0x80; }
+int cc_equation(int a, int b, int c, int d) {
+    int p = int(uint(cc_expand(a) - cc_expand(b)) * uint(sext9(c)) + 0x80u);
+    return (p >> 8) + cc_expand(d);
+}
+int cc_clamp(int v) { return clamp(sext9(v - 0x80) + 0x80, 0, 0xFF); }
 
-struct CombineIn {
-    vec3 t0, t1, prim, shade, env;
-    float t0a, t1a, pa, sa, ea, lf, plf;
+// raster::pixel_noise()
+uint pixel_noise(uint sb, uint x, uint y) {
+    uint h = (x * 0x9E3779B1u) ^ ((y + D[sb + GPU_ST_NOISE_SEED]) * 0x85EBCA77u);
+    h ^= h >> 15u;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12u;
+    return h;
+}
+
+struct CombIn {
+    ivec4 comb, t0, t1, shade;
+    int noise, lod;
 };
 
-vec3 color_abd(uint src, CombineIn ci, vec3 comb) {
-    switch (src) {
-        case 0u: return comb;
-        case 1u: return ci.t0;
-        case 2u: return ci.t1;
-        case 3u: return ci.prim;
-        case 4u: return ci.shade;
-        case 5u: return ci.env;
-        case 6u: return vec3(1.0);
-        default: return vec3(0.0);
+ivec4 argb_to_rgba(uint c) { return ivec4(int((c >> 16u) & 0xFFu), int((c >> 8u) & 0xFFu), int(c & 0xFFu), int(c >> 24u)); }
+
+// Row `idx` (raster::CcIn) of the combiner's inputs, channel ch (r, g, b, a).
+int cc_in(uint sb, uint idx, uint ch, CombIn ci) {
+    switch (idx) {
+        case 0u: return ci.comb[ch];
+        case 1u: return ci.t0[ch];
+        case 2u: return ci.t1[ch];
+        case 3u: return int((D[sb + 6u] >> (24u - 8u * ch)) & 0xFFu);
+        case 4u: return ci.shade[ch];
+        case 5u: return int((D[sb + 7u] >> (24u - 8u * ch)) & 0xFFu);
+        case 6u: return 0x100;
+        case 7u: return ci.noise;
+        case 9u: return ch < 3u ? int((D[sb + GPU_ST_KEY_CENTER] >> (8u * ch)) & 0xFFu) : 0;
+        case 10u: return int(D[sb + GPU_ST_K45] & 0x1FFu);
+        case 11u: return ch < 3u ? int((D[sb + GPU_ST_KEY_SCALE] >> (8u * ch)) & 0xFFu) : 0;
+        case 12u: return ci.comb.a;
+        case 13u: return ci.t0.a;
+        case 14u: return ci.t1.a;
+        case 15u: return int(D[sb + 6u] & 0xFFu);
+        case 16u: return ci.shade.a;
+        case 17u: return int(D[sb + 7u] & 0xFFu);
+        case 18u: return ci.lod;
+        case 19u: return int(D[sb + GPU_ST_LOD] >> 24u);
+        case 20u: return int((D[sb + GPU_ST_K45] >> 16u) & 0x1FFu);
+        default: return 0;
     }
 }
 
-vec3 color_c(uint src, CombineIn ci, vec3 comb, float comb_a) {
-    switch (src) {
-        case 0u: return comb;
-        case 1u: return ci.t0;
-        case 2u: return ci.t1;
-        case 3u: return ci.prim;
-        case 4u: return ci.shade;
-        case 5u: return ci.env;
-        case 6u: return vec3(1.0);
-        case 7u: return vec3(comb_a);
-        case 8u: return vec3(ci.t0a);
-        case 9u: return vec3(ci.t1a);
-        case 10u: return vec3(ci.pa);
-        case 11u: return vec3(ci.sa);
-        case 12u: return vec3(ci.ea);
-        case 13u: return vec3(ci.lf);
-        case 14u: return vec3(ci.plf);
-        default: return vec3(0.0);
+ivec4 cc_cycle(uint sb, uint c, CombIn ci) {
+    uint rgb = D[sb + 2u + 2u * c], al = D[sb + 3u + 2u * c];
+    ivec4 o;
+    for (uint ch = 0u; ch < 4u; ++ch) {
+        uint w = ch < 3u ? rgb : al;
+        o[ch] = cc_equation(cc_in(sb, w & 0xFFu, ch, ci), cc_in(sb, (w >> 8u) & 0xFFu, ch, ci),
+                            cc_in(sb, (w >> 16u) & 0xFFu, ch, ci), cc_in(sb, w >> 24u, ch, ci));
     }
+    return o;
 }
 
-float alpha_abd(uint src, CombineIn ci, float comb_a, bool c_slot) {
-    switch (src) {
-        case 0u: return c_slot ? ci.lf : comb_a;
-        case 1u: return ci.t0a;
-        case 2u: return ci.t1a;
-        case 3u: return ci.pa;
-        case 4u: return ci.sa;
-        case 5u: return ci.ea;
-        case 6u: return c_slot ? ci.plf : 1.0;
-        default: return 0.0;
-    }
-}
-
-uint combine(uint sb, uint tex0, uint tex1, uint shade, int lod_frac) {
-    CombineIn ci;
-    ci.lf = float(lod_frac) / 255.0;
-    ci.plf = unit8(D[sb + GPU_ST_LOD] >> 24u);
-    ci.t0 = rgb_of(tex0);
-    ci.t1 = rgb_of(tex1);
-    ci.t0a = unit8(tex0 >> 24u);
-    ci.t1a = unit8(tex1 >> 24u);
-    ci.shade = vec3(unit8(shade & 0xFFu), unit8((shade >> 8u) & 0xFFu), unit8((shade >> 16u) & 0xFFu));
-    ci.sa = unit8(shade >> 24u);
-    uint prim = D[sb + 6u], env = D[sb + 7u];
-    ci.prim = rgb_of_rdp(prim);
-    ci.pa = unit8(prim & 0xFFu);
-    ci.env = rgb_of_rdp(env);
-    ci.ea = unit8(env & 0xFFu);
-
-    uint cc = D[sb + 2u], ac = D[sb + 3u];
-    // The first cycle's COMBINED colour is 0 and its COMBINED alpha TEXEL0's.
-    vec3 A = color_abd(cc & 0xFFu, ci, vec3(0.0));
-    vec3 B = color_abd((cc >> 8u) & 0xFFu, ci, vec3(0.0));
-    vec3 C = color_c((cc >> 16u) & 0xFFu, ci, vec3(0.0), ci.t0a);
-    vec3 Dd = color_abd(cc >> 24u, ci, vec3(0.0));
-    float Aa = alpha_abd(ac & 0xFFu, ci, ci.t0a, false);
-    float Ab = alpha_abd((ac >> 8u) & 0xFFu, ci, ci.t0a, false);
-    float Ac = alpha_abd((ac >> 16u) & 0xFFu, ci, ci.t0a, true);
-    float Ad = alpha_abd(ac >> 24u, ci, ci.t0a, false);
-    vec3 res = clamp((A - B) * C + Dd, vec3(0.0), vec3(1.0));
-    float res_a = clamp((Aa - Ab) * Ac + Ad, 0.0, 1.0);
-
+uint combine(uint sb, uint tex0, uint tex1, ivec4 shade, int lod_frac, int noise, inout int alpha0) {
+    CombIn ci;
+    ci.comb = ivec4(0);
+    ci.t0 = argb_to_rgba(tex0);
+    ci.t1 = argb_to_rgba(tex1);
+    ci.shade = shade;
+    ci.noise = noise;
+    ci.lod = lod_frac;
+    ivec4 o;
     if ((D[sb] & GPU_ST_TWO_CYCLE) != 0u) {
-        vec3 c0 = res;
-        float c0_a = res_a;
-        // The second cycle sees the texels rotated: its TEXEL0 is TEXEL1.
-        vec3 tt = ci.t0; ci.t0 = ci.t1; ci.t1 = tt;
-        float ta = ci.t0a; ci.t0a = ci.t1a; ci.t1a = ta;
-        cc = D[sb + 4u];
-        ac = D[sb + 5u];
-        A = color_abd(cc & 0xFFu, ci, c0);
-        B = color_abd((cc >> 8u) & 0xFFu, ci, c0);
-        C = color_c((cc >> 16u) & 0xFFu, ci, c0, c0_a);
-        Dd = color_abd(cc >> 24u, ci, c0);
-        Aa = alpha_abd(ac & 0xFFu, ci, c0_a, false);
-        Ab = alpha_abd((ac >> 8u) & 0xFFu, ci, c0_a, false);
-        Ac = alpha_abd((ac >> 16u) & 0xFFu, ci, c0_a, true);
-        Ad = alpha_abd(ac >> 24u, ci, c0_a, false);
-        res = clamp((A - B) * C + Dd, vec3(0.0), vec3(1.0));
-        res_a = clamp((Aa - Ab) * Ac + Ad, 0.0, 1.0);
-    }
-    uint r = uint(res.r * 255.0), g = uint(res.g * 255.0), b = uint(res.b * 255.0), a = uint(res_a * 255.0);
-    return (a << 24u) | (r << 16u) | (g << 8u) | b;
-}
-
-// ---- Blender and the frame buffer write ---------------------------------------------
-
-// raster::blend_pixel(): both blender cycles.
-vec3 blend_cycle(uint sb, uint mux, vec3 in_c, vec3 mem_c, float a_in, float shade_a, float mem_a, bool eq, bool norm) {
-    uint p = mux & 3u, ai = (mux >> 8u) & 3u, m = (mux >> 16u) & 3u, bi = (mux >> 24u) & 3u;
-    uint bc = D[sb + 8u], fc = D[sb + 9u];
-    vec3 blc = vec3(float((bc >> 24u) & 0xFFu), float((bc >> 16u) & 0xFFu), float((bc >> 8u) & 0xFFu));
-    vec3 fgc = vec3(float((fc >> 24u) & 0xFFu), float((fc >> 16u) & 0xFFu), float((fc >> 8u) & 0xFFu));
-    vec3 pc = p == 0u ? in_c : p == 1u ? mem_c : p == 2u ? blc : fgc;
-    if (!eq) return pc;
-    float A = ai == 0u ? a_in : ai == 1u ? float(fc & 0xFFu) : ai == 2u ? shade_a : 0.0;
-    float B = bi == 0u ? 255.0 - A : bi == 1u ? mem_a : bi == 2u ? 255.0 : 0.0;
-    vec3 mc = m == 0u ? in_c : m == 1u ? mem_c : m == 2u ? blc : fgc;
-    float div = ((D[sb] & GPU_ST_FORCE_BLEND) != 0u || !norm) ? 255.0 : max(A + B, 1.0);
-    return floor(clamp((pc * A + mc * B) / div, vec3(0.0), vec3(255.0)));
-}
-
-uint blend_pixel(uint sb, uint src, uint shade_a, uint dst, bool blend) {
-    vec3 c = vec3(float((src >> 16u) & 0xFFu), float((src >> 8u) & 0xFFu), float(src & 0xFFu));
-    vec3 mem_c = vec3(float((dst >> 16u) & 0xFFu), float((dst >> 8u) & 0xFFu), float(dst & 0xFFu));
-    float a_in = float(src >> 24u), sa = float(shade_a), ma = float(dst >> 24u);
-    if ((D[sb] & GPU_ST_TWO_CYCLE) != 0u) {
-        c = blend_cycle(sb, D[sb + 10u], c, mem_c, a_in, sa, ma, true, false);
-        c = blend_cycle(sb, D[sb + GPU_ST_BLEND2], c, mem_c, a_in, sa, ma, blend, true);
+        ivec4 c0 = cc_cycle(sb, 0u, ci);
+        alpha0 = cc_clamp(c0.a);
+        // The second cycle sees the texels swapped.
+        ivec4 t = ci.t0;
+        ci.t0 = ci.t1;
+        ci.t1 = t;
+        ci.comb = c0;
+        o = cc_cycle(sb, 1u, ci);
     } else {
-        c = blend_cycle(sb, D[sb + 10u], c, mem_c, a_in, sa, ma, blend, true);
+        o = cc_cycle(sb, 1u, ci);
     }
-    return (uint(c.r) << 16u) | (uint(c.g) << 8u) | uint(c.b);
+    return (uint(cc_clamp(o.a)) << 24u) | (uint(cc_clamp(o.r)) << 16u) | (uint(cc_clamp(o.g)) << 8u) | uint(cc_clamp(o.b));
 }
 
-// raster::depth_fails()
-bool depth_fails(uint flags, float fz, float z) {
-    if ((flags & GPU_ST_Z_COMPARE) == 0u) return false;
-    if ((flags & GPU_ST_Z_DECAL) != 0u) return abs(fz - z) > 2.0 / 1023.0;
-    return fz > z;
+// ---- Memory stage (raster::pixel_backend, HiResSink::write) ----------------------
+
+// The blender's divider (raster::blender_divider()), entry ((sum << 11) | n).
+int bl_divide(int sum, int n) {
+    int i = ((sum << 11) | n) & 0x7FFF;
+    int d = (i >> 11) & 0xF, nn = i & 0x7FF, invd = ~d & 0xF;
+    int res = 0;
+    int partial = (invd + (nn >> 8) + 1) & 7;
+    for (int k = 0; k < 8; ++k) {
+        int nbit = (nn >> (7 - k)) & 1;
+        int sm = (res & (0x100 >> k)) != 0 ? invd + (partial << 1) + nbit + 1 : d + (partial << 1) + nbit;
+        partial = sm & 7;
+        if ((sm & 0x10) != 0) res |= 1 << (7 - k);
+    }
+    return res;
 }
 
-// HiResSink::write: scissor, alpha compare, depth test, blending, store.
-void sink_write(uint sb, uint x, uint y, uint src, float fz, uint shade_a, inout uint c, inout float z) {
-    uint flags = D[sb];
+struct Aux {
+    uint shade_a, cvg, noise;
+    int alpha0; // -1: none
+};
+
+Aux aux_default() {
+    Aux a;
+    a.shade_a = 255u;
+    a.cvg = 8u;
+    a.noise = 0u;
+    a.alpha0 = -1;
+    return a;
+}
+
+ivec3 blend_cycle(uint sb, uint mux, bool final_cycle, bool blend_en, bool overflow, ivec4 px, ivec4 memc, uint shade_a) {
+    uint p = mux & 3u, a = (mux >> 8u) & 3u, m = (mux >> 16u) & 3u, b = (mux >> 24u) & 3u;
+    uint bc = D[sb + 8u], fc = D[sb + 9u];
+    ivec4 blc = ivec4(int(bc >> 24u), int((bc >> 16u) & 0xFFu), int((bc >> 8u) & 0xFFu), int(bc & 0xFFu));
+    ivec4 fog = ivec4(int(fc >> 24u), int((fc >> 16u) & 0xFFu), int((fc >> 8u) & 0xFFu), int(fc & 0xFFu));
+    ivec4 src1 = m == 0u ? px : m == 1u ? memc : m == 2u ? blc : fog;
+    if (final_cycle && (D[sb] & GPU_ST_COLOR_ON_CVG) != 0u && !overflow) return src1.rgb;
+    ivec4 src0 = p == 0u ? px : p == 1u ? memc : p == 2u ? blc : fog;
+    if (final_cycle && (!blend_en || (a == 0u && b == 0u && px.a == 0xFF))) return src0.rgb;
+    int a0 = a == 0u ? px.a : a == 1u ? fog.a : a == 2u ? int(shade_a) : 0;
+    int a1 = b == 0u ? (~a0 & 0xFF) : b == 1u ? memc.a : b == 2u ? 0xFF : 0;
+    a0 >>= 3;
+    a1 >>= 3;
+    if (b == 1u) {
+        a0 &= 0x3C;
+        a1 |= 3;
+    }
+    ivec3 v = src0.rgb * a0 + src1.rgb * (a1 + 1);
+    if (!final_cycle || (D[sb] & GPU_ST_FORCE_BLEND) != 0u) return (v >> 5) & 0xFF;
+    int sum = (a0 >> 2) + (a1 >> 2) + 1;
+    return ivec3(bl_divide(sum, (v.r >> 2) & 0x7FF), bl_divide(sum, (v.g >> 2) & 0x7FF), bl_divide(sum, (v.b >> 2) & 0x7FF));
+}
+
+// The colour keeps the pixel's coverage in the upper 3 bits of alpha.
+void sink_write(uint sb, uint x, uint y, uint src, float fz, Aux aux, inout uint c, inout float z) {
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
-    if ((flags & GPU_ST_ALPHA_CVG) != 0u) src |= 0xFF000000u;
-    uint a = src >> 24u;
-    uint w1 = D[sb + 1u];
-    uint ac = (w1 >> 8u) & 3u;
-    if (ac == 1u) {
-        if (a < ((w1 >> 16u) & 0xFFu)) return;
-    } else if (ac == 3u) {
-        if (a == 0u) return;
+    uint flags = D[sb];
+    int in_a = int(src >> 24u);
+    if ((flags & GPU_ST_COPY) != 0u) {
+        if ((flags & GPU_ST_ALPHA_TEST) != 0u && in_a == 0) return;
+        c = (in_a != 0 ? 0xE0000000u : 0u) | (src & 0x00FFFFFFu);
+        return;
     }
-    if (a == 0u && (flags & GPU_ST_ZERO_KILL) != 0u) return;
-    if (depth_fails(flags, fz, z)) return;
+    int cvg = int(aux.cvg);
+    int expanded = in_a + ((in_a + 1) >> 8);
+    int modulated;
+    if ((flags & GPU_ST_CVG_X_ALPHA) != 0u) {
+        modulated = (expanded * cvg + 4) >> 3;
+        cvg = modulated >> 5;
+    } else {
+        modulated = cvg << 5;
+    }
+    bool cvg_sel = (flags & GPU_ST_ALPHA_CVG_SEL) != 0u;
+    int alpha = clamp(cvg_sel ? modulated : expanded, 0, 0xFF);
+    if ((flags & GPU_ST_AA) != 0u && cvg == 0) return;
+    uint w1 = D[sb + 1u];
+    if ((flags & GPU_ST_ALPHA_TEST) != 0u) {
+        int ref = alpha;
+        if ((flags & GPU_ST_TWO_CYCLE) != 0u && aux.alpha0 >= 0) {
+            int ea = aux.alpha0 + ((aux.alpha0 + 1) >> 8);
+            if (cvg_sel) ea = (flags & GPU_ST_CVG_X_ALPHA) != 0u ? (ea * int(aux.cvg) + 4) >> 3 : int(aux.cvg) << 5;
+            ref = clamp(ea, 0, 0xFF);
+        }
+        int threshold = (flags & GPU_ST_ALPHA_DITHER) != 0u ? int(aux.noise) : int((w1 >> 16u) & 0xFFu);
+        if (ref < threshold) return;
+    }
+
+    int mem_cvg = (flags & GPU_ST_IMAGE_READ) != 0u ? int(c >> 29u) : 7;
+    bool overflow = cvg + mem_cvg >= 8;
+    bool blend_en;
+    bool force = (flags & GPU_ST_FORCE_BLEND) != 0u, aa = (flags & GPU_ST_AA) != 0u;
+    if ((flags & GPU_ST_Z_COMPARE) != 0u) {
+        uint zmode = (w1 >> 8u) & 3u;
+        bool max_z = z >= 1e30;
+        bool front = fz < z;
+        float slack = zmode == 3u ? 2.0 / 1023.0 : 1.0 / (1023.0 * 32.0);
+        bool farther = fz + slack >= z, nearer = fz - slack <= z;
+        blend_en = force || (!overflow && aa && farther);
+        bool pass;
+        if (zmode <= 1u) pass = max_z || (overflow ? front : nearer);
+        else if (zmode == 2u) pass = front || max_z;
+        else pass = farther && nearer && !max_z;
+        if (!pass) return;
+    } else {
+        blend_en = force || (!overflow && aa);
+    }
+
+    ivec4 px = ivec4(int((src >> 16u) & 0xFFu), int((src >> 8u) & 0xFFu), int(src & 0xFFu), alpha);
+    uint mm = (flags & GPU_ST_16BIT) != 0u ? 0xF8u : 0xFFu;
+    ivec4 memc = ivec4(int((c >> 16u) & mm), int((c >> 8u) & mm), int(c & mm), mem_cvg << 5);
+    ivec3 rgb;
+    if ((flags & GPU_ST_TWO_CYCLE) != 0u) {
+        rgb = blend_cycle(sb, D[sb + 10u], false, blend_en, overflow, px, memc, aux.shade_a);
+        px.rgb = rgb;
+        rgb = blend_cycle(sb, D[sb + GPU_ST_BLEND2], true, blend_en, overflow, px, memc, aux.shade_a);
+    } else {
+        rgb = blend_cycle(sb, D[sb + 10u], true, blend_en, overflow, px, memc, aux.shade_a);
+    }
+    int ncvg;
+    uint cmode = (w1 >> 10u) & 3u;
+    if (cmode == 0u) ncvg = blend_en ? min(7, mem_cvg + cvg) : (cvg - 1) & 7;
+    else if (cmode == 1u) ncvg = (cvg + mem_cvg) & 7;
+    else if (cmode == 2u) ncvg = 7;
+    else ncvg = mem_cvg;
+    c = (uint(ncvg) << 29u) | (uint(rgb.r) << 16u) | (uint(rgb.g) << 8u) | uint(rgb.b);
     if ((flags & GPU_ST_Z_UPDATE) != 0u) z = fz;
-    uint rgb = src & 0x00FFFFFFu;
-    bool blend = (flags & GPU_ST_BLEND) != 0u && a < 255u;
-    if (blend || (flags & GPU_ST_PASS_THROUGH) == 0u) rgb = blend_pixel(sb, src, shade_a, c, blend);
-    uint out_a = (flags & GPU_ST_16BIT) != 0u ? (a > 0u ? 255u : 0u) : a;
-    c = (out_a << 24u) | rgb;
 }
 
 // ---- Primitives -------------------------------------------------------------------
 
+// A corner exactly on an edge belongs to the triangle on its right (or
+// below a horizontal one), see raster::triangle().
+bool edge_tie(float a, float b, float sgn) { return a * sgn > 0.0 || (a == 0.0 && b * sgn > 0.0); }
+bool edge_in(float e, bool t, float sgn) { return e * sgn > 0.0 || (e == 0.0 && t); }
+
 void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z) {
-    float px = (float(x) + 0.5) * P.inv_scale;
-    float py = (float(y) + 0.5) * P.inv_scale;
+    // The pixel's upper-left corner, where the RDP samples it.
+    float px = float(x) * P.inv_scale;
+    float py = float(y) * P.inv_scale;
     float x0 = fword(pb + 3u), y0 = fword(pb + 4u);
     float x1 = fword(pb + 10u), y1 = fword(pb + 11u);
     float x2 = fword(pb + 17u), y2 = fword(pb + 18u);
     float inv_area = fword(pb + 24u);
-    float w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * inv_area;
-    float w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * inv_area;
+    float sgn = inv_area > 0.0 ? 1.0 : -1.0;
+    float e0 = (x1 - px) * (y2 - py) - (x2 - px) * (y1 - py);
+    float e1 = (x2 - px) * (y0 - py) - (x0 - px) * (y2 - py);
+    float e2 = 1.0 / inv_area - e0 - e1;
+    if (!(edge_in(e0, edge_tie(y1 - y2, x2 - x1, sgn), sgn) && edge_in(e1, edge_tie(y2 - y0, x0 - x2, sgn), sgn) &&
+          edge_in(e2, edge_tie(y0 - y1, x1 - x0, sgn), sgn)))
+        return;
+    float w0 = e0 * inv_area;
+    float w1 = e1 * inv_area;
     float w2 = 1.0 - w0 - w1;
-    if (!(w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0)) return;
 
     uint flags = D[sb];
     float fz = w0 * fword(pb + 5u) + w1 * fword(pb + 12u) + w2 * fword(pb + 19u);
-    // A pixel that fails the depth test is dropped whatever its colour
-    // (sink_write), so it isn't shaded at all.
-    if (depth_fails(flags, fz, z)) return;
+    // What fails the depth test whatever its coverage and colour isn't shaded.
+    if ((flags & GPU_ST_Z_COMPARE) != 0u) {
+        uint zmode = (D[sb + 1u] >> 8u) & 3u;
+        bool max_z = z >= 1e30;
+        float slack = zmode == 3u ? 2.0 / 1023.0 : 1.0 / (1023.0 * 32.0);
+        if (zmode <= 1u && !max_z && fz - slack > z) return;
+        if (zmode == 2u && !max_z && !(fz < z)) return;
+    }
     uint c0 = D[pb + 9u], c1 = D[pb + 16u], c2 = D[pb + 23u];
-    uint shade;
+    ivec4 shade;
     if ((flags & GPU_ST_SMOOTH) != 0u) {
-        shade = 0u;
-        for (uint sh = 0u; sh < 32u; sh += 8u) {
+        for (uint ch = 0u; ch < 4u; ++ch) {
+            uint sh = ch * 8u;
             float v = w0 * float((c0 >> sh) & 0xFFu) + w1 * float((c1 >> sh) & 0xFFu) + w2 * float((c2 >> sh) & 0xFFu);
-            shade |= uint(clamp(v, 0.0, 255.0)) << sh;
+            shade[ch] = int(clamp(v, 0.0, 255.0));
         }
     } else {
-        shade = c0;
+        shade = ivec4(int(c0 & 0xFFu), int((c0 >> 8u) & 0xFFu), int((c0 >> 16u) & 0xFFu), int(c0 >> 24u));
     }
+    Aux aux = aux_default();
+    aux.shade_a = uint(shade.a);
+    int noise = (flags & GPU_ST_NOISE) != 0u ? int(((pixel_noise(sb, x, y) & 7u) << 6u) | 0x20u) : 0;
 
     uint color;
     if ((flags & GPU_ST_TEXTURED) != 0u) {
@@ -343,48 +439,60 @@ void draw_triangle(uint pb, uint sb, uint x, uint y, inout uint c, inout float z
         uint tile0 = (D[sb + 1u] >> 4u) & 7u;
         uint tile1 = (tile0 + 1u) & 7u;
         int lod_frac = 0;
+        // How the barycentric weights change one frame buffer pixel right and down.
+        float dw0x = (y1 - y2) * inv_area, dw1x = (y2 - y0) * inv_area, dw2x = -dw0x - dw1x;
+        float iw0 = fword(pb + 6u), iw1 = fword(pb + 13u), iw2 = fword(pb + 20u);
+        float u0 = fword(pb + 7u), u1 = fword(pb + 14u), u2 = fword(pb + 21u);
+        float v0 = fword(pb + 8u), v1 = fword(pb + 15u), v2 = fword(pb + 22u);
+        float diw_dx = dw0x * iw0 + dw1x * iw1 + dw2x * iw2;
+        float duw_dx = dw0x * u0 + dw1x * u1 + dw2x * u2, dvw_dx = dw0x * v0 + dw1x * v1 + dw2x * v2;
         if ((D[sb + GPU_ST_LOD] & GPU_LOD_DOLOD) != 0u) {
-            // The texture coordinates one frame buffer pixel right and down
-            // (raster::triangle()).
-            float dw0x = (y1 - y2) * inv_area, dw1x = (y2 - y0) * inv_area, dw2x = -dw0x - dw1x;
             float dw0y = (x2 - x1) * inv_area, dw1y = (x0 - x2) * inv_area, dw2y = -dw0y - dw1y;
-            float iw0 = fword(pb + 6u), iw1 = fword(pb + 13u), iw2 = fword(pb + 20u);
-            float u0 = fword(pb + 7u), u1 = fword(pb + 14u), u2 = fword(pb + 21u);
-            float v0 = fword(pb + 8u), v1 = fword(pb + 15u), v2 = fword(pb + 22u);
-            float iwx = iw + (dw0x * iw0 + dw1x * iw1 + dw2x * iw2), iwy = iw + (dw0y * iw0 + dw1y * iw1 + dw2y * iw2);
+            float iwx = iw + diw_dx, iwy = iw + (dw0y * iw0 + dw1y * iw1 + dw2y * iw2);
             float rx = iwx != 0.0 ? 1.0 / iwx : 1.0, ry = iwy != 0.0 ? 1.0 / iwy : 1.0;
-            float delta = max(max(abs((uw + (dw0x * u0 + dw1x * u1 + dw2x * u2)) * rx - u),
-                                  abs((vw + (dw0x * v0 + dw1x * v1 + dw2x * v2)) * rx - v)),
+            float delta = max(max(abs((uw + duw_dx) * rx - u), abs((vw + dvw_dx) * rx - v)),
                               max(abs((uw + (dw0y * u0 + dw1y * u1 + dw2y * u2)) * ry - u),
                                   abs((vw + (dw0y * v0 + dw1y * v1 + dw2y * v2)) * ry - v)));
             lod_tiles(sb, delta, tile0, tile0, tile1, lod_frac);
         }
         if ((flags & GPU_ST_COMBINED) != 0u) {
-            uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, tile0, u, v) : 0u;
-            uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, tile1, u, v) : 0u;
-            color = combine(sb, tex, tex1, shade, lod_frac);
+            uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, tile0, u, v, false) : 0u;
+            uint tex1 = 0u;
+            if ((flags & GPU_ST_NEED_TEX1) != 0u) {
+                tex1 = sample_texture(sb, tile1, u, v, true);
+            } else if ((flags & GPU_ST_PIPE_TEX1) != 0u) {
+                // The next pixel the RDP walks.
+                float step = fword(pb + 25u) * P.inv_scale;
+                float iwn = iw + diw_dx * step;
+                float rn = iwn != 0.0 ? 1.0 / iwn : 1.0;
+                tex1 = sample_texture(sb, tile0, (uw + duw_dx * step) * rn, (vw + dvw_dx * step) * rn, false);
+            }
+            color = combine(sb, tex, tex1, shade, lod_frac, noise, aux.alpha0);
+            if ((flags & GPU_ST_TWO_CYCLE) == 0u) aux.alpha0 = -1;
         } else {
             // Texture modulated by the vertex colour.
-            uint tex = sample_texture(sb, tile0, u, v);
-            uint r = (shade & 0xFFu) * ((tex >> 16u) & 0xFFu) / 255u;
-            uint g = ((shade >> 8u) & 0xFFu) * ((tex >> 8u) & 0xFFu) / 255u;
-            uint b = ((shade >> 16u) & 0xFFu) * (tex & 0xFFu) / 255u;
-            uint a = (shade >> 24u) * (tex >> 24u) / 255u;
+            uint tex = sample_texture(sb, tile0, u, v, false);
+            uint r = uint(shade.r) * ((tex >> 16u) & 0xFFu) / 255u;
+            uint g = uint(shade.g) * ((tex >> 8u) & 0xFFu) / 255u;
+            uint b = uint(shade.b) * (tex & 0xFFu) / 255u;
+            uint a = uint(shade.a) * (tex >> 24u) / 255u;
             color = (a << 24u) | (r << 16u) | (g << 8u) | b;
         }
     } else if ((flags & GPU_ST_COMBINED) != 0u) {
-        color = combine(sb, 0xFFFFFFFFu, 0xFFFFFFFFu, shade, 0);
+        color = combine(sb, 0u, 0u, shade, 0, noise, aux.alpha0);
+        if ((flags & GPU_ST_TWO_CYCLE) == 0u) aux.alpha0 = -1;
     } else {
-        color = ((shade >> 24u) << 24u) | ((shade & 0xFFu) << 16u) | (((shade >> 8u) & 0xFFu) << 8u) | ((shade >> 16u) & 0xFFu);
+        color = (uint(shade.a) << 24u) | (uint(shade.r) << 16u) | (uint(shade.g) << 8u) | uint(shade.b);
     }
-    sink_write(sb, x, y, color, fz, shade >> 24u, c, z);
+    if ((flags & GPU_ST_ALPHA_DITHER) != 0u) aux.noise = (pixel_noise(sb, x, y) >> 8u) & 0xFFu;
+    sink_write(sb, x, y, color, fz, aux, c, z);
 }
 
 void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint c, inout float z) {
-    // Outside the scissor or behind what is there: dropped by sink_write anyway.
+    // Outside the scissor: dropped by sink_write anyway.
     if (x < D[sb + 11u] || x >= D[sb + 12u] || y < D[sb + 13u] || y >= D[sb + 14u]) return;
-    if (depth_fails(D[sb], 0.0, z)) return;
-    float cur_s = clamp(fword(pb + 4u) + float(int(x) - int(rx0)) * fword(pb + 6u), fword(pb + 9u), fword(pb + 10u));
+    float ds = fword(pb + 6u);
+    float cur_s = clamp(fword(pb + 4u) + float(int(x) - int(rx0)) * ds, fword(pb + 9u), fword(pb + 10u));
     float cur_t = clamp(fword(pb + 5u) + float(int(y) - int(ry0)) * fword(pb + 7u), fword(pb + 11u), fword(pb + 12u));
     bool flip = D[pb + 8u] != 0u;
     float ss = flip ? cur_t : cur_s;
@@ -392,15 +500,23 @@ void draw_rect(uint pb, uint sb, uint x, uint y, uint rx0, uint ry0, inout uint 
     uint flags = D[sb];
     uint lt = D[pb + 13u];
     uint t0 = lt & 15u, t1 = (lt >> 4u) & 15u;
+    Aux aux = aux_default();
+    aux.shade_a = 0u; // rectangles have no shade
     uint color;
     if ((flags & GPU_ST_COMBINED) == 0u || (flags & GPU_ST_COPY) != 0u) {
-        color = sample_texture(sb, t0, ss, st);
+        color = sample_texture(sb, t0, ss, st, false);
     } else {
-        uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, t0, ss, st) : 0u;
-        uint tex1 = (flags & GPU_ST_NEED_TEX1) != 0u ? sample_texture(sb, t1, ss, st) : 0u;
-        color = combine(sb, tex, tex1, 0xFFFFFFFFu, int(lt >> 8u));
+        uint tex = (flags & GPU_ST_NEED_TEX0) != 0u ? sample_texture(sb, t0, ss, st, false) : 0u;
+        uint tex1 = 0u;
+        if ((flags & GPU_ST_NEED_TEX1) != 0u) tex1 = sample_texture(sb, t1, ss, st, true);
+        else if ((flags & GPU_ST_PIPE_TEX1) != 0u) // the next pixel's, rightwards
+            tex1 = flip ? sample_texture(sb, t0, cur_t, cur_s + ds, false) : sample_texture(sb, t0, cur_s + ds, cur_t, false);
+        int noise = (flags & GPU_ST_NOISE) != 0u ? int(((pixel_noise(sb, x, y) & 7u) << 6u) | 0x20u) : 0;
+        color = combine(sb, tex, tex1, ivec4(0), int(lt >> 8u), noise, aux.alpha0);
+        if ((flags & GPU_ST_TWO_CYCLE) == 0u) aux.alpha0 = -1;
     }
-    sink_write(sb, x, y, color, 0.0, 255u, c, z);
+    if ((flags & GPU_ST_ALPHA_DITHER) != 0u) aux.noise = (pixel_noise(sb, x, y) >> 8u) & 0xFFu;
+    sink_write(sb, x, y, color, 0.0, aux, c, z);
 }
 
 void main() {
@@ -435,11 +551,11 @@ void main() {
         } else if (type == GPU_PRIM_FILL) {
             c = D[pb + 3u];
         } else if (type == GPU_PRIM_BLOCK) {
-            sink_write(sb, x, y, D[pb + 3u], fword(pb + 4u), 255u, c, z);
+            sink_write(sb, x, y, D[pb + 3u], fword(pb + 4u), aux_default(), c, z);
         } else if (type == GPU_PRIM_BLIT) {
             uint w = D[pb + 4u];
             uint src = D[pb + 3u] + (y / S - D[pb + 6u]) * w + (x - D[pb + 5u] * S) / S;
-            sink_write(sb, x, y, D[src], 0.0, 255u, c, z);
+            sink_write(sb, x, y, D[src], 0.0, aux_default(), c, z);
         } else if (type == GPU_PRIM_UPLOAD) {
             uint w = D[pb + 4u];
             uint e = D[pb + 3u] + ((y / S - D[pb + 6u]) * w + (x / S - D[pb + 5u])) * 2u;

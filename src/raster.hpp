@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 
 #if defined(__SSE2__) || defined(_M_X64)
 #include <emmintrin.h>
@@ -78,6 +79,10 @@ struct TexUnit {
     u32 tmem_base{0};                         // byte offset in TMEM
     u32 row_stride{0};                        // bytes per texel row
     TexCache* cache{nullptr};                 // decoded texels (high-resolution pass only)
+    // The texture coordinate unit's view of the tile (sample_texture):
+    // clamping (CLAMP, or no MASK), mirroring, masks limited to 10 bits.
+    bool hw_clamp_s{false}, hw_clamp_t{false};
+    u8 hw_mask_s{0}, hw_mask_t{0};
 
     void prepare(const Tile& t) {
         tile = t;
@@ -103,6 +108,10 @@ struct TexUnit {
         extent_t = static_cast<s32>(t.th / 4) - static_cast<s32>(t.tl / 4);
         if (extent_s <= 0) extent_s = t.mask_s ? ((1 << t.mask_s) - 1) : 1023;
         if (extent_t <= 0) extent_t = t.mask_t ? ((1 << t.mask_t) - 1) : 1023;
+        hw_mask_s = t.mask_s > 10 ? 10 : t.mask_s;
+        hw_mask_t = t.mask_t > 10 ? 10 : t.mask_t;
+        hw_clamp_s = t.clamp_s || t.mask_s == 0;
+        hw_clamp_t = t.clamp_t || t.mask_t == 0;
         tmem_base = t.tmem * 8u;
         u32 texels_per_row = static_cast<u32>(extent_s + 1);
         u32 fallback_stride;
@@ -115,6 +124,13 @@ struct TexUnit {
     }
 };
 
+// The colour combiner's inputs (rows of per-channel values), as the
+// hardware's muxes pick them.
+enum CcIn : u8 {
+    kCcComb, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcOne, kCcNoise, kCcZero, kCcKeyCenter, kCcK4, kCcKeyScale,
+    kCcCombA, kCcT0A, kCcT1A, kCcPrimA, kCcShadeA, kCcEnvA, kCcLod, kCcPrimLod, kCcK5, kCcCount
+};
+
 // Everything one draw reads from the RDP, plus the mode decoding derived
 // from it. Built when the RDP state changes, then shared by the draws that
 // follow (and copied for the high-resolution pass).
@@ -122,6 +138,11 @@ struct DrawState {
     u32 other_mode_h{0}, other_mode_l{0};
     u32 combine_w0{0}, combine_w1{0};
     u32 prim_color{0}, env_color{0}, blend_color{0}, fog_color{0};
+    // gDPSetKeyR/GB (chroma key centre and scale per channel) and
+    // gDPSetConvert's K4 and K5: combiner inputs.
+    u8 key_center[3]{}, key_scale[3]{};
+    u16 k4{0}, k5{0};
+    u32 noise_seed{0}; // varies the combiner's NOISE input between draws
     u32 scissor_ulx{0}, scissor_uly{0}, scissor_lrx{0}, scissor_lry{0};
     u32 fb_addr{0};   // colour image address (physical)
     u32 fb_w{320};    // colour image width in pixels
@@ -138,12 +159,23 @@ struct DrawState {
     bool copy_mode{false}, two_cycle{false}, fill_or_copy{false};
     u32 tlut_type{0};          // G_MDSFT_TEXTLUT: 0 = none, 2 = RGBA16, 3 = IA16
     bool point_sample{true};   // G_TF_POINT, or COPY mode (never filters)
+    bool mid_texel{false};     // G_TF_AVERAGE: exactly between four texels, their average
+    bool bilerp0{true}, bilerp1{true}; // G_MDSFT_TEXTCONV: TEXEL0 / TEXEL1 filtered (else converted)
     // Whether the combiner can read TEXEL0 / TEXEL1 at all (conservative).
     bool need_tex0{true}, need_tex1{true};
     u8 cc_a0{0}, cc_b0{0}, cc_c0{0}, cc_d0{0}, ac_a0{0}, ac_b0{0}, ac_c0{0}, ac_d0{0};
     u8 cc_a1{0}, cc_b1{0}, cc_c1{0}, cc_d1{0}, ac_a1{0}, ac_b1{0}, ac_c1{0}, ac_d1{0};
     f32 prim_r{0}, prim_g{0}, prim_b{0}, prim_a{0};
     f32 env_r{0}, env_g{0}, env_b{0}, env_a{0};
+    // The combiner as the hardware runs it: per cycle, the row of cc_in each
+    // of A, B, C, D reads, per channel (r, g, b, a). 1-cycle mode runs the
+    // second cycle's settings.
+    u8 cc_sel[2][4][4]{};
+    s32 cc_const[kCcCount][4]{}; // the rows that don't change per pixel
+    // 1-cycle mode: TEXEL1 is the next pixel's TEXEL0 (the texture unit is a
+    // pixel ahead), which a combiner can still read.
+    bool pipelined_tex1{false};
+    bool uses_noise{false};
     u8 bl_p{0}, bl_a{0}, bl_m{0}, bl_b{0};     // blender cycle 1 (the only one in 1-cycle mode)
     u8 bl2_p{0}, bl2_a{0}, bl2_m{0}, bl2_b{0}; // blender cycle 2
     bool blend_pass_through{true}; // an unblended pixel comes out of the blender as it went in
@@ -157,6 +189,11 @@ struct DrawState {
     bool alpha_from_cvg{false};
     bool z_compare{false}, z_update{false};
     bool z_decal{false}; // ZMODE_DEC: passes when about as deep as what is there
+    // The memory stage as the hardware has it (pixel_backend()).
+    bool aa_en{false}, image_read{false}, color_on_cvg{false}, cvg_times_alpha{false}, alpha_cvg_select{false};
+    bool alpha_test{false}, alpha_test_dither{false};
+    u8 z_mode{0};   // ZMODE: 0 opaque, 1 interpenetrating, 2 translucent, 3 decal
+    u8 cvg_mode{0}; // CVG_DST: 0 clamp, 1 wrap, 2 full, 3 save
     // Texture level of detail: G_TEXTURE's level count, gDPSetPrimColor's
     // minimum level and fraction; derived: whether LOD is worked out at all.
     u8 max_level{0}, min_level{0}, prim_lod_frac{0};
@@ -168,7 +205,10 @@ struct DrawState {
         two_cycle = cycle_type == 1;
         fill_or_copy = cycle_type == 2 || cycle_type == 3;
         tlut_type = (other_mode_h >> 14) & 0x3;
-        point_sample = ((other_mode_h >> 12) & 0x3) == 0 || copy_mode;
+        point_sample = ((other_mode_h >> 13) & 1) == 0 || copy_mode;
+        mid_texel = (other_mode_h >> 12) & 1;
+        bilerp0 = (other_mode_h >> 11) & 1;
+        bilerp1 = (other_mode_h >> 10) & 1;
 
         cc_a0 = (combine_w0 >> 20) & 0xF;
         cc_c0 = (combine_w0 >> 15) & 0x1F;
@@ -196,19 +236,67 @@ struct DrawState {
         env_b = ((env_color >> 8) & 0xFF) / 255.0f;
         env_a = (env_color & 0xFF) / 255.0f;
 
-        // Texel inputs of the first cycle. Its COMBINED inputs (colour C
-        // COMBINED_ALPHA and alpha COMBINED) read TEXEL0's alpha, see combine().
-        bool c1_t0 = cc_a0 == 1 || cc_b0 == 1 || cc_d0 == 1 || cc_c0 == 1 || cc_c0 == 7 || cc_c0 == 8 ||
-                     ac_a0 <= 1 || ac_b0 <= 1 || ac_c0 <= 1 || ac_d0 <= 1;
-        bool c1_t1 = cc_a0 == 2 || cc_b0 == 2 || cc_d0 == 2 || cc_c0 == 2 || cc_c0 == 9 ||
-                     ac_a0 == 2 || ac_b0 == 2 || ac_c0 == 2 || ac_d0 == 2;
-        // The second cycle sees the texels rotated: its TEXEL0 is TEXEL1.
-        bool c2_t1 = cc_a1 == 1 || cc_b1 == 1 || cc_d1 == 1 || cc_c1 == 1 || cc_c1 == 8 ||
-                     ac_a1 == 1 || ac_b1 == 1 || ac_c1 == 1 || ac_d1 == 1;
-        bool c2_t0 = cc_a1 == 2 || cc_b1 == 2 || cc_d1 == 2 || cc_c1 == 2 || cc_c1 == 9 ||
-                     ac_a1 == 2 || ac_b1 == 2 || ac_c1 == 2 || ac_d1 == 2;
-        need_tex0 = c1_t0 || (two_cycle && c2_t0);
-        need_tex1 = c1_t1 || (two_cycle && c2_t1);
+        // Which texels each cycle reads (the second cycle sees them swapped:
+        // its TEXEL0 is TEXEL1).
+        auto reads = [](u8 a, u8 b, u8 c, u8 d, u8 aa, u8 ab, u8 ac, u8 ad, u8 t) {
+            return a == t || b == t || c == t || d == t || c == t + 7 || aa == t || ab == t || ac == t || ad == t;
+        };
+        const bool c0_t0 = reads(cc_a0, cc_b0, cc_c0, cc_d0, ac_a0, ac_b0, ac_c0, ac_d0, 1);
+        const bool c0_t1 = reads(cc_a0, cc_b0, cc_c0, cc_d0, ac_a0, ac_b0, ac_c0, ac_d0, 2);
+        const bool c1_t0 = reads(cc_a1, cc_b1, cc_c1, cc_d1, ac_a1, ac_b1, ac_c1, ac_d1, 1);
+        const bool c1_t1 = reads(cc_a1, cc_b1, cc_c1, cc_d1, ac_a1, ac_b1, ac_c1, ac_d1, 2);
+        if (two_cycle) {
+            need_tex0 = c0_t0 || c1_t1;
+            need_tex1 = c0_t1 || c1_t0;
+            pipelined_tex1 = false;
+        } else {
+            // TEXEL1 comes from the draw's own tile too, one pixel on.
+            need_tex0 = c1_t0 || c1_t1;
+            need_tex1 = false;
+            pipelined_tex1 = c1_t1;
+        }
+        {
+            static constexpr u8 kRgbA[16] = {kCcComb, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcOne, kCcNoise,
+                                             kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero};
+            static constexpr u8 kRgbB[16] = {kCcComb, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcKeyCenter, kCcK4,
+                                             kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero};
+            static constexpr u8 kRgbC[32] = {kCcComb, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcKeyScale, kCcCombA,
+                                             kCcT0A, kCcT1A, kCcPrimA, kCcShadeA, kCcEnvA, kCcLod, kCcPrimLod, kCcK5,
+                                             kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero,
+                                             kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero, kCcZero};
+            static constexpr u8 kRgbD[8] = {kCcComb, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcOne, kCcZero};
+            static constexpr u8 kAlphaAbd[8] = {kCcComb, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcOne, kCcZero};
+            static constexpr u8 kAlphaC[8] = {kCcLod, kCcT0, kCcT1, kCcPrim, kCcShade, kCcEnv, kCcPrimLod, kCcZero};
+            const u8 m[2][8] = {{cc_a0, cc_b0, cc_c0, cc_d0, ac_a0, ac_b0, ac_c0, ac_d0},
+                                {cc_a1, cc_b1, cc_c1, cc_d1, ac_a1, ac_b1, ac_c1, ac_d1}};
+            uses_noise = false;
+            for (int c = 0; c < 2; ++c) {
+                for (int i = 0; i < 3; ++i) {
+                    cc_sel[c][0][i] = kRgbA[m[c][0] & 15];
+                    cc_sel[c][1][i] = kRgbB[m[c][1] & 15];
+                    cc_sel[c][2][i] = kRgbC[m[c][2] & 31];
+                    cc_sel[c][3][i] = kRgbD[m[c][3] & 7];
+                }
+                cc_sel[c][0][3] = kAlphaAbd[m[c][4] & 7];
+                cc_sel[c][1][3] = kAlphaAbd[m[c][5] & 7];
+                cc_sel[c][2][3] = kAlphaC[m[c][6] & 7];
+                cc_sel[c][3][3] = kAlphaAbd[m[c][7] & 7];
+                if ((c == 1 || two_cycle) && cc_sel[c][0][0] == kCcNoise) uses_noise = true;
+            }
+            for (int i = 0; i < 4; ++i) {
+                cc_const[kCcPrim][i] = static_cast<s32>((prim_color >> (24 - 8 * i)) & 0xFF);
+                cc_const[kCcEnv][i] = static_cast<s32>((env_color >> (24 - 8 * i)) & 0xFF);
+                cc_const[kCcOne][i] = 0x100;
+                cc_const[kCcZero][i] = 0;
+                cc_const[kCcKeyCenter][i] = i < 3 ? key_center[i] : 0;
+                cc_const[kCcK4][i] = k4 & 0x1FF;
+                cc_const[kCcKeyScale][i] = i < 3 ? key_scale[i] : 0;
+                cc_const[kCcPrimA][i] = static_cast<s32>(prim_color & 0xFF);
+                cc_const[kCcEnvA][i] = static_cast<s32>(env_color & 0xFF);
+                cc_const[kCcPrimLod][i] = prim_lod_frac;
+                cc_const[kCcK5][i] = k5 & 0x1FF;
+            }
+        }
 
         // G_MDSFT_BLENDER=16: the first cycle's P/A/M/B at bits 30/26/22/18,
         // the second cycle's (2-cycle mode) at 28/24/20/16.
@@ -235,6 +323,15 @@ struct DrawState {
         alpha_threshold = copy_mode ? 1 : (blend_color & 0xFF);
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
         alpha_from_cvg = (other_mode_l & 0x3000) == 0x2000;
+        aa_en = (other_mode_l >> 3) & 1;
+        image_read = (other_mode_l >> 6) & 1;
+        color_on_cvg = (other_mode_l >> 7) & 1;
+        cvg_mode = (other_mode_l >> 8) & 3;
+        z_mode = (other_mode_l >> 10) & 3;
+        cvg_times_alpha = (other_mode_l >> 12) & 1;
+        alpha_cvg_select = (other_mode_l >> 13) & 1;
+        alpha_test = other_mode_l & 1;
+        alpha_test_dither = (other_mode_l >> 1) & 1;
         z_compare = (other_mode_l & 0x10) != 0;
         z_update = (other_mode_l & 0x20) != 0;
         z_decal = ((other_mode_l >> 10) & 3) == 3;
@@ -302,10 +399,11 @@ inline bool depth_fails(const DrawState& st, f32 z, f32 stored) {
     return z > stored;
 }
 
-// 5-bit colour channel -> 8 bits, rounded: (c * 255 + 15) / 31.
+// 5-bit texel channel -> 8 bits, as the texture unit expands it: the upper
+// bits repeated below.
 inline constexpr std::array<u8, 32> kFiveToEight = [] {
     std::array<u8, 32> t{};
-    for (int c = 0; c < 32; ++c) t[c] = static_cast<u8>((c * 255 + 15) / 31);
+    for (int c = 0; c < 32; ++c) t[c] = static_cast<u8>((c << 3) | (c >> 2));
     return t;
 }();
 
@@ -450,10 +548,12 @@ inline u32 fetch_texel(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt, 
     return fetch_wrapped(tu, tmem, tmem_dxt, tlut_type, wrap_s(tu, is), wrap_t(tu, it));
 }
 
-// Size of the table a TexCache needs for a tile: every value wrap_s/wrap_t can return.
+// Size of the table a TexCache needs for a tile: the texel coordinates
+// sample_texture() reads without masking (the clamped range plus the next
+// texel), or the mask's period. Anything else is fetched from TMEM.
 inline void tex_cache_dims(const TexUnit& tu, u32& w, u32& h) {
-    w = tu.tile.mask_s ? (1u << tu.tile.mask_s) : static_cast<u32>(tu.extent_s) + 1;
-    h = tu.tile.mask_t ? (1u << tu.tile.mask_t) : static_cast<u32>(tu.extent_t) + 1;
+    w = tu.hw_mask_s ? (1u << tu.hw_mask_s) : static_cast<u32>(((tu.tile.sh >> 2) - (tu.tile.sl >> 2)) & 0x3FF) + 2;
+    h = tu.hw_mask_t ? (1u << tu.hw_mask_t) : static_cast<u32>(((tu.tile.th >> 2) - (tu.tile.tl >> 2)) & 0x3FF) + 2;
 }
 
 // Identifies what a tile's TexCache holds, together with the TMEM contents
@@ -466,45 +566,6 @@ inline void tex_cache_key(const TexUnit& tu, u32 tlut_type, u64& a, u64& b) {
         static_cast<u64>(t.clamp_t) << 18 | static_cast<u64>(t.mirror_s) << 19 | static_cast<u64>(t.mirror_t) << 20 |
         static_cast<u64>(tlut_type) << 21 | static_cast<u64>(tu.row_stride) << 23 | static_cast<u64>(tu.tmem_base) << 40;
     b = static_cast<u64>(static_cast<u32>(tu.extent_s)) | static_cast<u64>(static_cast<u32>(tu.extent_t)) << 32;
-}
-
-inline u8 lerp_u8(u8 a, u8 b, f32 t) {
-    return static_cast<u8>(std::clamp(a + t * (static_cast<f32>(b) - static_cast<f32>(a)), 0.0f, 255.0f));
-}
-
-// Bilinear blend of four packed ARGB texels: lerp_u8 across S on both rows,
-// then across T, per byte. The SSE2 version does the four channels in one
-// register with exactly the scalar operations (sub, mul, add, clamp, truncate
-// to an integer between the two stages), so the result is bit-identical.
-inline u32 bilerp_argb(u32 c00, u32 c10, u32 c01, u32 c11, f32 frac_s, f32 frac_t) {
-#if defined(ORBIT64_RASTER_SSE2)
-    const __m128i zero = _mm_setzero_si128();
-    auto unpack = [&](u32 c) {
-        __m128i v = _mm_cvtsi32_si128(static_cast<int>(c));
-        v = _mm_unpacklo_epi16(_mm_unpacklo_epi8(v, zero), zero);
-        return _mm_cvtepi32_ps(v);
-    };
-    const __m128 lo = _mm_setzero_ps(), hi = _mm_set1_ps(255.0f);
-    auto lerp = [&](__m128 a, __m128 b, __m128 t) {
-        __m128 v = _mm_add_ps(a, _mm_mul_ps(t, _mm_sub_ps(b, a)));
-        return _mm_cvttps_epi32(_mm_min_ps(_mm_max_ps(v, lo), hi));
-    };
-    const __m128 ts = _mm_set1_ps(frac_s);
-    const __m128 top = _mm_cvtepi32_ps(lerp(unpack(c00), unpack(c10), ts));
-    const __m128 bot = _mm_cvtepi32_ps(lerp(unpack(c01), unpack(c11), ts));
-    __m128i out = lerp(top, bot, _mm_set1_ps(frac_t));
-    out = _mm_packus_epi16(_mm_packs_epi32(out, out), zero);
-    return static_cast<u32>(_mm_cvtsi128_si32(out));
-#else
-    u32 out = 0;
-    for (int shift = 0; shift < 32; shift += 8) {
-        auto comp = [shift](u32 c) { return static_cast<u8>((c >> shift) & 0xFF); };
-        u8 top = lerp_u8(comp(c00), comp(c10), frac_s);
-        u8 bot = lerp_u8(comp(c01), comp(c11), frac_s);
-        out |= static_cast<u32>(lerp_u8(top, bot, frac_t)) << shift;
-    }
-    return out;
-#endif
 }
 
 // The tile's decoded texels, decoding them now if no thread has started to;
@@ -531,211 +592,345 @@ inline s32 floor_to_s32(f32 v) {
     return (i != INT32_MIN && v < static_cast<f32>(i)) ? i - 1 : i;
 }
 
-inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t) {
+// The texture coordinate unit, one axis: a coordinate in texels becomes
+// the RDP's s10.5 (saturated to 16 bits), is shifted (SHIFT_S/T), clamped to
+// the tile (CLAMP, or no MASK) and made relative to its upper-left corner.
+// Returns the coordinate in 1/32 texels.
+inline s32 tex_coord(f32 c, u8 shift, bool clamp, u16 lo, u16 hi) {
+    const f32 v = c * 32.0f;
+    s32 x = !(v > -32768.0f) ? -0x8000 : v >= 32767.0f ? 0x7FFF : floor_to_s32(v);
+    if (shift < 11) x >>= shift;
+    else x = static_cast<s32>(static_cast<u32>(x) << (32 - shift)) >> 16;
+    const s32 l = lo, h = hi;
+    if (clamp) {
+        if ((x >> 3) >= h) return (((h >> 2) - (l >> 2)) & 0x3FF) << 5;
+        return std::max(x - (l << 3), 0);
+    }
+    return x - (l << 3);
+}
+// MASK_S/T (with MIRROR) on a texel coordinate.
+inline s32 tex_mask(s32 c, u8 mask, bool mirror) {
+    if (mask == 0) return c;
+    const s32 m = 1 << mask;
+    if (mirror) c ^= std::max((c & m) - 1, 0);
+    return c & (m - 1);
+}
+
+// The texel at masked coordinates (s, t): from the tile's decoded table
+// when it has one and covers them, else from TMEM.
+inline u32 texel_at(const DrawState& st, const TexUnit& tu, const u32* table, s32 s, s32 t) {
+    if (table && static_cast<u32>(s) < tu.cache->w && static_cast<u32>(t) < tu.cache->h)
+        return table[static_cast<u32>(t) * tu.cache->w + static_cast<u32>(s)];
+    return fetch_wrapped(tu, st.tmem, st.tmem_dxt, st.tlut_type, s, t);
+}
+
+// The texture unit: TEXEL0 (or TEXEL1: `second`) of tile `tile_idx` at
+// (s, t) in texels, as the RDP filters it: nearest, the 3-texel triangle
+// filter (BILERP; it blends the texel with its right and lower
+// neighbours, or - past the diagonal - the lower-right one with those two)
+// or, in AVERAGE mode, a box filter exactly between four texels.
+inline u32 sample_texture(const DrawState& st, u32 tile_idx, f32 s, f32 t, bool second = false) {
     const TexUnit& tu = st.tex[tile_idx & 0x7];
-    f32 shifted_s = s * tu.shift_mul_s;
-    f32 shifted_t = t * tu.shift_mul_t;
-    shifted_s -= tu.origin_s;
-    shifted_t -= tu.origin_t;
+    const Tile& tile = tu.tile;
+    const s32 cs = tex_coord(s, tile.shift_s, tu.hw_clamp_s, tile.sl, tile.sh);
+    const s32 ct = tex_coord(t, tile.shift_t, tu.hw_clamp_t, tile.tl, tile.th);
     const u32* table = tex_table(st, tu);
+    const s32 is = cs >> 5, it = ct >> 5;
+    const s32 s0 = tex_mask(is, tu.hw_mask_s, tile.mirror_s), t0r = tex_mask(it, tu.hw_mask_t, tile.mirror_t);
+    if (st.point_sample) return texel_at(st, tu, table, s0, t0r & 0xFF);
 
-    if (st.point_sample) {
-        s32 is = floor_to_s32(shifted_s);
-        s32 it = floor_to_s32(shifted_t);
-        if (table) return table[static_cast<u32>(wrap_t(tu, it)) * tu.cache->w + static_cast<u32>(wrap_s(tu, is))];
-        return fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is, it);
+    const s32 fs = cs & 31, ft = ct & 31;
+    const s32 s1 = tex_mask(is + 1, tu.hw_mask_s, tile.mirror_s);
+    const s32 t1r = tex_mask(it + 1, tu.hw_mask_t, tile.mirror_t);
+    // Rows are 8 bits wide past the masks; the next row follows the first.
+    const s32 t0 = t0r & 0xFF, t1 = t0 + std::max(t1r - t0r, -255);
+    const bool bilerp = second ? st.bilerp1 : st.bilerp0;
+    const bool upper = fs + ft >= 32;
+    const u32 c10 = texel_at(st, tu, table, s1, t0);
+    const u32 c01 = texel_at(st, tu, table, s0, t1);
+    if (!bilerp) return upper ? texel_at(st, tu, table, s1, t1) : texel_at(st, tu, table, s0, t0);
+    if (st.mid_texel && fs == 16 && ft == 16) {
+        const u32 c00 = texel_at(st, tu, table, s0, t0), c11 = texel_at(st, tu, table, s1, t1);
+        u32 out = 0;
+        for (int sh = 0; sh < 32; sh += 8) {
+            const u32 sum = ((c00 >> sh) & 0xFF) + ((c10 >> sh) & 0xFF) + ((c01 >> sh) & 0xFF) + ((c11 >> sh) & 0xFF);
+            out |= ((sum + 2) >> 2) << sh;
+        }
+        return out;
     }
-
-    // Bilinear (G_TF_BILERP / G_TF_AVERAGE): the RDP splits the coordinate into
-    // its integer and fractional parts directly -- no half-texel bias -- and
-    // blends the 2x2 neighbourhood from there.
-    s32 is0 = floor_to_s32(shifted_s);
-    s32 it0 = floor_to_s32(shifted_t);
-    f32 frac_s = shifted_s - static_cast<f32>(is0);
-    f32 frac_t = shifted_t - static_cast<f32>(it0);
-
-    u32 c00, c10, c01, c11;
-    if (table) {
-        const u32 w = tu.cache->w;
-        const u32 s0 = static_cast<u32>(wrap_s(tu, is0)), s1 = static_cast<u32>(wrap_s(tu, is0 + 1));
-        const u32* row0 = table + static_cast<u32>(wrap_t(tu, it0)) * w;
-        const u32* row1 = table + static_cast<u32>(wrap_t(tu, it0 + 1)) * w;
-        c00 = row0[s0];
-        c10 = row0[s1];
-        c01 = row1[s0];
-        c11 = row1[s1];
-    } else {
-        c00 = fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is0,     it0);
-        c10 = fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is0 + 1, it0);
-        c01 = fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is0,     it0 + 1);
-        c11 = fetch_texel(tu, st.tmem, st.tmem_dxt, st.tlut_type, is0 + 1, it0 + 1);
+    const u32 base = upper ? texel_at(st, tu, table, s1, t1) : texel_at(st, tu, table, s0, t0);
+    const s32 f0 = upper ? 32 - ft : fs, f1 = upper ? 32 - fs : ft;
+    u32 out = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        const s32 b = static_cast<s32>((base >> sh) & 0xFF);
+        const s32 v = (((static_cast<s32>((c10 >> sh) & 0xFF) - b) * f0 + (static_cast<s32>((c01 >> sh) & 0xFF) - b) * f1 + 0x10) >> 5) + b;
+        out |= static_cast<u32>(v & 0xFF) << sh;
     }
-
-    return bilerp_argb(c00, c10, c01, c11, frac_s, frac_t);
+    return out;
 }
 
-// Colour combiner: (A - B) * C + D per channel, once or twice (2-cycle).
-inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb, u8 sa, s32 lod_frac = 0) {
-    // Cycle-local TEXEL0/TEXEL1: on real hardware the texture unit is pipelined, so in
-    // 2-cycle mode the second combiner stage sees the texels rotated by one slot -
-    // its "TEXEL0" is the tile that was "TEXEL1" in the first stage (and vice versa).
-    // Games rely on this to combine two textures (e.g. a color texture + a separate
-    // alpha/intensity mask loaded into the next tile) across the two cycles.
-    const auto& U = kByteToUnit;
-    f32 t0r = U[(tex0 >> 16) & 0xFF], t0g = U[(tex0 >> 8) & 0xFF], t0b = U[tex0 & 0xFF], t0a = U[(tex0 >> 24) & 0xFF];
-    f32 t1r = U[(tex1 >> 16) & 0xFF], t1g = U[(tex1 >> 8) & 0xFF], t1b = U[tex1 & 0xFF], t1a = U[(tex1 >> 24) & 0xFF];
+// The combiner's arithmetic: 9-bit signed inputs (A, B and D wrap around
+// 0x80..0x17F the way the hardware's special expansion does), the product
+// rounded, not clamped until the last cycle.
+inline s32 cc_sext9(s32 v) { return static_cast<s32>(static_cast<u32>(v) << 23) >> 23; }
+inline s32 cc_expand(s32 v) { return cc_sext9(v - 0x80) + 0x80; }
+inline s32 cc_equation(s32 a, s32 b, s32 c, s32 d) {
+    const s32 p = static_cast<s32>(static_cast<u32>(cc_expand(a) - cc_expand(b)) * static_cast<u32>(cc_sext9(c)) + 0x80u);
+    return (p >> 8) + cc_expand(d);
+}
+inline s32 cc_clamp(s32 v) { return std::clamp(cc_sext9(v - 0x80) + 0x80, 0, 0xFF); }
 
-    const f32 v_sr = U[sr], v_sg = U[sg], v_sb = U[sb], v_sa = U[sa];
-    const f32 pr = st.prim_r, pg = st.prim_g, pb = st.prim_b, pa = st.prim_a;
-    const f32 er = st.env_r, eg = st.env_g, eb = st.env_b, ea = st.env_a;
-    const f32 lf = static_cast<f32>(lod_frac) / 255.0f, plf = U[st.prim_lod_frac];
+// The combiner's NOISE input for a pixel (the hardware's comes from a free
+// running generator; any per-pixel pseudo-random value looks the same).
+inline u32 pixel_noise(const DrawState& st, u32 x, u32 y) {
+    u32 h = x * 0x9E3779B1u ^ (y + st.noise_seed) * 0x85EBCA77u;
+    h ^= h >> 15;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12;
+    return h;
+}
+inline s32 cc_noise(const DrawState& st, u32 x, u32 y) { return static_cast<s32>(((pixel_noise(st, x, y) & 7) << 6) | 0x20); }
 
-    // A, B and D inputs (B's 6 is CENTER, D's 7 is ZERO; neither is modelled apart from 1.0/0.0).
-    auto get_color_abd = [&](u32 src, f32 comb_r, f32 comb_g, f32 comb_b, f32& out_r, f32& out_g, f32& out_b) {
-        switch (src) {
-            case 0: out_r = comb_r; out_g = comb_g; out_b = comb_b; break; // COMBINED
-            case 1: out_r = t0r; out_g = t0g; out_b = t0b; break; // TEXEL0
-            case 2: out_r = t1r; out_g = t1g; out_b = t1b; break; // TEXEL1
-            case 3: out_r = pr; out_g = pg; out_b = pb; break; // PRIMITIVE
-            case 4: out_r = v_sr; out_g = v_sg; out_b = v_sb; break; // SHADE
-            case 5: out_r = er; out_g = eg; out_b = eb; break; // ENVIRONMENT
-            case 6: out_r = out_g = out_b = 1.0f; break; // 1.0
-            default: out_r = out_g = out_b = 0.0f; break; // 0.0
-        }
+// Colour combiner: (A - B) * C + D per channel, once or twice (2-cycle), in
+// the hardware's integer arithmetic. tex0/tex1 are the pixel's TEXEL0 and
+// TEXEL1 (in 1-cycle mode TEXEL1 is the next pixel's TEXEL0, see
+// DrawState::pipelined_tex1). Returns the clamped result (ARGB); `alpha0`
+// gets the first cycle's clamped alpha in 2-cycle mode (the alpha compare's).
+inline u32 combine(const DrawState& st, u32 tex0, u32 tex1, u8 sr, u8 sg, u8 sb, u8 sa, s32 lod_frac = 0,
+                   s32 noise = 0, u8* alpha0 = nullptr) {
+    // The rows that change per pixel; the others point into the draw state.
+    s32 comb[4] = {0, 0, 0, 0}, comb_a[4] = {0, 0, 0, 0};
+    s32 t0[4], t1[4], t0a[4], t1a[4];
+    const s32 shade[4] = {sr, sg, sb, sa}, shade_a[4] = {sa, sa, sa, sa};
+    const s32 nz[4] = {noise, noise, noise, noise}, lod[4] = {lod_frac, lod_frac, lod_frac, lod_frac};
+    const s32* row[kCcCount];
+    for (int i = 0; i < kCcCount; ++i) row[i] = st.cc_const[i];
+    row[kCcComb] = comb;
+    row[kCcCombA] = comb_a;
+    row[kCcT0] = t0;
+    row[kCcT1] = t1;
+    row[kCcT0A] = t0a;
+    row[kCcT1A] = t1a;
+    row[kCcShade] = shade;
+    row[kCcShadeA] = shade_a;
+    row[kCcNoise] = nz;
+    row[kCcLod] = lod;
+    auto set_texel = [](s32* c, s32* a, u32 t) {
+        c[0] = (t >> 16) & 0xFF;
+        c[1] = (t >> 8) & 0xFF;
+        c[2] = t & 0xFF;
+        c[3] = static_cast<s32>(t >> 24);
+        a[0] = a[1] = a[2] = a[3] = c[3];
     };
-
-    auto get_color_c = [&](u32 src, f32 comb_r, f32 comb_g, f32 comb_b, f32 comb_a, f32& out_r, f32& out_g, f32& out_b) {
-        switch (src) {
-            case 0: out_r = comb_r; out_g = comb_g; out_b = comb_b; break; // COMBINED
-            case 1: out_r = t0r; out_g = t0g; out_b = t0b; break; // TEXEL0
-            case 2: out_r = t1r; out_g = t1g; out_b = t1b; break; // TEXEL1
-            case 3: out_r = pr; out_g = pg; out_b = pb; break; // PRIMITIVE
-            case 4: out_r = v_sr; out_g = v_sg; out_b = v_sb; break; // SHADE
-            case 5: out_r = er; out_g = eg; out_b = eb; break; // ENVIRONMENT
-            case 6: out_r = out_g = out_b = 1.0f; break; // SCALE
-            case 7: out_r = out_g = out_b = comb_a; break; // COMBINED_ALPHA
-            case 8: out_r = out_g = out_b = t0a; break; // TEXEL0_ALPHA
-            case 9: out_r = out_g = out_b = t1a; break; // TEXEL1_ALPHA
-            case 10: out_r = out_g = out_b = pa; break; // PRIMITIVE_ALPHA
-            case 11: out_r = out_g = out_b = v_sa; break; // SHADE_ALPHA
-            case 12: out_r = out_g = out_b = ea; break; // ENV_ALPHA
-            case 13: out_r = out_g = out_b = lf; break; // LOD_FRACTION
-            case 14: out_r = out_g = out_b = plf; break; // PRIM_LOD_FRAC
-            default: out_r = out_g = out_b = 0.0f; break; // 0.0 (including 31)
-        }
+    auto cycle = [&](int c, s32 out[4]) {
+        const u8 (*sel)[4] = st.cc_sel[c];
+        for (int i = 0; i < 4; ++i)
+            out[i] = cc_equation(row[sel[0][i]][i], row[sel[1][i]][i], row[sel[2][i]][i], row[sel[3][i]][i]);
     };
-
-    auto get_alpha_abd = [&](u32 src, f32 comb_a, bool is_c_slot = false) -> f32 {
-        switch (src) {
-            case 0: return is_c_slot ? lf : comb_a; // C slot: LOD_FRACTION; A/B/D: COMBINED
-            case 1: return t0a;  // TEXEL0
-            case 2: return t1a;  // TEXEL1
-            case 3: return pa;   // PRIMITIVE
-            case 4: return v_sa; // SHADE
-            case 5: return ea;   // ENVIRONMENT
-            case 6: return is_c_slot ? plf : 1.0f; // C slot: PRIM_LOD_FRAC; A/B/D: 1.0
-            case 7: // 7 is ZERO (G_ACMUX_0 = 7)
-            default: return 0.0f;
-        }
-    };
-
-    // The first cycle has no COMBINED input yet: its COMBINED colour is 0 and
-    // its COMBINED alpha is TEXEL0's.
-    f32 A_r, A_g, A_b; get_color_abd(st.cc_a0, 0.0f, 0.0f, 0.0f, A_r, A_g, A_b);
-    f32 B_r, B_g, B_b; get_color_abd(st.cc_b0, 0.0f, 0.0f, 0.0f, B_r, B_g, B_b);
-    f32 C_r, C_g, C_b; get_color_c(st.cc_c0, 0.0f, 0.0f, 0.0f, t0a, C_r, C_g, C_b);
-    f32 D_r, D_g, D_b; get_color_abd(st.cc_d0, 0.0f, 0.0f, 0.0f, D_r, D_g, D_b);
-
-    f32 Aa = get_alpha_abd(st.ac_a0, t0a);
-    f32 Ab = get_alpha_abd(st.ac_b0, t0a);
-    f32 Ac = get_alpha_abd(st.ac_c0, t0a, true);
-    f32 Ad = get_alpha_abd(st.ac_d0, t0a);
-
-    f32 res_r = std::clamp((A_r - B_r) * C_r + D_r, 0.0f, 1.0f);
-    f32 res_g = std::clamp((A_g - B_g) * C_g + D_g, 0.0f, 1.0f);
-    f32 res_b = std::clamp((A_b - B_b) * C_b + D_b, 0.0f, 1.0f);
-    f32 res_a = std::clamp((Aa - Ab) * Ac + Ad, 0.0f, 1.0f);
-
+    set_texel(t0, t0a, tex0);
+    set_texel(t1, t1a, tex1);
+    s32 out[4];
     if (st.two_cycle) {
-        f32 c0_r = res_r, c0_g = res_g, c0_b = res_b, c0_a = res_a;
-
-        // Rotate texel slots for the second cycle (see comment above).
-        std::swap(t0r, t1r); std::swap(t0g, t1g); std::swap(t0b, t1b); std::swap(t0a, t1a);
-
-        f32 A1_r, A1_g, A1_b; get_color_abd(st.cc_a1, c0_r, c0_g, c0_b, A1_r, A1_g, A1_b);
-        f32 B1_r, B1_g, B1_b; get_color_abd(st.cc_b1, c0_r, c0_g, c0_b, B1_r, B1_g, B1_b);
-        f32 C1_r, C1_g, C1_b; get_color_c(st.cc_c1, c0_r, c0_g, c0_b, c0_a, C1_r, C1_g, C1_b);
-        f32 D1_r, D1_g, D1_b; get_color_abd(st.cc_d1, c0_r, c0_g, c0_b, D1_r, D1_g, D1_b);
-
-        f32 a_Aa1 = get_alpha_abd(st.ac_a1, c0_a);
-        f32 a_Ab1 = get_alpha_abd(st.ac_b1, c0_a);
-        f32 a_Ac1 = get_alpha_abd(st.ac_c1, c0_a, true);
-        f32 a_Ad1 = get_alpha_abd(st.ac_d1, c0_a);
-
-        res_r = std::clamp((A1_r - B1_r) * C1_r + D1_r, 0.0f, 1.0f);
-        res_g = std::clamp((A1_g - B1_g) * C1_g + D1_g, 0.0f, 1.0f);
-        res_b = std::clamp((A1_b - B1_b) * C1_b + D1_b, 0.0f, 1.0f);
-        res_a = std::clamp((a_Aa1 - a_Ab1) * a_Ac1 + a_Ad1, 0.0f, 1.0f);
+        s32 c0[4];
+        cycle(0, c0);
+        if (alpha0) *alpha0 = static_cast<u8>(cc_clamp(c0[3]));
+        // The second cycle sees the texels swapped (the texture unit's pipelining).
+        row[kCcT0] = t1;
+        row[kCcT1] = t0;
+        row[kCcT0A] = t1a;
+        row[kCcT1A] = t0a;
+        for (int i = 0; i < 4; ++i) {
+            comb[i] = c0[i];
+            comb_a[i] = c0[3];
+        }
+        cycle(1, out);
+    } else {
+        cycle(1, out);
     }
-
-    u8 out_r = static_cast<u8>(res_r * 255.0f);
-    u8 out_g = static_cast<u8>(res_g * 255.0f);
-    u8 out_b = static_cast<u8>(res_b * 255.0f);
-    u8 out_a = static_cast<u8>(res_a * 255.0f);
-
-    return (static_cast<u32>(out_a) << 24) |
-           (static_cast<u32>(out_r) << 16) |
-           (static_cast<u32>(out_g) << 8)  |
-            static_cast<u32>(out_b);
+    return (static_cast<u32>(cc_clamp(out[3])) << 24) | (static_cast<u32>(cc_clamp(out[0])) << 16) |
+           (static_cast<u32>(cc_clamp(out[1])) << 8) | static_cast<u32>(cc_clamp(out[2]));
 }
 
-// The RDP blender. `in` is the combiner's output (its alpha is A_IN),
-// shade_a the shade alpha (A_SHADE: the fog factor when G_FOG is on), mem
-// the frame buffer pixel. `blend` says whether this pixel is blended
-// (FORCE_BL, ZMODE_XLU, ...); a cycle that doesn't blend passes its P input
-// on. In 2-cycle mode the first cycle always blends and the second one
-// takes its result as IN.
-inline void blend_pixel(const DrawState& st, u32 in, u8 shade_a, u8 mem_r, u8 mem_g, u8 mem_b, u8 mem_a, bool blend,
-                        u8& out_r, u8& out_g, u8& out_b) {
-    const f32 a_in = static_cast<f32>((in >> 24) & 0xFF);
-    // `norm`: the cycle that blends only when asked to (not the first of 2-cycle mode).
-    auto cycle = [&](u8 p, u8 a, u8 m, u8 b, f32 ir, f32 ig, f32 ib, bool eq, bool norm, f32& r, f32& g, f32& bl) {
-        auto pick = [&](u8 sel, f32& x, f32& y, f32& z) {
-            switch (sel) {
-                case 0: x = ir; y = ig; z = ib; break; // G_BL_CLR_IN
-                case 1: x = mem_r; y = mem_g; z = mem_b; break; // G_BL_CLR_MEM
-                case 2: // G_BL_CLR_BL
-                    x = (st.blend_color >> 24) & 0xFF; y = (st.blend_color >> 16) & 0xFF; z = (st.blend_color >> 8) & 0xFF;
-                    break;
-                default: // G_BL_CLR_FOG
-                    x = (st.fog_color >> 24) & 0xFF; y = (st.fog_color >> 16) & 0xFF; z = (st.fog_color >> 8) & 0xFF;
-                    break;
+// What a pixel brings to the memory stage besides its colour.
+struct PixelAux {
+    u8 shade_a{0xFF}; // the blender's A_SHADE (shade alpha)
+    u8 cvg{8};        // how many of its 8 coverage samples the primitive covers
+    s16 alpha0{-1};   // 2-cycle mode: the first cycle's alpha, which the alpha compare sees
+    u8 noise{0};      // the dithered alpha compare's threshold
+};
+// The frame buffer pixel as the blender reads it: 8-bit channels (the upper
+// 5 bits of a 16-bit pixel) and its coverage (0..7).
+struct MemPixel {
+    s32 r{0}, g{0}, b{0};
+    s32 cvg{7};
+};
+struct PixelResult {
+    u8 r{0}, g{0}, b{0};
+    u8 cvg{7};         // coverage to store with the colour
+    bool z_write{false};
+};
+
+// The blender's divider (4-bit denominator, 11-bit numerator): a
+// non-restoring division as the hardware carries it out.
+inline const u8* blender_divider() {
+    static const std::array<u8, 0x8000> lut = [] {
+        std::array<u8, 0x8000> t{};
+        for (int i = 0; i < 0x8000; ++i) {
+            const int d = (i >> 11) & 0xF, n = i & 0x7FF, invd = ~d & 0xF;
+            int res = 0;
+            int partial = (invd + (n >> 8) + 1) & 7;
+            for (int k = 0; k < 8; ++k) {
+                const int nbit = (n >> (7 - k)) & 1;
+                const int sum = (res & (0x100 >> k)) ? invd + (partial << 1) + nbit + 1 : d + (partial << 1) + nbit;
+                partial = sum & 7;
+                if (sum & 0x10) res |= 1 << (7 - k);
             }
-        };
-        f32 pr, pg, pb;
-        pick(p, pr, pg, pb);
-        if (!eq) { r = pr; g = pg; bl = pb; return; }
-        const f32 A = a == 0 ? a_in : a == 1 ? static_cast<f32>(st.fog_color & 0xFF) : a == 2 ? static_cast<f32>(shade_a) : 0.0f;
-        const f32 B = b == 0 ? 255.0f - A : b == 1 ? static_cast<f32>(mem_a) : b == 2 ? 255.0f : 0.0f;
-        f32 mr, mg, mb;
-        pick(m, mr, mg, mb);
-        // Without FORCE_BL the blender normalises by A + B (coverage blending).
-        // Whole numbers between the cycles, as the hardware keeps 8 bits.
-        const f32 div = (st.force_blend || !norm) ? 255.0f : std::max(A + B, 1.0f);
-        r = std::floor(std::clamp((pr * A + mr * B) / div, 0.0f, 255.0f));
-        g = std::floor(std::clamp((pg * A + mg * B) / div, 0.0f, 255.0f));
-        bl = std::floor(std::clamp((pb * A + mb * B) / div, 0.0f, 255.0f));
-    };
-    f32 r = static_cast<f32>((in >> 16) & 0xFF), g = static_cast<f32>((in >> 8) & 0xFF), b = static_cast<f32>(in & 0xFF);
-    if (st.two_cycle) {
-        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, true, false, r, g, b);
-        cycle(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b, r, g, b, blend, true, r, g, b);
-    } else {
-        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, r, g, b, blend, true, r, g, b);
+            t[i] = static_cast<u8>(res);
+        }
+        return t;
+    }();
+    return lut.data();
+}
+
+// Depth slack of the tests that allow for the primitives' depth slopes
+// (nearer/farther), in the units of Vertex::sz (1023 = the viewport's range).
+constexpr f32 kDepthSlack = 1.0f / (1023.0f * 32.0f);
+// What the depth buffer holds where nothing has been drawn since it was cleared.
+constexpr f32 kDepthCleared = 1e30f;
+
+// The memory stage of a 1- or 2-cycle pixel (not FILL; COPY writes the
+// texel as it is): coverage and alpha, the alpha compare, the depth test,
+// the blender (both cycles) and the coverage stored with the colour, in the
+// hardware's integer arithmetic. `color` is the combiner's output (ARGB),
+// `mem_z` the depth buffer's value. False when the pixel is not written.
+inline bool pixel_backend(const DrawState& st, u32 color, const PixelAux& aux, f32 z, f32 mem_z, const MemPixel& mem,
+                          PixelResult& out) {
+    const s32 in_r = (color >> 16) & 0xFF, in_g = (color >> 8) & 0xFF, in_b = color & 0xFF, in_a = color >> 24;
+    if (st.copy_mode) {
+        if (st.alpha_test && in_a == 0) return false;
+        out.r = static_cast<u8>(in_r);
+        out.g = static_cast<u8>(in_g);
+        out.b = static_cast<u8>(in_b);
+        out.cvg = in_a ? 7 : 0;
+        out.z_write = false;
+        return true;
     }
-    out_r = static_cast<u8>(r);
-    out_g = static_cast<u8>(g);
-    out_b = static_cast<u8>(b);
+    // Coverage and alpha
+    s32 cvg = aux.cvg;
+    const s32 expanded = in_a + ((in_a + 1) >> 8);
+    s32 modulated;
+    if (st.cvg_times_alpha) {
+        modulated = (expanded * cvg + 4) >> 3;
+        cvg = modulated >> 5;
+    } else {
+        modulated = cvg << 5;
+    }
+    const s32 alpha = std::clamp(st.alpha_cvg_select ? modulated : expanded, 0, 0xFF);
+    if (st.aa_en && cvg == 0) return false;
+    if (st.alpha_test) {
+        s32 ref = alpha;
+        if (st.two_cycle && aux.alpha0 >= 0) {
+            s32 ea = aux.alpha0 + ((aux.alpha0 + 1) >> 8);
+            if (st.alpha_cvg_select) ea = st.cvg_times_alpha ? (ea * aux.cvg + 4) >> 3 : aux.cvg << 5;
+            ref = std::clamp(ea, 0, 0xFF);
+        }
+        const s32 threshold = st.alpha_test_dither ? aux.noise : static_cast<s32>(st.blend_color & 0xFF);
+        if (ref < threshold) return false;
+    }
+
+    // Depth
+    const s32 mem_cvg = st.image_read ? mem.cvg : 7;
+    const bool overflow = cvg + mem_cvg >= 8;
+    bool blend_en;
+    if (st.z_compare) {
+        const bool max_z = mem_z >= kDepthCleared;
+        const bool front = z < mem_z;
+        const f32 slack = st.z_mode == 3 ? kDecalDepth : kDepthSlack;
+        const bool farther = z + slack >= mem_z, nearer = z - slack <= mem_z;
+        blend_en = st.force_blend || (!overflow && st.aa_en && farther);
+        bool pass;
+        switch (st.z_mode) {
+            case 0: case 1: pass = max_z || (overflow ? front : nearer); break;
+            case 2: pass = front || max_z; break;
+            default: pass = farther && nearer && !max_z; break;
+        }
+        if (!pass) return false;
+    } else {
+        blend_en = st.force_blend || (!overflow && st.aa_en);
+    }
+
+    // Blender
+    s32 px[4] = {in_r, in_g, in_b, alpha};
+    const s32 memc[4] = {mem.r, mem.g, mem.b, mem_cvg << 5};
+    const s32 fog[4] = {static_cast<s32>(st.fog_color >> 24), static_cast<s32>((st.fog_color >> 16) & 0xFF),
+                        static_cast<s32>((st.fog_color >> 8) & 0xFF), static_cast<s32>(st.fog_color & 0xFF)};
+    const s32 blc[4] = {static_cast<s32>(st.blend_color >> 24), static_cast<s32>((st.blend_color >> 16) & 0xFF),
+                        static_cast<s32>((st.blend_color >> 8) & 0xFF), static_cast<s32>(st.blend_color & 0xFF)};
+    auto pick = [&](u8 sel) -> const s32* { return sel == 0 ? px : sel == 1 ? memc : sel == 2 ? blc : fog; };
+    auto cycle = [&](u8 p, u8 a, u8 m, u8 b, bool final_cycle, s32 res[3]) {
+        const s32* src1 = pick(m);
+        if (final_cycle && st.color_on_cvg && !overflow) {
+            for (int i = 0; i < 3; ++i) res[i] = src1[i];
+            return;
+        }
+        const s32* src0 = pick(p);
+        if (final_cycle && (!blend_en || (a == 0 && b == 0 && px[3] == 0xFF))) {
+            for (int i = 0; i < 3; ++i) res[i] = src0[i];
+            return;
+        }
+        s32 a0 = a == 0 ? px[3] : a == 1 ? fog[3] : a == 2 ? aux.shade_a : 0;
+        s32 a1 = b == 0 ? (~a0 & 0xFF) : b == 1 ? memc[3] : b == 2 ? 0xFF : 0;
+        a0 >>= 3;
+        a1 >>= 3;
+        if (b == 1) {
+            a0 &= 0x3C;
+            a1 |= 3;
+        }
+        if (!final_cycle || st.force_blend) {
+            for (int i = 0; i < 3; ++i) res[i] = ((src0[i] * a0 + src1[i] * (a1 + 1)) >> 5) & 0xFF;
+        } else {
+            const u8* div = blender_divider();
+            const s32 sum = (a0 >> 2) + (a1 >> 2) + 1;
+            for (int i = 0; i < 3; ++i) res[i] = div[((sum << 11) | (((src0[i] * a0 + src1[i] * (a1 + 1)) >> 2) & 0x7FF)) & 0x7FFF];
+        }
+    };
+    s32 rgb[3];
+    if (st.two_cycle) {
+        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, false, rgb);
+        px[0] = rgb[0];
+        px[1] = rgb[1];
+        px[2] = rgb[2];
+        cycle(st.bl2_p, st.bl2_a, st.bl2_m, st.bl2_b, true, rgb);
+    } else {
+        cycle(st.bl_p, st.bl_a, st.bl_m, st.bl_b, true, rgb);
+    }
+    out.r = static_cast<u8>(rgb[0]);
+    out.g = static_cast<u8>(rgb[1]);
+    out.b = static_cast<u8>(rgb[2]);
+    switch (st.cvg_mode) {
+        case 0: out.cvg = static_cast<u8>(blend_en ? std::min(7, mem_cvg + cvg) : (cvg - 1) & 7); break;
+        case 1: out.cvg = static_cast<u8>((cvg + mem_cvg) & 7); break;
+        case 2: out.cvg = 7; break;
+        default: out.cvg = static_cast<u8>(mem_cvg); break;
+    }
+    out.z_write = st.z_update;
+    return true;
+}
+
+// The RDP walks each row of a triangle from its major edge (top vertex to
+// bottom vertex) towards the other two: rightwards (1) when the major edge
+// is on the left, else leftwards (-1).
+template <class V>
+inline f32 walk_direction(const V& v0, const V& v1, const V& v2) {
+    const V* t = &v0;
+    const V* m = &v1;
+    const V* b = &v2;
+    if (m->sy < t->sy) std::swap(t, m);
+    if (b->sy < m->sy) std::swap(m, b);
+    if (m->sy < t->sy) std::swap(t, m);
+    const f32 dy = b->sy - t->sy;
+    const f32 major_x = dy != 0.0f ? t->sx + (b->sx - t->sx) * (m->sy - t->sy) / dy : t->sx;
+    return m->sx >= major_x ? 1.0f : -1.0f;
 }
 
 // Signed screen-space area (twice the triangle's area); its sign is the winding.
@@ -809,18 +1004,34 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
     const f32 duw_dx = ddx(u_over_w0, u_over_w1, u_over_w2), duw_dy = ddy(u_over_w0, u_over_w1, u_over_w2);
     const f32 dvw_dx = ddx(v_over_w0, v_over_w1, v_over_w2), dvw_dy = ddy(v_over_w0, v_over_w1, v_over_w2);
     const f32 diw_dx = ddx(inv_w0, inv_w1, inv_w2), diw_dy = ddy(inv_w0, inv_w1, inv_w2);
+    const f32 walk_dir = st.pipelined_tex1 ? walk_direction(v0, v1, v2) : 1.0f;
+
+    // The RDP samples a pixel at its upper-left corner: that point decides
+    // whether the pixel is drawn, and the attributes are taken there. A
+    // corner exactly on an edge belongs to the triangle on the edge's right
+    // (or, for a horizontal edge, below it): left and top edges are
+    // inclusive, right and bottom ones exclusive.
+    const f32 sgn = area > 0.0f ? 1.0f : -1.0f;
+    auto tie = [&](f32 a, f32 b) { return a * sgn > 0.0f || (a == 0.0f && b * sgn > 0.0f); };
+    const bool tie0 = tie(v1.sy - v2.sy, v2.sx - v1.sx);
+    const bool tie1 = tie(v2.sy - v0.sy, v0.sx - v2.sx);
+    const bool tie2 = tie(v0.sy - v1.sy, v1.sx - v0.sx);
+    auto inside = [&](f32 e, bool t) { return e * sgn > 0.0f || (e == 0.0f && t); };
 
     for (int y = y_first; y <= y_last; ++y) {
         for (int x = static_cast<int>(min_x); x <= static_cast<int>(max_x); ++x) {
-            f32 px = (x + 0.5f) * inv_scale;
-            f32 py = (y + 0.5f) * inv_scale;
+            f32 px = x * inv_scale;
+            f32 py = y * inv_scale;
 
-            // Barycentric coordinates
-            f32 w0 = ((v1.sx - px) * (v2.sy - py) - (v2.sx - px) * (v1.sy - py)) * inv_area;
-            f32 w1 = ((v2.sx - px) * (v0.sy - py) - (v0.sx - px) * (v2.sy - py)) * inv_area;
+            // Edge functions (twice the areas of the sub-triangles), then barycentric coordinates.
+            const f32 e0 = (v1.sx - px) * (v2.sy - py) - (v2.sx - px) * (v1.sy - py);
+            const f32 e1 = (v2.sx - px) * (v0.sy - py) - (v0.sx - px) * (v2.sy - py);
+            const f32 e2 = area - e0 - e1;
+            f32 w0 = e0 * inv_area;
+            f32 w1 = e1 * inv_area;
             f32 w2 = 1.0f - w0 - w1;
 
-            if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+            if (inside(e0, tie0) && inside(e1, tie1) && inside(e2, tie2)) {
                 f32 z = w0 * v0.sz + w1 * v1.sz + w2 * v2.sz;
 
                 u8 r, g, b, a;
@@ -835,7 +1046,8 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     b = v0.b;
                     a = v0.a;
                 }
-                const u8 shade_a = a; // the blender's A_SHADE
+                PixelAux aux;
+                aux.shade_a = a; // the blender's A_SHADE
 
                 u32 color;
                 if (textured) {
@@ -856,8 +1068,20 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     if (combined) {
                         // A texel the combiner never reads doesn't change its output.
                         u32 tex = st.need_tex0 ? sample_texture(st, tile0, u, v) : 0;
-                        u32 tex1 = st.need_tex1 ? sample_texture(st, tile1, u, v) : 0;
-                        color = combine(st, tex, tex1, r, g, b, a, lod_frac);
+                        u32 tex1 = 0;
+                        if (st.need_tex1) {
+                            tex1 = sample_texture(st, tile1, u, v, true);
+                        } else if (st.pipelined_tex1) {
+                            // The next pixel the RDP walks (away from the major edge).
+                            const f32 step = walk_dir * inv_scale;
+                            const f32 iwn = inv_w_interp + diw_dx * step;
+                            const f32 rn = iwn != 0.0f ? 1.0f / iwn : 1.0f;
+                            tex1 = sample_texture(st, tile0, (uw + duw_dx * step) * rn, (vw + dvw_dx * step) * rn);
+                        }
+                        const s32 noise = st.uses_noise ? cc_noise(st, static_cast<u32>(x), static_cast<u32>(y)) : 0;
+                        u8 a0 = 0;
+                        color = combine(st, tex, tex1, r, g, b, a, lod_frac, noise, &a0);
+                        if (st.two_cycle) aux.alpha0 = a0;
                     } else {
                         // Modulate texture with vertex color
                         u32 tex = sample_texture(st, tile0, u, v);
@@ -874,13 +1098,17 @@ inline bool triangle(const DrawState& st, const V& v0, const V& v1, const V& v2,
                     }
                 } else {
                     if (combined) {
-                        color = combine(st, 0xFFFFFFFF, 0xFFFFFFFF, r, g, b, a);
+                        const s32 noise = st.uses_noise ? cc_noise(st, static_cast<u32>(x), static_cast<u32>(y)) : 0;
+                        u8 a0 = 0;
+                        color = combine(st, 0, 0, r, g, b, a, 0, noise, &a0);
+                        if (st.two_cycle) aux.alpha0 = a0;
                     } else {
                         color = (static_cast<u32>(a) << 24) | (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | b;
                     }
                 }
 
-                sink.write(static_cast<u32>(x), static_cast<u32>(y), color, z, shade_a);
+                if (st.alpha_test_dither) aux.noise = static_cast<u8>(pixel_noise(st, static_cast<u32>(x), static_cast<u32>(y)) >> 8);
+                sink.write(static_cast<u32>(x), static_cast<u32>(y), color, z, aux);
             }
         }
     }
@@ -919,6 +1147,7 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
     if (st.copy_mode) {
         dsdx *= 0.25f;
     }
+    const f32 dsdx_px = dsdx / static_cast<f32>(scale); // S from one (output) pixel to the next
 
     const bool combined = st.combine_set && !st.copy_mode;
     // The texture coordinates step by DSDX / DTDY per pixel: one level of
@@ -926,13 +1155,23 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
     u32 t0 = tile_idx & 7, t1 = (tile_idx + 1) & 7;
     s32 lod_frac = 0;
     if (st.dolod) lod_tiles(st, std::max(std::fabs(dsdx), std::fabs(dtdy)), tile_idx, t0, t1, lod_frac);
-    auto shade = [&](f32 cur_s, f32 cur_t) -> u32 {
+    // Rectangles have no shade: the combiner's SHADE input is 0.
+    auto shade = [&](f32 cur_s, f32 cur_t, u32 x, u32 y, PixelAux& aux) -> u32 {
+        aux.shade_a = 0;
+        if (st.alpha_test_dither) aux.noise = static_cast<u8>(pixel_noise(st, x, y) >> 8);
         f32 sample_s = flip ? cur_t : cur_s;
         f32 sample_t = flip ? cur_s : cur_t;
         if (!combined) return sample_texture(st, t0, sample_s, sample_t);
         u32 tex = st.need_tex0 ? sample_texture(st, t0, sample_s, sample_t) : 0;
-        u32 tex1 = st.need_tex1 ? sample_texture(st, t1, sample_s, sample_t) : 0;
-        return combine(st, tex, tex1, 255, 255, 255, 255, lod_frac);
+        u32 tex1 = 0;
+        if (st.need_tex1) tex1 = sample_texture(st, t1, sample_s, sample_t, true);
+        else if (st.pipelined_tex1) // the next pixel's, rightwards
+            tex1 = flip ? sample_texture(st, t0, cur_t, cur_s + dsdx_px) : sample_texture(st, t0, cur_s + dsdx_px, cur_t);
+        const s32 noise = st.uses_noise ? cc_noise(st, x, y) : 0;
+        u8 a0 = 0;
+        const u32 c = combine(st, tex, tex1, 0, 0, 0, 0, lod_frac, noise, &a0);
+        if (st.two_cycle) aux.alpha0 = a0;
+        return c;
     };
 
     if (scale == 1) {
@@ -942,7 +1181,9 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
             if (static_cast<s32>(y) >= row_begin && static_cast<s32>(y) < row_end) {
                 f32 cur_s = s;
                 for (u32 x = ulx; x < max_x; ++x) {
-                    sink.write(x, y, shade(cur_s, cur_t), 0.0f);
+                    PixelAux aux;
+                    const u32 c = shade(cur_s, cur_t, x, y, aux);
+                    sink.write(x, y, c, 0.0f, aux);
                     cur_s += dsdx;
                 }
             }
@@ -966,7 +1207,9 @@ inline void tex_rect(const DrawState& st, u32 ulx, u32 uly, u32 lrx, u32 lry, u3
         const f32 cur_t = std::clamp(t + static_cast<f32>(y - y0) * dtdy_hr, cl.t_min, cl.t_max);
         for (s32 x = x0; x < x1; ++x) {
             const f32 cur_s = std::clamp(s + static_cast<f32>(x - x0) * dsdx_hr, cl.s_min, cl.s_max);
-            sink.write(static_cast<u32>(x), static_cast<u32>(y), shade(cur_s, cur_t), 0.0f);
+            PixelAux aux;
+            const u32 c = shade(cur_s, cur_t, static_cast<u32>(x), static_cast<u32>(y), aux);
+            sink.write(static_cast<u32>(x), static_cast<u32>(y), c, 0.0f, aux);
         }
     }
 }

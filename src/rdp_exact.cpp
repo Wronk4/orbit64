@@ -934,12 +934,8 @@ void compute_lod(u32& tile0, u32& tile1, s32& lod_frac, u32 max_level, s32 min_l
 // ============================================================================
 
 bool ExactRdp::command(const u32* w, u8* rdram, size_t rdram_size) {
-    if (hs_->bits.size() != rdram_size / 2) {
-        // (Lanes all see the same size; lane 0 allocates before the others run.)
-        hs_->bits.assign(rdram_size / 2, 4);
-        hs_->word.assign(rdram_size / 2, 0);
-        hs_->watched.assign(rdram_size / 64, 0);
-    }
+    // (Lanes all see the same size; lane 0 allocates before the others run.)
+    ensure_hidden(rdram_size);
     const u32 op = (w[0] >> 24) & 0x3f;
     switch (op) {
         case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f: {

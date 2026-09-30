@@ -76,7 +76,15 @@ public:
 
     // The ninth bits (2 per RDRAM halfword; 4 = never written by the RDP).
     const std::vector<u8>& hidden() const { return hs_->bits; }
-    // For tools (trace replay): set halfword h's ninth bits as RDP-written.
+    // Allocates the ninth bits for an RDRAM of that size (all "never written").
+    void ensure_hidden(size_t rdram_size) {
+        if (hs_->bits.size() == rdram_size / 2) return;
+        hs_->bits.assign(rdram_size / 2, 4);
+        hs_->word.assign(rdram_size / 2, 0);
+        hs_->watched.assign(rdram_size / 64, 0);
+    }
+    // For tools (trace replay) and the high-level renderer: set halfword h's
+    // ninth bits as RDP-written (valid while it holds `word`).
     void force_hidden(size_t h, u8 bits, u16 word) {
         if (h < hs_->bits.size()) {
             hs_->bits[h] = bits;

@@ -39,7 +39,7 @@ inline u32 fb_pixel_to_argb(u32 raw, u32 bpp) {
         u32 r = ((raw >> 11) & 0x1F) * 255 / 31;
         u32 g = ((raw >> 6) & 0x1F) * 255 / 31;
         u32 b = ((raw >> 1) & 0x1F) * 255 / 31;
-        u32 a = (raw & 1) ? 255 : 0;
+        u32 a = (raw & 1) ? 0xE0 : 0; // full coverage, or none
         return (a << 24) | (r << 16) | (g << 8) | b;
     }
     return ((raw & 0xFF) << 24) | (raw >> 8);

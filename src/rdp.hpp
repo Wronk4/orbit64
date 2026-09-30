@@ -334,6 +334,8 @@ private:
     u32 fog_color{0};
     u32 prim_depth{0};
     u32 prim_dz{0};
+    u8 key_center_[3]{}, key_scale_[3]{}; // G_SETKEYR / G_SETKEYGB
+    u16 k4_{0}, k5_{0};                   // G_SETCONVERT
     u32 geometry_mode{0};
     bool texture_enabled{true};
     f32 texture_scale_s{1.0f};
@@ -489,7 +491,10 @@ private:
     // coverage rules; the short form uses hires_shadow_ and the global counters.
     void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size);
     void write_pixel(const DrawState& st, u32 x, u32 y, u32 color, f32 z, u8* rdram, size_t rdram_size,
-                     u32* shadow, size_t shadow_len, PixelStats& stats, u8 shade_a);
+                     u32* shadow, size_t shadow_len, PixelStats& stats, const raster::PixelAux& aux);
+    // The ninth bits of RDRAM (coverage) this renderer writes too: the
+    // bit-exact RDP's store, as the memory is the same.
+    ExactRdp* hle_hidden_{nullptr};
 
     // Pixel pipeline state (raster.hpp) for the next draw. Display list
     // commands that can change it mark it dirty; see process_display_list().

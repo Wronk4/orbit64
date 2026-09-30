@@ -31,37 +31,33 @@ struct HiResSink {
         is16 = s.fb_size == 2;
     }
 
-    void write(u32 x, u32 y, u32 c, f32 z, u8 shade_a = 255) {
+    // The colour keeps the pixel's coverage in the upper 3 bits of alpha,
+    // like a 32-bit colour image in RDRAM.
+    void write(u32 x, u32 y, u32 c, f32 z, const raster::PixelAux& aux = {}) {
         if (x >= width || y >= height) return;
         if (x < sx0 || x >= sx1 || y < sy0 || y >= sy1) return;
-        if (st.alpha_from_cvg) c |= 0xFF000000u;
-        u8 a = (c >> 24) & 0xFF;
-        if (st.alpha_compare == 1) {
-            if (a < st.alpha_threshold) return;
-        } else if (st.alpha_compare == 3) {
-            if (a == 0) return;
-        }
-        if (a == 0 && st.alpha_zero_kill) return;
         const size_t idx = static_cast<size_t>(y) * width + x;
-        if (st.z_compare && raster::depth_fails(st, z, depth[idx])) return;
-        if (st.z_update) depth[idx] = z;
-        u8 r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-        const bool blend = st.blend_enabled && a < 255;
-        if (blend || !st.blend_pass_through) {
-            u32 d = color[idx];
-            raster::blend_pixel(st, c, shade_a, (d >> 16) & 0xFF, (d >> 8) & 0xFF, d & 0xFF, (d >> 24) & 0xFF, blend, r, g, b);
-        }
+        const u32 d = color[idx];
+        raster::MemPixel mem;
+        const u32 m = is16 ? 0xF8u : 0xFFu; // the blender reads 5-bit channels' upper bits
+        mem.r = static_cast<s32>((d >> 16) & m);
+        mem.g = static_cast<s32>((d >> 8) & m);
+        mem.b = static_cast<s32>(d & m);
+        mem.cvg = static_cast<s32>(d >> 29);
+        raster::PixelResult res;
+        if (!raster::pixel_backend(st, c, aux, z, depth ? depth[idx] : raster::kDepthCleared, mem, res)) return;
+        if (res.z_write && depth) depth[idx] = z;
+        const u32 a = static_cast<u32>(res.cvg) << 29;
 #ifdef HIRES_EXACT_TEST
         // Test builds: keep exactly what RDRAM holds, so that at scale 1 the
         // composed image must match the native one bit for bit.
         if (is16) {
-            u32 p = (((r * 31 / 255) & 0x1F) << 11) | (((g * 31 / 255) & 0x1F) << 6) | (((b * 31 / 255) & 0x1F) << 1) | (a > 0 ? 1 : 0);
-            color[idx] = fb_pixel_to_argb(p, 2);
+            const u32 p = ((res.r >> 3) << 11) | ((res.g >> 3) << 6) | ((res.b >> 3) << 1) | (res.cvg >> 2);
+            color[idx] = (fb_pixel_to_argb(p, 2) & 0x00FFFFFFu) | a;
             return;
         }
 #endif
-        u32 out_a = is16 ? (a > 0 ? 255u : 0u) : a;
-        color[idx] = (out_a << 24) | (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | b;
+        color[idx] = a | (static_cast<u32>(res.r) << 16) | (static_cast<u32>(res.g) << 8) | res.b;
     }
 };
 
