@@ -3245,6 +3245,9 @@ void RDP::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v
         cull_back  = (geometry_mode & 0x00002000) != 0;
     }
 
+    // Both bits set (G_CULL_BOTH) draws normally on the real microcode, as the low-level RSP
+    // shows: Mortal Kombat 4's menu sets it and every triangle used to be culled.
+    if (cull_front && cull_back) cull_front = cull_back = false;
     if (cull_back && area >= 0.0f) { stat_cull_back++; return; }
     if (cull_front && area <= 0.0f) { stat_cull_front++; return; }
     if (std::abs(area) < 0.001f) return;
