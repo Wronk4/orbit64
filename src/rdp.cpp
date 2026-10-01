@@ -1315,7 +1315,7 @@ void RDP::emit_triangle(u32 a, u32 b, u32 c, u8* rdram, size_t rdram_size) {
             }
         }
     }
-    if (pick_frame_ >= 0 && g_current_frame == pick_frame_) debug_pick(a, b, c);
+    if (pick_frame_ == -2 || (pick_frame_ >= 0 && g_current_frame == pick_frame_)) debug_pick(a, b, c);
     clip_and_rasterize_triangle(vertex_cache[a], vertex_cache[b], vertex_cache[c], rdram, rdram_size);
 }
 
@@ -1332,8 +1332,8 @@ void RDP::debug_pick(u32 a, u32 b, u32 c) const {
     };
     const f32 e0 = edge(A, B, px, py), e1 = edge(B, C, px, py), e2 = edge(C, A, px, py);
     if (!((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0))) return;
-    std::fprintf(stderr, "PICK dl=%08x ucode=%d geom=%08x omh=%08x oml=%08x comb=%08x:%08x prim=%08x env=%08x fog=%08x fm=%d fo=%d tex=%d tile=%u\n",
-                 capture_dl_addr, static_cast<int>(current_ucode_active), geometry_mode, other_mode_h, other_mode_l,
+    std::fprintf(stderr, "PICK frame=%d dl=%08x ucode=%d geom=%08x omh=%08x oml=%08x comb=%08x:%08x prim=%08x env=%08x fog=%08x fm=%d fo=%d tex=%d tile=%u\n",
+                 g_current_frame, capture_dl_addr, static_cast<int>(current_ucode_active), geometry_mode, other_mode_h, other_mode_l,
                  combine_mode_w0, combine_mode_w1, prim_color, env_color, fog_color, fog_mul, fog_ofs, texture_enabled, active_tile);
     for (int i = 0; i < 2; ++i) {
         const Tile& t = tiles[(active_tile + i) & 7];

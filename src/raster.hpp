@@ -403,7 +403,9 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
         }
         if (offset < kTmemSize) {
             u8 val = tmem[offset];
-            if (tile.format == 2) { // CI8: full 256-entry TLUT
+            // With TLUT enabled the hardware looks every 4/8-bit texel up in the palette,
+            // whatever the tile's format field says (Madden 2000's grass is RGBA with TLUT on).
+            if (tile.format == 2 || tlut_type != 0) { // CI8: full 256-entry TLUT
                 if (tlut_type == 0) return 0xFF000000 | (val << 16) | (val << 8) | val;
                 return lookup_tlut(tmem, val, tlut_type);
             } else if (tile.format == 3) { // IA8: 4 bits intensity, 4 bits alpha
@@ -423,7 +425,7 @@ inline u32 fetch_wrapped(const TexUnit& tu, const u8* tmem, const bool* tmem_dxt
         if (offset < kTmemSize) {
             u8 byte_val = tmem[offset];
             u8 val = (is & 1) ? (byte_val & 0xF) : ((byte_val >> 4) & 0xF);
-            if (tile.format == 2) { // CI4: 16-entry sub-palette
+            if (tile.format == 2 || tlut_type != 0) { // CI4: 16-entry sub-palette
                 if (tlut_type == 0) {
                     u8 i = static_cast<u8>(val * 17);
                     return (static_cast<u32>(i) << 24) | (i << 16) | (i << 8) | i;

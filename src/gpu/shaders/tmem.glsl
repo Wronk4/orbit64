@@ -75,7 +75,7 @@ uint fetch_wrapped(uint tb, uint tm, uint tlut_type, int is, int it) {
         if ((uit & 1u) != 0u && wa < 512u && tmem_dxt(tm, wa)) off ^= 4u;
         if (off < 4096u) {
             uint val = tmem_byte(tm, off);
-            if (format == 2u) {
+            if (format == 2u || tlut_type != 0u) {
                 if (tlut_type == 0u) return 0xFF000000u | (val << 16u) | (val << 8u) | val;
                 return lookup_tlut(tm, val, tlut_type);
             } else if (format == 3u) {
@@ -90,7 +90,7 @@ uint fetch_wrapped(uint tb, uint tm, uint tlut_type, int is, int it) {
         if (off < 4096u) {
             uint byte_val = tmem_byte(tm, off);
             uint val = (uis & 1u) != 0u ? (byte_val & 0xFu) : ((byte_val >> 4u) & 0xFu);
-            if (format == 2u) {
+            if (format == 2u || tlut_type != 0u) {
                 if (tlut_type == 0u) {
                     uint i = val * 17u;
                     return ia_argb(i, i);
