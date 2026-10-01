@@ -294,6 +294,20 @@ int main(int argc, char* argv[]) {
             if (f.is_open()) {
                 f.write(reinterpret_cast<const char*>(emu.get_bus().get_rdram()), emu.get_bus().get_rdram_size());
                 std::cout << "[Main] RAM dumped to: " << dump_ram_path << " (" << emu.get_bus().get_rdram_size() << " bytes)\n";
+                // The CPU's state goes with the dump: with RDRAM it is what a hang is diagnosed from.
+                const CPU& cpu = emu.get_cpu();
+                char line[160];
+                std::snprintf(line, sizeof line, "[Main] CPU pc=%016llx status=%08x cause=%08x epc=%016llx badvaddr=%016llx\n",
+                              static_cast<unsigned long long>(cpu.get_pc()), static_cast<u32>(cpu.get_cp0(12)),
+                              static_cast<u32>(cpu.get_cp0(13)), static_cast<unsigned long long>(cpu.get_cp0(14)),
+                              static_cast<unsigned long long>(cpu.get_cp0(8)));
+                std::cout << line;
+                for (int r = 0; r < 32; r += 4) {
+                    std::snprintf(line, sizeof line, "[Main] CPU r%02d-%02d %016llx %016llx %016llx %016llx\n", r, r + 3,
+                                  static_cast<unsigned long long>(cpu.get_gpr(r)), static_cast<unsigned long long>(cpu.get_gpr(r + 1)),
+                                  static_cast<unsigned long long>(cpu.get_gpr(r + 2)), static_cast<unsigned long long>(cpu.get_gpr(r + 3)));
+                    std::cout << line;
+                }
             } else {
                 std::cerr << "[Main] Failed to dump RAM to: " << dump_ram_path << "\n";
             }
