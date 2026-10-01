@@ -122,7 +122,12 @@
   nav { margin-left: auto; display: flex; gap: 18px; font-size: 0.95rem; }
   nav a { color: var(--muted); text-decoration: none; }
   nav a:hover { color: var(--fg); }
-  @media (max-width: 640px) { nav a.opt { display: none; } }
+  @media (max-width: 640px) {
+    header.top .wrap { flex-wrap: wrap; height: auto; gap: 0 12px; padding-top: 8px; padding-bottom: 8px; }
+    .brand { font-size: 1rem; }
+    nav { margin-left: 0; width: 100%; order: 2; gap: 0; justify-content: space-between; font-size: 0.9rem; }
+    nav a { padding: 8px 6px; }
+  }
 
   .hero { padding: 64px 0 40px; display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; }
   .hero img.logo { width: 220px; height: 220px; }
