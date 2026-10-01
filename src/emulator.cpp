@@ -74,6 +74,20 @@ void Emulator::reset() {
         for (const IplTail& t : ipl_tails)
             if (t.cic == cart.get_cic_type()) std::memcpy(rdram + t.dest, rom.data() + t.begin, t.end - t.begin);
 
+        // The 6106 IPL3 leaves more than that copy in RDRAM: Cruis'n World compares
+        // four words of it (0x164, 0x1BC, 0x234, 0x2B8) and, if any differ, corrupts
+        // its variables and spins on purpose. They are not in the ROM (the IPL3 builds
+        // them while it runs); the values are the ones the game's checks expect.
+        if (cart.get_cic_type() == CICType::CIC_6106) {
+            static const struct { u32 addr, word; } kResidue6106[] = {
+                {0x164, 0x01EC6021}, {0x1BC, 0x8FBF001C}, {0x234, 0xAD130004}, {0x2B8, 0x8941680C},
+            };
+            for (const auto& r : kResidue6106) {
+                rdram[r.addr + 0] = r.word >> 24; rdram[r.addr + 1] = r.word >> 16;
+                rdram[r.addr + 2] = r.word >> 8;  rdram[r.addr + 3] = r.word;
+            }
+        }
+
         // Just before jumping to the game, the 6101/6102 IPL3 clears SP DMEM
         // and IMEM, and the 6103/6106 ones fill them with 0xFF and store
         // their osCicId (below) in the first IMEM word. Diddy Kong Racing
