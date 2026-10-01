@@ -755,6 +755,12 @@ void RDP::finish_task(MI& mi) {
     // A frozen RDP (DPC_STATUS freeze, set by e.g. Rare's scheduler while it
     // queues the next frame) doesn't run the commands yet, so "RDP done"
     // only comes once it is unfrozen; Banjo-Kazooie waits for it there.
+    // On the hardware the RDP raises it only when it runs a G_RDPFULLSYNC: a list
+    // without one (Blast Corps' render-to-texture pass) must not produce it, or the
+    // game's scheduler pops a task that is not there and its thread faults.
+    const bool full_sync = full_sync_seen_;
+    full_sync_seen_ = false;
+    if (!full_sync) return;
     if (dpc_status & (1 << 1)) dp_pending_ = true;
     else mi.raise_interrupt(MIInterrupt::DP);
 }
@@ -1828,6 +1834,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
         if (!counted_dl.empty() && counted_dl.back().depth == dl_stack.size()) counted_dl.back().left--;
         if (dl_trace_frame_ >= 0 && g_current_frame >= dl_trace_frame_ && g_current_frame < dl_trace_frame_ + dl_trace_count_)
             std::fprintf(stderr, "DL %d %08x: %08x %08x\n", g_current_frame, phys_pc, w0, w1);
+        if (opcode == 0xE9) full_sync_seen_ = true;
 
         if (is_s2dex_ucode(current_ucode) &&
             execute_s2dex_command(opcode, w0, w1, current_ucode, pc, dl_stack, rdram, rdram_size)) {

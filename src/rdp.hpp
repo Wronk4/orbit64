@@ -245,6 +245,7 @@ private:
     u32 dpc_current{0};
     u32 dpc_status{0};
     bool dp_pending_{false}; // task finished while frozen: DP interrupt on unfreeze
+    bool full_sync_seen_{false}; // the task being run had a G_RDPFULLSYNC: only that raises the DP interrupt
     u32 dpc_clock{0};
     u32 dpc_bufbusy{0};
     u32 dpc_pipebusy{0};
