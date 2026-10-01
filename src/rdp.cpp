@@ -3193,6 +3193,21 @@ void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f
     if (geometry_only_) return;
     ++tex_rect_count_;
     if (color_image_addr >= rdram_size) return;
+    if ((pick_frame_ == -2 || (pick_frame_ >= 0 && g_current_frame == pick_frame_)) &&
+        static_cast<s32>(ulx) <= pick_x_ && pick_x_ < static_cast<s32>(lrx) && static_cast<s32>(uly) <= pick_y_ && pick_y_ < static_cast<s32>(lry)) {
+        std::fprintf(stderr, "PICKRECT frame=%d rect=%u,%u-%u,%u tile=%u st=%.2f,%.2f d=%.3f,%.3f comb=%08x:%08x omh=%08x oml=%08x prim=%08x env=%08x\n",
+                     g_current_frame, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, combine_mode_w0, combine_mode_w1, other_mode_h,
+                     other_mode_l, prim_color, env_color);
+        const Tile& tl = tiles[tile_idx & 7];
+        std::fprintf(stderr, "  tile%u fmt=%u siz=%u line=%u tmem=%u pal=%u cms=%u/%u/%u/%u cmt=%u/%u/%u/%u sl=%u tl=%u sh=%u th=%u\n",
+                     tile_idx & 7, tl.format, tl.size, tl.line, tl.tmem, tl.palette, tl.clamp_s, tl.mirror_s, tl.mask_s, tl.shift_s,
+                     tl.clamp_t, tl.mirror_t, tl.mask_t, tl.shift_t, tl.sl, tl.tl, tl.sh, tl.th);
+        std::fprintf(stderr, "  tmem[0..32]:");
+        for (int i = 0; i < 32; ++i) std::fprintf(stderr, " %02x", tmem[tl.tmem * 8 + i]);
+        std::fprintf(stderr, "\n  tlut[0..16]:");
+        for (int i = 0; i < 16; ++i) std::fprintf(stderr, " %02x%02x", tmem[0x800 + 2 * i], tmem[0x800 + 2 * i + 1]);
+        std::fprintf(stderr, "\n");
+    }
     const DrawState& live = draw_state();
     HiResTarget* hr = hires_target(rdram, rdram_size);
     // Same tiles raster::tex_rect() samples.

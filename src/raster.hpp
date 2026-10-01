@@ -230,7 +230,9 @@ struct DrawState {
         force_blend = (other_mode_l & 0x4000) != 0;
         blend_enabled = (other_mode_l & 0x4800) != 0 || (other_mode_l & 0x1008) == 0x1008;
         alpha_compare = other_mode_l & 0x3;
-        alpha_threshold = blend_color & 0xFF;
+        // COPY mode ignores the blend colour: a texel passes the alpha test unless its alpha
+        // is 0 (Hydro Thunder's menu sprites rely on it; RGBA16 palette entries have 0 or 255).
+        alpha_threshold = copy_mode ? 1 : (blend_color & 0xFF);
         alpha_zero_kill = (other_mode_l & 0x7848) != 0;
         alpha_from_cvg = (other_mode_l & 0x3000) == 0x2000;
         z_compare = (other_mode_l & 0x10) != 0;
