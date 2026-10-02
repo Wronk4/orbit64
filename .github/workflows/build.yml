@@ -401,7 +401,7 @@ jobs:
             export PATH="/usr/pkg/bin:/usr/pkg/sbin:$PATH"
             /usr/sbin/pkg_add pkgin || true
             pkgin -y update || true
-            pkgin -y install cmake ninja-build pkgconf mozilla-rootcerts-openssl git || /usr/sbin/pkg_add cmake ninja-build pkgconf git
+            pkgin -y install cmake ninja-build pkgconf mozilla-rootcerts-openssl git libX11 libXext libXrandr libXcursor libXfixes libXi libxkbcommon || true
           run: |
             set -e
             export PATH="/usr/pkg/bin:/usr/pkg/sbin:$PATH"
@@ -409,7 +409,10 @@ jobs:
               -DCMAKE_BUILD_TYPE=Release \
               -DORBIT64_VENDOR_SDL3=ON \
               -DORBIT64_SDL3_STATIC=ON \
-              -DCMAKE_PREFIX_PATH=/usr/X11R7
+              -DSDL_UNIX_CONSOLE=ON \
+              -DCMAKE_PREFIX_PATH="/usr/X11R7;/usr/pkg" \
+              -DCMAKE_INCLUDE_PATH="/usr/X11R7/include;/usr/pkg/include" \
+              -DCMAKE_LIBRARY_PATH="/usr/X11R7/lib;/usr/pkg/lib"
             cmake --build out --config Release --parallel
             cmake --build out --config Release --target jit_selftest
             ./out/jit_selftest

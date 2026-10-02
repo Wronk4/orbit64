@@ -318,15 +318,11 @@ void CPU::execute(u32 instr, u64 cur_pc) {
                     break;
                 }
                 case 0x1C: { // DMULT
-                    __int128 res = static_cast<__int128>(static_cast<s64>(gpr[rs])) * static_cast<__int128>(static_cast<s64>(gpr[rt]));
-                    lo = static_cast<u64>(res);
-                    hi = static_cast<u64>(res >> 64);
+                    mults64_128(static_cast<s64>(gpr[rs]), static_cast<s64>(gpr[rt]), hi, lo);
                     break;
                 }
                 case 0x1D: { // DMULTU
-                    unsigned __int128 res = static_cast<unsigned __int128>(gpr[rs]) * static_cast<unsigned __int128>(gpr[rt]);
-                    lo = static_cast<u64>(res);
-                    hi = static_cast<u64>(res >> 64);
+                    multu64_128(gpr[rs], gpr[rt], hi, lo);
                     break;
                 }
                 case 0x1E: { // DDIV

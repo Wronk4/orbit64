@@ -48,6 +48,37 @@ inline u32 bswap32(u32 v) { return __builtin_bswap32(v); }
 inline u64 bswap64(u64 v) { return __builtin_bswap64(v); }
 #endif
 
+// 64x64 -> 128-bit multiplication helpers (portable across 32-bit and 64-bit hosts)
+inline void multu64_128(u64 a, u64 b, u64& hi, u64& lo) {
+#if defined(__SIZEOF_INT128__)
+    unsigned __int128 res = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+    lo = static_cast<u64>(res);
+    hi = static_cast<u64>(res >> 64);
+#else
+    const u64 a_lo = static_cast<u32>(a), a_hi = a >> 32;
+    const u64 b_lo = static_cast<u32>(b), b_hi = b >> 32;
+    const u64 p0 = a_lo * b_lo;
+    const u64 p1 = a_lo * b_hi;
+    const u64 p2 = a_hi * b_lo;
+    const u64 p3 = a_hi * b_hi;
+    const u64 m = (p0 >> 32) + (p1 & 0xFFFFFFFFULL) + (p2 & 0xFFFFFFFFULL);
+    lo = (p0 & 0xFFFFFFFFULL) | (m << 32);
+    hi = p3 + (p1 >> 32) + (p2 >> 32) + (m >> 32);
+#endif
+}
+
+inline void mults64_128(s64 a, s64 b, u64& hi, u64& lo) {
+#if defined(__SIZEOF_INT128__)
+    __int128 res = static_cast<__int128>(a) * static_cast<__int128>(b);
+    lo = static_cast<u64>(res);
+    hi = static_cast<u64>(res >> 64);
+#else
+    multu64_128(static_cast<u64>(a), static_cast<u64>(b), hi, lo);
+    if (a < 0) hi -= static_cast<u64>(b);
+    if (b < 0) hi -= static_cast<u64>(a);
+#endif
+}
+
 // System constants
 constexpr u64 CPU_CLOCK_RATE = 93750000ULL; // 93.75 MHz
 constexpr u64 CYCLES_PER_FRAME = CPU_CLOCK_RATE / 60; // 1,562,500 cycles per frame at 60Hz
