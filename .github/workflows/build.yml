@@ -254,15 +254,17 @@ jobs:
         include:
           - name: armhf
             image: arm32v7/debian:bookworm
+            platform: linux/arm/v7
           - name: riscv64
             image: riscv64/debian:sid
+            platform: linux/riscv64
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Build
         run: |
-          docker run --rm -v ${{ github.workspace }}:/work -w /work ${{ matrix.image }} sh -c "
+          docker run --platform ${{ matrix.platform }} --rm -v ${{ github.workspace }}:/work -w /work ${{ matrix.image }} sh -c "
             apt-get update && apt-get install -y --no-install-recommends \
               cmake ninja-build gcc g++ git pkg-config ca-certificates \
               libasound2-dev libpulse-dev libx11-dev libxext-dev libxrandr-dev \
