@@ -56,6 +56,7 @@ constexpr u32 kSiteDelaySlot = 0x80000000u;
 
 using JitBlockFn = u32 (*)(JitCtx* ctx);
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__)
 // Compile-time sanity: the block prologue loads these via fixed byte offsets.
 static_assert(offsetof(JitCtx, cpu) == 0, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, bus) == 8, "JitCtx layout is baked into codegen");
@@ -72,3 +73,4 @@ static_assert(offsetof(JitCtx, jcache) == 88, "JitCtx layout is baked into codeg
 static_assert(offsetof(JitCtx, exit_req) == 96, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, fr_mismatch) == 100, "JitCtx layout is baked into codegen");
 static_assert(offsetof(JitCtx, synced) == 104, "JitCtx layout is baked into codegen");
+#endif
