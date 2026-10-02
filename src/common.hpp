@@ -26,14 +26,22 @@ using f32 = float;
 using f64 = double;
 
 // Endianness swap helpers
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+#include <sys/endian.h>
+#endif
+
 #if defined(_MSC_VER)
 #include <cstdlib>
 inline u16 bswap16(u16 v) { return _byteswap_ushort(v); }
 inline u32 bswap32(u32 v) { return _byteswap_ulong(v); }
 inline u64 bswap64(u64 v) { return _byteswap_uint64(v); }
+#elif defined(__OpenBSD__)
+#include <sys/endian.h>
+inline u16 bswap16(u16 v) { return swap16(v); }
+inline u32 bswap32(u32 v) { return swap32(v); }
+inline u64 bswap64(u64 v) { return swap64(v); }
 #elif defined(bswap16)
-// FreeBSD's <sys/endian.h> (pulled in by system headers) already defines
-// bswap16/32/64 as macros for the same builtins.
+// BSDs <sys/endian.h> defines bswap16/32/64 as macros for the same builtins.
 #else
 inline u16 bswap16(u16 v) { return __builtin_bswap16(v); }
 inline u32 bswap32(u32 v) { return __builtin_bswap32(v); }

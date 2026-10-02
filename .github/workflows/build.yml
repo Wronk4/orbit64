@@ -1,4 +1,5 @@
-# Builds Orbit64 for macOS, Linux, Windows and FreeBSD (x64 and ARM64) on every push.
+# Builds Orbit64 for macOS, Linux, Windows, FreeBSD, OpenBSD, NetBSD, and DragonFly BSD
+# (x64, ARM64, and x86 32-bit) on every push.
 #
 #   push to main     -> a new release v<major>.<minor>.<commits on main>; major.minor
 #                       come from project(VERSION) in CMakeLists.txt
@@ -7,8 +8,8 @@
 #                       artifacts in the Actions tab, kept 14 days, no release page
 #
 # SDL3 is built from source and linked statically, so every archive holds a
-# single self-contained executable. FreeBSD has no hosted runners: it builds
-# inside a FreeBSD VM on an Ubuntu runner (ARM64 emulated, so it's the slowest job).
+# single self-contained executable. BSD systems (FreeBSD, OpenBSD, NetBSD, DragonFly BSD)
+# build inside QEMU VMs on Ubuntu runners.
 name: Build
 
 on:
@@ -74,6 +75,19 @@ jobs:
               mingw-w64-ucrt-x86_64-gcc
               mingw-w64-ucrt-x86_64-cmake
               mingw-w64-ucrt-x86_64-ninja
+          # Windows x86 (32-bit MinGW-w64 GCC)
+          - name: windows-x86
+            os: windows-2022
+            shell: msys2 {0}
+            configure: >-
+              -G Ninja
+              -DCMAKE_EXE_LINKER_FLAGS=-static
+            exe: out/orbit64.exe
+            msystem: MINGW32
+            packages: >-
+              mingw-w64-i686-gcc
+              mingw-w64-i686-cmake
+              mingw-w64-i686-ninja
           # MSYS2 has no GCC for Windows on ARM; its CLANGARM64 environment
           # (clang + libc++, still MinGW-w64 headers and GCC builtins) is used.
           - name: windows-arm64
@@ -153,6 +167,99 @@ jobs:
           path: dist/orbit64-${{ matrix.name }}.*
           retention-days: 14
 
+  # Linux musl / Alpine builds: completely portable static executables that run
+  # on any Linux distribution (Alpine, Void, Arch, Debian, Ubuntu) without glibc dependencies.
+  linux-musl:
+    name: linux-musl-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-22.04
+          - arch: arm64
+            os: ubuntu-22.04-arm
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          apk update
+          apk add --no-cache cmake ninja g++ gcc git pkgconf linux-headers samurai \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxkbcommon-dev wayland-dev libdecor-dev mesa-dev alsa-lib-dev \
+            pulseaudio-dev pipewire-dev
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B out -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DORBIT64_VENDOR_SDL3=ON
+          -DORBIT64_SDL3_STATIC=ON
+          "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+      - name: Build
+        run: cmake --build out --config Release --parallel
+      - name: JIT self-test
+        run: |
+          cmake --build out --config Release --target jit_selftest
+          ./out/jit_selftest
+      - name: Package
+        run: |
+          mkdir -p dist/orbit64
+          cp out/orbit64 README.md dist/orbit64/
+          mkdir -p dist/orbit64/roms && cp roms/README.md dist/orbit64/roms/
+          cd dist && tar -czf orbit64-linux-musl-${{ matrix.arch }}.tar.gz orbit64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-linux-musl-${{ matrix.arch }}
+          path: dist/orbit64-linux-musl-${{ matrix.arch }}.tar.gz
+          retention-days: 14
+
+  # Linux 32-bit x86 (i686) builds in a 32-bit Ubuntu container.
+  linux-x86:
+    name: linux-x86
+    runs-on: ubuntu-22.04
+    container:
+      image: i386/ubuntu:22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build gcc-12 g++-12 git \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
+            libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev pkg-config ca-certificates
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B out -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc-12
+          -DCMAKE_CXX_COMPILER=g++-12
+          -DORBIT64_VENDOR_SDL3=ON
+          -DORBIT64_SDL3_STATIC=ON
+          "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+      - name: Build
+        run: cmake --build out --config Release --parallel
+      - name: JIT self-test
+        run: |
+          cmake --build out --config Release --target jit_selftest
+          ./out/jit_selftest
+      - name: Package
+        run: |
+          mkdir -p dist/orbit64
+          cp out/orbit64 README.md dist/orbit64/
+          mkdir -p dist/orbit64/roms && cp roms/README.md dist/orbit64/roms/
+          cd dist && tar -czf orbit64-linux-x86.tar.gz orbit64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-linux-x86
+          path: dist/orbit64-linux-x86.tar.gz
+          retention-days: 14
+
   # GitHub has no FreeBSD runners: vmactions/freebsd-vm boots FreeBSD in QEMU on
   # an x86-64 Ubuntu runner (aarch64 is fully emulated, so expect a long build).
   # Built on 14.3 so the binary also runs on 15.x. Base clang + libc++.
@@ -204,8 +311,124 @@ jobs:
           path: dist/orbit64-freebsd-${{ matrix.arch }}.tar.gz
           retention-days: 14
 
+  # OpenBSD 7.6 x64 build running inside QEMU on an Ubuntu runner.
+  openbsd:
+    name: openbsd-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in OpenBSD
+        uses: vmactions/openbsd-vm@v1
+        with:
+          release: '7.6'
+          arch: x86_64
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkg_add cmake ninja pkgconf git curl
+          run: |
+            set -e
+            cmake -S . -B out -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DORBIT64_VENDOR_SDL3=ON \
+              -DORBIT64_SDL3_STATIC=ON \
+              -DCMAKE_PREFIX_PATH=/usr/X11R6
+            cmake --build out --config Release --parallel
+            cmake --build out --config Release --target jit_selftest
+            ./out/jit_selftest
+            mkdir -p dist/orbit64/roms
+            cp out/orbit64 README.md dist/orbit64/
+            cp roms/README.md dist/orbit64/roms/
+            cd dist && tar -czf orbit64-openbsd-x64.tar.gz orbit64 && ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-openbsd-x64
+          path: dist/orbit64-openbsd-x64.tar.gz
+          retention-days: 14
+
+  # NetBSD 10.0 x64 build running inside QEMU on an Ubuntu runner.
+  netbsd:
+    name: netbsd-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in NetBSD
+        uses: vmactions/netbsd-vm@v1
+        with:
+          release: '10.0'
+          arch: x86_64
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkgin -y install cmake ninja-build pkgconf mozilla-rootcerts-openssl git
+          run: |
+            set -e
+            cmake -S . -B out -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DORBIT64_VENDOR_SDL3=ON \
+              -DORBIT64_SDL3_STATIC=ON \
+              -DCMAKE_PREFIX_PATH=/usr/X11R7
+            cmake --build out --config Release --parallel
+            cmake --build out --config Release --target jit_selftest
+            ./out/jit_selftest
+            mkdir -p dist/orbit64/roms
+            cp out/orbit64 README.md dist/orbit64/
+            cp roms/README.md dist/orbit64/roms/
+            cd dist && tar -czf orbit64-netbsd-x64.tar.gz orbit64 && ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-netbsd-x64
+          path: dist/orbit64-netbsd-x64.tar.gz
+          retention-days: 14
+
+  # DragonFly BSD 6.4 x64 build running inside QEMU on an Ubuntu runner.
+  dragonflybsd:
+    name: dragonflybsd-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in DragonFly BSD
+        uses: vmactions/dragonflybsd-vm@v1
+        with:
+          release: '6.4.0'
+          arch: x86_64
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkg install -y cmake ninja pkgconf git
+          run: |
+            set -e
+            cmake -S . -B out -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DORBIT64_VENDOR_SDL3=ON \
+              -DORBIT64_SDL3_STATIC=ON
+            cmake --build out --config Release --parallel
+            cmake --build out --config Release --target jit_selftest
+            ./out/jit_selftest
+            mkdir -p dist/orbit64/roms
+            cp out/orbit64 README.md dist/orbit64/
+            cp roms/README.md dist/orbit64/roms/
+            cd dist && tar -czf orbit64-dragonflybsd-x64.tar.gz orbit64 && ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-dragonflybsd-x64
+          path: dist/orbit64-dragonflybsd-x64.tar.gz
+          retention-days: 14
+
   release:
-    needs: [build, freebsd]
+    needs: [build, freebsd, openbsd, netbsd, dragonflybsd, linux-musl, linux-x86]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
@@ -251,12 +474,19 @@ jobs:
             echo "| Platform | File |"
             echo "|---|---|"
             echo "| Windows 10/11 x64 | \`orbit64-windows-x64.zip\` |"
+            echo "| Windows 10/11 x86 (32-bit) | \`orbit64-windows-x86.zip\` |"
             echo "| Windows 11 ARM64 (e.g. Snapdragon X) | \`orbit64-windows-arm64.zip\` |"
             echo "| macOS 11+ (Apple Silicon and Intel) | \`orbit64-macos-universal.zip\` |"
             echo "| Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | \`orbit64-linux-x64.tar.gz\` |"
             echo "| Linux ARM64 (glibc 2.35+, e.g. Ubuntu 22.04+, Raspberry Pi OS 64-bit bookworm+) | \`orbit64-linux-arm64.tar.gz\` |"
+            echo "| Linux x86 32-bit (glibc 2.35+, e.g. Debian/Ubuntu 32-bit) | \`orbit64-linux-x86.tar.gz\` |"
+            echo "| Linux x64 Musl (static, Alpine / Void / any Linux) | \`orbit64-linux-musl-x64.tar.gz\` |"
+            echo "| Linux ARM64 Musl (static, Alpine / Void / any Linux) | \`orbit64-linux-musl-arm64.tar.gz\` |"
             echo "| FreeBSD 14.3+ x64 | \`orbit64-freebsd-x64.tar.gz\` |"
             echo "| FreeBSD 14.3+ ARM64 | \`orbit64-freebsd-arm64.tar.gz\` |"
+            echo "| OpenBSD 7.6+ x64 | \`orbit64-openbsd-x64.tar.gz\` |"
+            echo "| NetBSD 10.0+ x64 | \`orbit64-netbsd-x64.tar.gz\` |"
+            echo "| DragonFly BSD 6.4+ x64 | \`orbit64-dragonflybsd-x64.tar.gz\` |"
             echo
             echo "macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`"
             echo "(or right-click the executable, Open) before starting it the first time."
