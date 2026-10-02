@@ -76,6 +76,17 @@ $(BUILD_DIR)/tools/gpu_check.o: tools/gpu_check.cpp
 	$(CXX) $(CXXFLAGS) -w -c $< -o $@
 DEPS += $(BUILD_DIR)/tools/gpu_check.d
 
+# Bit-exact RDP on the GPU vs on the CPU, replaying RDP traces (tools/exact_gpu_check.cpp).
+EXACT_GPU_CHECK_TARGET := $(BIN_DIR)/exact_gpu_check$(EXE)
+.PHONY: exact_gpu_check
+exact_gpu_check: $(EXACT_GPU_CHECK_TARGET)
+$(EXACT_GPU_CHECK_TARGET): $(BUILD_DIR)/tools/exact_gpu_check.o $(CHECK_OBJS) $(GPU_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+$(BUILD_DIR)/tools/exact_gpu_check.o: tools/exact_gpu_check.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+DEPS += $(BUILD_DIR)/tools/exact_gpu_check.d
+
 # Regenerates src/gpu/shaders_gen.cpp after a shader change (needs glslangValidator and spirv-cross).
 shaders:
 	python3 tools/gen_shaders.py
@@ -146,8 +157,8 @@ $(CHECK_TARGET): $(BUILD_DIR)/tools/rdp_check.o $(CHECK_OBJS) | $(BIN_DIR)
 $(CHECK_EXACT_TARGET): $(BUILD_DIR)/tools/rdp_check_exact.o $(BUILD_DIR)/hires_exact.o $(filter-out $(BUILD_DIR)/hires.o, $(CHECK_OBJS)) | $(BIN_DIR)
 	$(CXX) $^ -o $@ -lpthread
 
-$(SAVESTATE_CHECK_TARGET): $(BUILD_DIR)/tools/savestate_check.o $(CHECK_OBJS) | $(BIN_DIR)
-	$(CXX) $^ -o $@ -lpthread
+$(SAVESTATE_CHECK_TARGET): $(BUILD_DIR)/tools/savestate_check.o $(CHECK_OBJS) $(GPU_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/rsp_test$(EXE): $(BUILD_DIR)/tools/rsp_test.o $(CHECK_OBJS) | $(BIN_DIR)
 	$(CXX) $^ -o $@ -lpthread

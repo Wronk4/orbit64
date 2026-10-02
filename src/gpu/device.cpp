@@ -93,10 +93,12 @@ static SDL_GPUComputePipeline* make_pipeline(SDL_GPUDevice* dev, const shaders::
     ci.threadcount_z = 1;
     const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(dev);
     std::vector<Uint8> dxbc;
+    std::string msl;
     if (formats & SDL_GPU_SHADERFORMAT_MSL) {
+        msl = shaders::text(blob.msl);
         ci.format = SDL_GPU_SHADERFORMAT_MSL;
-        ci.code = reinterpret_cast<const Uint8*>(blob.msl);
-        ci.code_size = std::strlen(blob.msl);
+        ci.code = reinterpret_cast<const Uint8*>(msl.c_str());
+        ci.code_size = msl.size();
         ci.entrypoint = "main0";
     } else if (formats & SDL_GPU_SHADERFORMAT_SPIRV) {
         ci.format = SDL_GPU_SHADERFORMAT_SPIRV;
@@ -105,7 +107,7 @@ static SDL_GPUComputePipeline* make_pipeline(SDL_GPUDevice* dev, const shaders::
         ci.entrypoint = "main";
     } else if (formats & SDL_GPU_SHADERFORMAT_DXBC) {
 #if defined(_WIN32)
-        dxbc = compile_dxbc(blob.hlsl, error);
+        dxbc = compile_dxbc(shaders::text(blob.hlsl).c_str(), error);
         if (dxbc.empty()) {
             error = std::string(name) + ": " + error;
             return nullptr;
@@ -153,6 +155,30 @@ Device::Device(SDL_GPUDevice* device) : device_(device) {
     if (compose_) fill_ = make_pipeline(device_, shaders::fill, fill, "orbit64 fill", error_);
     if (fill_) decode_ = make_pipeline(device_, shaders::decode, decode, "orbit64 decode", error_);
     if (!ok()) SDL_Log("GPU renderer unavailable: %s", error_.c_str());
+    Resources shade;
+    shade.ro_buffers = 1;
+    shade.rw_buffers = 1;
+    Resources memory;
+    memory.ro_buffers = 3;
+    memory.rw_buffers = 3;
+    std::string exact_error;
+    const shaders::Blob* variants[kExactVariants] = {&shaders::exact_shade, &shaders::exact_shade_flat,
+                                                     &shaders::exact_shade_tex1, &shaders::exact_shade_2cycle,
+                                                     &shaders::exact_shade_copy, &shaders::exact_shade_fill};
+    for (int v = 0; v < kExactVariants; ++v) {
+        exact_shade_[v] = make_pipeline(device_, *variants[v], shade, "orbit64 exact shade", exact_error);
+        if (!exact_shade_[v]) break;
+    }
+    if (exact_shade_[kExactVariants - 1])
+        exact_memory_ = make_pipeline(device_, shaders::exact_memory, memory, "orbit64 exact memory", exact_error);
+    Resources up;
+    up.ro_buffers = 2;
+    up.rw_buffers = 4;
+    up.tx = 64;
+    up.ty = 1;
+    if (exact_memory_) exact_apply_ = make_pipeline(device_, shaders::exact_apply, up, "orbit64 exact apply", exact_error);
+    if (exact_apply_) exact_init_ = make_pipeline(device_, shaders::exact_init, up, "orbit64 exact init", exact_error);
+    if (!exact_ok()) SDL_Log("GPU bit-exact RDP unavailable: %s", exact_error.c_str());
 }
 
 Device::~Device() {
@@ -160,6 +186,11 @@ Device::~Device() {
     if (compose_) SDL_ReleaseGPUComputePipeline(device_, compose_);
     if (fill_) SDL_ReleaseGPUComputePipeline(device_, fill_);
     if (decode_) SDL_ReleaseGPUComputePipeline(device_, decode_);
+    for (SDL_GPUComputePipeline* p : exact_shade_)
+        if (p) SDL_ReleaseGPUComputePipeline(device_, p);
+    if (exact_memory_) SDL_ReleaseGPUComputePipeline(device_, exact_memory_);
+    if (exact_apply_) SDL_ReleaseGPUComputePipeline(device_, exact_apply_);
+    if (exact_init_) SDL_ReleaseGPUComputePipeline(device_, exact_init_);
 }
 
 } // namespace gpu

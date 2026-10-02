@@ -248,6 +248,13 @@ void RSP::execute_sp_dma(bool to_rdram, u32 len_reg, u8* rdram, size_t rdram_siz
     u32 daddr = dram_addr & 0xFFFFF8;
     const u32 mask = static_cast<u32>(rdram_size - 1);
     for (u32 row = 0; row <= count; ++row) {
+        if (!to_rdram) {
+            // (memory the RDP may still be drawing, see jit::notify_read)
+            const u32 start = daddr & mask;
+            const u32 first = std::min<u32>(length + 1, static_cast<u32>(rdram_size) - start);
+            jit::notify_read(start, first);
+            if (first < length + 1) jit::notify_read(0, length + 1 - first);
+        }
         for (u32 i = 0; i <= length; ++i) {
             const u32 m = (maddr + i) & 0xFFF, d = (daddr + i) & mask;
             if (to_rdram) rdram[d] = mem[m];

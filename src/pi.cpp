@@ -123,6 +123,7 @@ void PI::execute_dma_write(MI& mi, Cartridge& cart, const u8* rdram, size_t rdra
 
     const u32 sram_offset = (cart_addr >= 0x08000000) ? (cart_addr - 0x08000000) : cart_addr;
     const u32 n = static_cast<u32>(std::min<size_t>(len, rdram_size - cur_dram));
+    jit::notify_read(cur_dram, n);
     cart.dma_from_rdram(sram_offset, rdram + cur_dram, n);
 
     dram_addr += len;

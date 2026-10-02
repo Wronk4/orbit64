@@ -102,6 +102,7 @@ TLBResult Bus::translate_vaddr(u64 vaddr, u32& paddr, bool is_write, u8 current_
 
 u8 Bus::read8(u32 paddr) {
     if (paddr < ram_limit_) {
+        jit::notify_read(paddr, 1); // (memory the RDP may still be drawing)
         return rdram[paddr];
     } else if (paddr >= 0x04000000 && paddr < 0x04001000) {
         return rsp.read_dmem(paddr);
@@ -126,6 +127,7 @@ u8 Bus::read8(u32 paddr) {
 
 u16 Bus::read16(u32 paddr) {
     if (paddr + 1 < ram_limit_) {
+        jit::notify_read(paddr, 2);
         return (static_cast<u16>(rdram[paddr]) << 8) | static_cast<u16>(rdram[paddr + 1]);
     }
     if (paddr >= 0x10000000 && paddr < 0x1FBFFFFF) {
@@ -137,6 +139,7 @@ u16 Bus::read16(u32 paddr) {
 
 u32 Bus::read32(u32 paddr) {
     if (paddr + 3 < ram_limit_) {
+        jit::notify_read(paddr, 4);
         return (static_cast<u32>(rdram[paddr + 0]) << 24) |
                (static_cast<u32>(rdram[paddr + 1]) << 16) |
                (static_cast<u32>(rdram[paddr + 2]) << 8)  |

@@ -1,0 +1,80 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// The bit-exact RDP's memory stage (exact.glsl, memory_pixel): one invocation
+// per frame buffer pixel runs its 8x8-pixel tile's primitives in drawing
+// order on what exact_shade.comp shaded, reading and writing RDRAM - or, at
+// internal resolution, per sample of a pixel, its high-resolution copy.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 3
+#define NUM_RW_TEX 0
+#include "common.glsl"
+#include "exact_layout.h"
+
+layout(std430, RO_BUFFER(0)) readonly buffer Data { uint D[]; };
+layout(std430, RO_BUFFER(1)) readonly buffer Shaded { uint S[]; };
+layout(std430, RO_BUFFER(2)) readonly buffer Pages { uint PT[]; }; // internal resolution: RDRAM page -> slot
+// RDRAM (or the high-resolution copy), byte k in bits 8*(k&3) of word k/4
+layout(std430, RW_BUFFER(0)) buffer Rdram { uint R[]; };
+// its ninth bits, halfword h in bits 8*(h&3) of word h/4
+layout(std430, RW_BUFFER(1)) buffer Hidden { uint H[]; };
+layout(std430, RW_BUFFER(2)) buffer Tails { int TAIL[]; }; // per walking primitive: its last pixel's memory colour
+
+layout(std140, UNIFORM(0)) uniform Pass {
+    uint work;        // word offset of the work list: x | y << 16, first pair, count per tile
+    uint work_count;
+    uint entries;     // word offset of the pairs (exact_shade.comp)
+    uint first;       // the pair S starts with
+    uint mask8;       // RDRAM size - 1
+    uint width;       // the frame buffer's width (times the scale)
+    uint groups_x;    // workgroups per row of the dispatch
+    uint debug_pixel; // x | y << 16 of a pixel whose primitives are logged into TAIL (debugging), or ~0
+    uint debug_at;    // where in TAIL: a count, then 16 ints per primitive
+    uint scale;       // internal resolution of the pass (1: native, RDRAM)
+} P;
+
+#define EXACT_MEMORY_PASS
+#include "exact.glsl"
+
+void main() {
+    const uint wi = gl_WorkGroupID.y * P.groups_x + gl_WorkGroupID.x;
+    if (wi >= P.work_count) return;
+    const uint tw = D[P.work + wi * 3u];
+    const int x = int((tw & 0xffffu) * EXACT_TILE_SIZE + gl_LocalInvocationID.x);
+    const int y = int((tw >> 16) * EXACT_TILE_SIZE + gl_LocalInvocationID.y);
+    if (uint(x) >= P.width) return;
+    const uint li = gl_LocalInvocationID.y * EXACT_TILE_SIZE + gl_LocalInvocationID.x;
+    const uint first = D[P.work + wi * 3u + 1u], count = D[P.work + wi * 3u + 2u];
+    const uint prims = D[P.entries - 1u];
+    // At internal resolution the pixel is sample g_sample of pixel (nx, ny).
+    g_S = int(P.scale);
+    const int nx = x / g_S, ny = y / g_S;
+    g_sample = uint((y - ny * g_S) * g_S + (x - nx * g_S));
+    g_debug_xy = uint(x) | uint(y) << 16;
+    for (uint i = 0u; i < count; ++i) {
+        const uint e = first + i;
+        g_po = D[P.entries + e * 2u] * EXACT_PRIM_WORDS + prims;
+        g_so = D[g_po + EP_STATE];
+        g_f0 = D[g_so + ES_FLAGS0];
+        g_f1 = D[g_so + ES_FLAGS1];
+        const uint pflags = D[g_po + EP_FLAGS];
+        // The last pixel this primitive walks: its memory colour before the
+        // primitive is the delayed one the next 2-cycle primitive starts with.
+        if ((pflags & 0x100u) != 0u && g_S == 1 && int(D[g_po + EP_TAIL_X]) == x && int(D[g_po + EP_TAIL_Y]) == y) {
+            ivec4 col;
+            read_colour(x, y, col);
+            const ivec4 m = decode_memory(col);
+            const uint slot = D[g_po + EP_TAIL_SLOT] * 4u;
+            TAIL[slot] = m.r;
+            TAIL[slot + 1u] = m.g;
+            TAIL[slot + 2u] = m.b;
+            TAIL[slot + 3u] = m.a;
+        }
+        const uint at = ((e - P.first) * EXACT_TILE_SIZE * EXACT_TILE_SIZE + li) * 3u;
+        const uvec3 sh = uvec3(S[at], S[at + 1u], S[at + 2u]);
+        if ((sh.y >> 22) == 0u) continue;
+        memory_pixel(nx, ny, sh);
+    }
+}

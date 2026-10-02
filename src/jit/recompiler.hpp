@@ -29,6 +29,7 @@
 #include "../common.hpp"
 #include "code_buffer.hpp"
 #include "jit_abi.hpp"
+#include "jit_invalidate.hpp"
 #include <array>
 #include <memory>
 #include <unordered_map>
@@ -179,9 +180,10 @@ private:
     CodeBuffer code_;
     // page index -> kPageCode if a cached block covers this page, kPageWatched
     // if the RDP keeps ninth bits in it; compiled stores to a page with
-    // either take the slow path.
+    // either take the slow path. kPageReadWatched (jit::kReadWatched): the
+    // RDP is drawing there on the GPU; compiled loads take the slow path.
     std::vector<u8> code_pages_;
-    static constexpr u8 kPageCode = 1, kPageWatched = 2;
+    static constexpr u8 kPageCode = 1, kPageWatched = 2, kPageReadWatched = jit::kReadWatched;
     bool pending_invalidate_ = false;
     // x64: a write to code drops only the blocks on the pages it hit (blocks
     // never jump to each other there, so nothing else refers to them).

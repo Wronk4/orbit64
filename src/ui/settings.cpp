@@ -119,7 +119,7 @@ void Settings::reset_audio() {
 }
 void Settings::reset_emulation() {
     Settings d;
-    cpu_core = d.cpu_core; ucode_override = d.ucode_override; rsp_mode = d.rsp_mode; rdp_exact = d.rdp_exact; ff_speed = d.ff_speed; limit_speed = d.limit_speed;
+    cpu_core = d.cpu_core; ucode_override = d.ucode_override; rsp_mode = d.rsp_mode; rdp_exact = d.rdp_exact; rdp_exact_gpu = d.rdp_exact_gpu; ff_speed = d.ff_speed; limit_speed = d.limit_speed;
     autosave_backup = d.autosave_backup; fps_limit = d.fps_limit; expansion_pak = d.expansion_pak;
 }
 
@@ -311,7 +311,7 @@ bool Settings::save(const std::string& path) const {
 
     w.section("emulation");
     w.kv("cpu_core", cpu_core);
-    w.kv("ucode", ucode_override); w.kv("rsp_mode", rsp_mode); w.kv("rdp_exact", rdp_exact); w.kv("ff_speed", ff_speed); w.kv("limit_speed", limit_speed);
+    w.kv("ucode", ucode_override); w.kv("rsp_mode", rsp_mode); w.kv("rdp_exact", rdp_exact); w.kv("rdp_exact_gpu", rdp_exact_gpu); w.kv("ff_speed", ff_speed); w.kv("limit_speed", limit_speed);
     w.kv("autosave", autosave_backup); w.kv("expansion_pak", expansion_pak);
     w.kv("fps_limit", fps_limit); w.kv("render_scale", render_scale);
     w.kv("render_w", render_w); w.kv("render_h", render_h);
@@ -373,7 +373,7 @@ bool Settings::load(const std::string& path) {
 
     r.sec = "emulation";
     r.get("cpu_core", cpu_core);
-    r.get("ucode", ucode_override); r.get("rsp_mode", rsp_mode); r.get("rdp_exact", rdp_exact); r.get("ff_speed", ff_speed); r.get("limit_speed", limit_speed);
+    r.get("ucode", ucode_override); r.get("rsp_mode", rsp_mode); r.get("rdp_exact", rdp_exact); r.get("rdp_exact_gpu", rdp_exact_gpu); r.get("ff_speed", ff_speed); r.get("limit_speed", limit_speed);
     r.get("autosave", autosave_backup); r.get("expansion_pak", expansion_pak);
     r.get("fps_limit", fps_limit); r.get("render_scale", render_scale);
     r.get("render_w", render_w); r.get("render_h", render_h);

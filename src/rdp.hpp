@@ -149,6 +149,12 @@ public:
     // ORBIT64_RDP=exact or fast overrides it.
     void set_exact(bool on) { exact_mode_ = env_exact_ >= 0 ? env_exact_ != 0 : on; }
     bool exact() const { return exact_mode_; }
+    // The bit-exact RDP draws its pixels on the GPU (gpu/rdp_exact_gpu.hpp)
+    // when `on` and a factory for that back end is set. ORBIT64_RDP=exact-gpu
+    // or exact overrides it.
+    void set_exact_accel_factory(ExactAccelFactory f);
+    void set_exact_gpu(bool on);
+    bool exact_gpu() const { return exact_.accelerated(); }
     // Whether the frame being shown was drawn by the bit-exact RDP.
     bool exact_drawing() const { return exact_mode_ && raw_mode_; }
     // The bit-exact RDP (its ninth bits, and its high-resolution copy at an
@@ -233,6 +239,9 @@ private:
     bool trace_checked_{false};
     bool exact_mode_{true};
     int env_exact_{-1};
+    bool exact_gpu_{false};
+    int env_exact_gpu_{-1};
+    ExactAccelFactory exact_accel_factory_;
     ExactRdpLanes exact_;
     void process_rdp_commands(MI& mi, u8* rdram, size_t rdram_size);
     void rdp_triangle(const u64* cmd, u32 op, u8* rdram, size_t rdram_size);

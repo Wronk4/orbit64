@@ -28,6 +28,7 @@
 // through 64 bits and truncated), arithmetic right shifts.
 
 #include "rdp_exact.hpp"
+#include "gpu/shaders/exact_layout.h"
 #include "jit/jit_invalidate.hpp"
 #include <algorithm>
 #include <cstring>
@@ -330,8 +331,42 @@ void ExactRdp::cpu_wrote(u32 paddr, u32 len) {
     }
 }
 
+void ExactRdp::gpu_wrote_hidden(size_t h0, size_t n, const u8* bits, const u8* rdram) {
+    HiddenStore& st = *hs_;
+    for (size_t k = 0; k < n; ++k) {
+        const size_t h = h0 + k;
+        if (h >= st.bits.size()) return;
+        const u16 word = static_cast<u16>((rdram[h * 2] << 8) | rdram[h * 2 + 1]);
+        // What a CPU write would leave needs no record (nor watching).
+        if (bits[k] == static_cast<u8>((((word >> 8) & 1) << 1) | (word & 1))) {
+            st.bits[h] = 4;
+            continue;
+        }
+        st.bits[h] = bits[k];
+        st.word[h] = word;
+        u8& w = st.watched[h >> 5];
+        if (!w) {
+            w = 1;
+            jit::watch_rdram(static_cast<u32>(h >> 5) << 6, 64);
+        }
+    }
+}
+
+void ExactRdp::hidden_range(size_t h0, size_t n, const u8* rdram, u8* out) const {
+    const HiddenStore& st = *hs_;
+    for (size_t k = 0; k < n; ++k) {
+        const size_t h = h0 + k;
+        const u16 word = static_cast<u16>((rdram[h * 2] << 8) | rdram[h * 2 + 1]);
+        out[k] = h >= st.bits.size() || (st.bits[h] & 4) || st.word[h] != word
+                     ? static_cast<u8>((((word >> 8) & 1) << 1) | (word & 1))
+                     : st.bits[h];
+    }
+}
+
 void ExactRdp::rebuild_watched() {
     HiddenStore& st = *hs_;
+    ++st.epoch;
+    ++tmem_gen_;
     st.watched.assign(st.bits.size() / 32, 0);
     for (size_t h = 0; h < st.bits.size(); ++h) {
         if (st.bits[h] & 4) continue;
@@ -373,6 +408,8 @@ UpStore* ExactRdp::upscaled(size_t rdram_size) {
 void ExactRdp::up_sync_before(u64 lo, u64 hi, const u8* rdram, size_t rdram_size) {
     UpStore* up = upscaled(rdram_size);
     if (!up) return;
+    // (An accelerated back end's copy first.)
+    if (up_fetch_) up_fetch_(lo, hi, rdram, rdram_size);
     lo &= ~static_cast<u64>(63);
     hi = std::min<u64>((hi + 63) & ~static_cast<u64>(63), rdram_size);
     const u32 slices = up->scale * up->scale;
@@ -408,6 +445,8 @@ ExactRdp::ExactRdp() {
 void ExactRdp::reset() {
     tiles_ = {};
     tmem_.fill(0);
+    ++tmem_gen_;
+    ++hs_->epoch;
     hs_->bits.clear();
     hs_->word.clear();
     hs_->watched.clear();
@@ -435,7 +474,6 @@ void ExactRdp::reset() {
     zi_addr_ = 0;
     std::fill(std::begin(prev_mem_), std::end(prev_mem_), 0);
     std::fill(std::begin(prev_mem_up_), std::end(prev_mem_up_), 0);
-    mirror_ = false;
     // (The high-resolution copy stays: it is brought up to date with RDRAM
     // before anything is drawn over it.)
 }
@@ -1151,16 +1189,8 @@ void ExactRdp::fill_rectangle(const u32* w, u8* rdram, size_t rdram_size) {
     u16 stale_cur[32]{};
     bool stale = false;
     {
-        const u32 W = (xl >> 2) - (xh >> 2), H = (yl >> 2) - (yh >> 2);
-        const u32 cycn = cycle == 1 ? 2 : 1;
-        u32 L = cycn * W + cycn - 1;
-        if (L < 4) L = 4;
-        const u32 D = std::min<u32>(3 * L - 2, 25);
-        const bool atomic_prim = (other_h_ >> 23) & 1;
-        const bool image_read = (other_l_ >> 6) & 1;
-        const bool sixteen = ci_fmt_ == FB_RGBA5551 || ci_fmt_ == FB_IA88;
-        const bool ok = cycle < 2 && image_read && !atomic_prim && xl >= xh && yl >= yh && H == 1 && W >= 1 &&
-                        W <= 32 && D > L && sixteen;
+        const u32 W = (xl >> 2) - (xh >> 2);
+        const bool ok = fill_reads_stale(w);
         // Only the lane that draws the row touches memory.
         const bool owner = lanes_ == 1 || (yh >> 2) % lanes_ == lane_;
         if (!ok) {
@@ -1193,14 +1223,30 @@ void ExactRdp::fill_rectangle(const u32* w, u8* rdram, size_t rdram_size) {
     s.yl = static_cast<s32>(yl);
     s.yh = static_cast<s32>(yh);
     s.flags = SETUP_FLIP;
-    // At internal resolution, drawn natively and repeated (as parallel-rdp does).
-    mirror_ = true;
+    // (At internal resolution a fill-mode one is drawn natively and repeated,
+    // see draw(); one in 1- or 2-cycle mode is upscaled - repeating its native
+    // pixels would blend every sample with the native memory colour.)
     draw(s, Attr{}, rdram, rdram_size);
-    mirror_ = false;
     // The next stale reader sees this rectangle's pre-image: the
     // predecessor's output saved above.
     if (stale)
         for (u32 k = 0; k < stale_.n; ++k) stale_.pre[k] = stale_cur[k];
+}
+
+bool ExactRdp::fill_reads_stale(const u32* w) const {
+    const u32 xl = (w[0] >> 12) & 0xfff, yl = w[0] & 0xfff;
+    const u32 xh = (w[1] >> 12) & 0xfff, yh = w[1] & 0xfff;
+    const u32 cycle = (other_h_ >> 20) & 3;
+    const u32 W = (xl >> 2) - (xh >> 2), H = (yl >> 2) - (yh >> 2);
+    const u32 cycn = cycle == 1 ? 2 : 1;
+    u32 L = cycn * W + cycn - 1;
+    if (L < 4) L = 4;
+    const u32 D = std::min<u32>(3 * L - 2, 25);
+    const bool atomic_prim = (other_h_ >> 23) & 1;
+    const bool image_read = (other_l_ >> 6) & 1;
+    const bool sixteen = ci_fmt_ == FB_RGBA5551 || ci_fmt_ == FB_IA88;
+    return cycle < 2 && image_read && !atomic_prim && xl >= xh && yl >= yh && H == 1 && W >= 1 && W <= 32 && D > L &&
+           sixteen;
 }
 
 void ExactRdp::texture_rectangle(const u32* w, bool flip, u8* rdram, size_t rdram_size) {
@@ -1476,8 +1522,10 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
     // one at psc = scale_ into the high-resolution copy - or, for primitives
     // that are repeated rather than upscaled, their native writes copied to
     // every sample (`mirror`).
-    UpStore* const up = scale_ > 1 ? upscaled(rdram_size) : nullptr;
-    const bool mirror = up && (mirror_ || p.cycle >= 2);
+    // (An accelerated back end draws the high-resolution copy itself: what
+    // is drawn here goes to every sample through RDRAM.)
+    UpStore* const up = scale_ > 1 && !native_draws_ ? upscaled(rdram_size) : nullptr;
+    const bool mirror = up && p.cycle >= 2; // copy and fill modes: repeated (as parallel-rdp does)
     const int passes = up && !mirror ? 2 : 1;
     s32 psc = 1;
     bool hires = false;     // in the high-resolution pass
@@ -1628,6 +1676,160 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
         csel[c][1][3] = kAlphaABD[p.alpha[c][1] & 7];
         csel[c][2][3] = kAlphaC[p.alpha[c][2] & 7];
         csel[c][3][3] = kAlphaABD[p.alpha[c][3] & 7];
+    }
+
+    // Accelerated back end: the primitive as data, drawn elsewhere.
+    if (recorder_) {
+        u32 st[EXACT_STATE_WORDS]{};
+        u32 f0 = static_cast<u32>(p.cycle);
+        auto bit = [&f0](bool on, u32 b) { if (on) f0 |= b; };
+        bit(p.persp, EF_PERSP); bit(p.detail, EF_DETAIL); bit(p.sharpen, EF_SHARPEN); bit(p.tex_lod, EF_TEX_LOD);
+        bit(p.tlut, EF_TLUT); bit(p.tlut_type, EF_TLUT_TYPE); bit(p.sample_quad, EF_SAMPLE_QUAD);
+        bit(p.mid_texel, EF_MID_TEXEL); bit(p.bilerp0, EF_BILERP0); bit(p.bilerp1, EF_BILERP1);
+        bit(p.convert_one, EF_CONVERT_ONE); bit(p.force_blend, EF_FORCE_BLEND);
+        bit(p.alpha_cvg_select, EF_ALPHA_CVG_SELECT); bit(p.cvg_times_alpha, EF_CVG_TIMES_ALPHA);
+        bit(p.color_on_cvg, EF_COLOR_ON_CVG); bit(p.image_read, EF_IMAGE_READ); bit(p.z_update, EF_Z_UPDATE);
+        bit(p.z_compare, EF_Z_COMPARE); bit(p.aa, EF_AA); bit(p.alpha_test_dither, EF_ALPHA_TEST_DITHER);
+        bit(p.alpha_test, EF_ALPHA_TEST); bit(p.dither_en, EF_DITHER_EN); bit(p.key_en, EF_KEY_EN);
+        bit(p.interlace, EF_INTERLACE); bit(p.uses_texel0, EF_USES_TEXEL0); bit(p.uses_texel1, EF_USES_TEXEL1);
+        bit(p.uses_pipelined_texel1, EF_USES_PIPELINED_TEXEL1); bit(p.uses_lod, EF_USES_LOD);
+        bit(p.need_noise, EF_NEED_NOISE); bit(p.need_noise_dual, EF_NEED_NOISE_DUAL);
+        st[ES_FLAGS0] = f0;
+        u32 f1 = static_cast<u32>(p.dither) | static_cast<u32>(p.coverage_mode) << 4 | static_cast<u32>(p.z_mode) << 6;
+        for (int c = 0; c < 2; ++c)
+            for (int k = 0; k < 4; ++k) f1 |= static_cast<u32>(p.blend[c][k] & 3) << (8 + 2 * (4 * c + k));
+        f1 |= static_cast<u32>(p.fb_fmt) << 24 | (p.alias ? 1u : 0u) << 27;
+        st[ES_FLAGS1] = f1;
+        for (int c = 0; c < 2; ++c)
+            for (int k = 0; k < 4; ++k)
+                for (int i = 0; i < 4; ++i) {
+                    const u32 idx = static_cast<u32>(4 * (4 * c + k) + i);
+                    st[ES_CSEL + idx / 4] |= static_cast<u32>(csel[c][k][i]) << (8 * (idx % 4));
+                }
+        st[ES_MIN_LOD] = static_cast<u32>(p.min_lod);
+        for (int i = 0; i < 4; ++i) st[ES_FACTORS + i] = static_cast<u32>(p.factors[i]);
+        st[ES_PRIM_COLOR] = p.prim_color;
+        st[ES_ENV_COLOR] = p.env_color;
+        st[ES_FOG_COLOR] = p.fog_color;
+        st[ES_BLEND_COLOR] = p.blend_color;
+        st[ES_FILL_COLOR] = p.fill_color;
+        st[ES_PRIM_LOD_FRAC] = p.prim_lod_frac;
+        st[ES_KEY_CENTER] = p.key_center[0] | p.key_center[1] << 8 | p.key_center[2] << 16;
+        st[ES_KEY_SCALE] = p.key_scale[0] | p.key_scale[1] << 8 | p.key_scale[2] << 16;
+        for (int i = 0; i < 3; ++i) st[ES_KEY_WIDTH + i] = static_cast<u32>(p.key_width[i]);
+        st[ES_K4] = static_cast<u32>(p.k4);
+        st[ES_K5] = static_cast<u32>(p.k5);
+        st[ES_FB_INDEX] = p.fb_index;
+        st[ES_FB_WIDTH] = p.fb_width;
+        st[ES_Z_INDEX] = p.z_index;
+        for (int t = 0; t < 8; ++t) {
+            const Tile& tl = tiles_[t];
+            u32* q = st + ES_TILES + EXACT_TILE_WORDS * t;
+            q[0] = tl.slo | tl.shi << 16;
+            q[1] = tl.tlo | tl.thi << 16;
+            q[2] = tl.offset | tl.stride << 16;
+            q[3] = static_cast<u32>(tl.fmt) | static_cast<u32>(tl.size) << 3 | static_cast<u32>(tl.palette) << 5 |
+                   static_cast<u32>(tl.mask_s) << 9 | static_cast<u32>(tl.shift_s) << 13 |
+                   static_cast<u32>(tl.mask_t) << 17 | static_cast<u32>(tl.shift_t) << 21 |
+                   static_cast<u32>(tl.flags) << 25;
+        }
+
+        u32 pr[EXACT_PRIM_WORDS]{};
+        pr[EP_FLAGS] = (flip ? 1u : 0u) | (setup_tile & 7) << 1 | (max_level & 7) << 4 | (p.cycle < 2 ? 1u : 0u) << 8;
+        pr[EP_SERIAL] = p.prim_serial;
+        pr[EP_DZ] = static_cast<u32>(p.dz);
+        pr[EP_DZ_COMPRESSED] = static_cast<u32>(p.dz_compressed);
+        for (int i = 0; i < 4; ++i) {
+            pr[EP_DRGBA_DX + i] = static_cast<u32>(attr.drgba_dx[i]);
+            pr[EP_DRGBA_DY + i] = static_cast<u32>(attr.drgba_dy[i]);
+            pr[EP_DSTZW_DX + i] = static_cast<u32>(attr.dstzw_dx[i]);
+            pr[EP_DSTZW_DY + i] = static_cast<u32>(attr.dstzw_dy[i]);
+        }
+        pr[EP_Y0] = static_cast<u32>(min_line);
+        const s32 rows = max_line - min_line + 2; // and the scanline after the last
+        pr[EP_ROWS] = static_cast<u32>(rows);
+        thread_local std::vector<s32> spans;
+        spans.assign(static_cast<size_t>(rows) * EXACT_SPAN_WORDS, 0);
+        s32 tail_x = -1, tail_y = -1;
+        for (s32 r = 0; r < rows; ++r) {
+            Span sp;
+            make_span(min_line + r, sp);
+            s32* q = spans.data() + static_cast<size_t>(r) * EXACT_SPAN_WORDS;
+            for (int i = 0; i < 4; ++i) {
+                q[EX_RGBA + i] = sp.rgba[i];
+                q[EX_STZW + i] = sp.stzw[i];
+                q[EX_XLEFT + i] = sp.xleft[i];
+                q[EX_XRIGHT + i] = sp.xright[i];
+            }
+            q[EX_BASE_X] = sp.base_x;
+            q[EX_START_X] = sp.start_x;
+            q[EX_END_X] = sp.end_x;
+            q[EX_LODLENGTH] = sp.lodlength;
+            q[EX_VALID] = sp.valid ? 1 : 0;
+            // The last pixel walked (1- and 2-cycle modes read every pixel's
+            // memory colour), as the pixel of the frame buffer it lands on.
+            if (r < rows - 1 && p.cycle < 2 && sp.valid && sp.start_x <= sp.end_x) {
+                tail_x = flip ? sp.end_x : sp.start_x;
+                tail_y = min_line + r;
+            }
+        }
+        if (tail_x >= 0 && static_cast<u32>(tail_x) >= p.fb_width) {
+            tail_y += tail_x / static_cast<s32>(p.fb_width);
+            tail_x %= static_cast<s32>(p.fb_width);
+        }
+        pr[EP_TAIL_X] = static_cast<u32>(tail_x);
+        pr[EP_TAIL_Y] = static_cast<u32>(tail_y);
+        if (tail_x < 0) pr[EP_FLAGS] &= ~(1u << 8);
+        // Internal resolution: the spans at S times the resolution after the
+        // native ones - unless the primitive is repeated rather than upscaled.
+        const bool repeat = p.cycle >= 2;
+        if (repeat) pr[EP_FLAGS] |= EPF_MIRROR;
+        if (record_scale_ > 1 && !repeat) {
+            const s32 S = static_cast<s32>(record_scale_);
+            const s32 hrows = (max_line - min_line + 1) * S + 1; // and the scanline after the last
+            pr[EP_HSPANS] = static_cast<u32>(rows) * EXACT_SPAN_WORDS;
+            pr[EP_HY0] = static_cast<u32>(min_line * S);
+            pr[EP_HROWS] = static_cast<u32>(hrows);
+            spans.resize(static_cast<size_t>(rows + hrows) * EXACT_SPAN_WORDS);
+            psc = S;
+            for (s32 r = 0; r < hrows; ++r) {
+                Span sp;
+                make_span(min_line * S + r, sp);
+                s32* q = spans.data() + static_cast<size_t>(rows + r) * EXACT_SPAN_WORDS;
+                for (int i = 0; i < 4; ++i) {
+                    q[EX_RGBA + i] = sp.rgba[i];
+                    q[EX_STZW + i] = sp.stzw[i];
+                    q[EX_XLEFT + i] = sp.xleft[i];
+                    q[EX_XRIGHT + i] = sp.xright[i];
+                }
+                q[EX_BASE_X] = sp.base_x;
+                q[EX_START_X] = sp.start_x;
+                q[EX_END_X] = sp.end_x;
+                q[EX_LODLENGTH] = sp.lodlength;
+                q[EX_VALID] = sp.valid ? 1 : 0;
+            }
+            psc = 1;
+        }
+        const bool tex = p.cycle == 2 || p.uses_texel0 || p.uses_texel1 || p.uses_pipelined_texel1;
+        // Copy and fill modes draw the pixel at x == width too, which is the
+        // next row's first: first a primitive of just those pixels (at x = 0,
+        // a row down), so where the next row draws its own first pixel that
+        // comes after, as here.
+        if (p.cycle >= 2) {
+            bool wraps = false;
+            for (s32 r = 0; r < rows - 1 && !wraps; ++r) {
+                const s32* q = spans.data() + static_cast<size_t>(r) * EXACT_SPAN_WORDS;
+                wraps = q[EX_VALID] && q[EX_START_X] <= static_cast<s32>(p.fb_width) && q[EX_END_X] >= static_cast<s32>(p.fb_width);
+            }
+            if (wraps) {
+                u32 wp[EXACT_PRIM_WORDS];
+                std::copy(pr, pr + EXACT_PRIM_WORDS, wp);
+                wp[EP_FLAGS] |= EPF_WRAP;
+                recorder_->record({st, wp, spans.data(), tex ? tmem_.data() : nullptr, tmem_gen_, rdram, rdram_size});
+            }
+        }
+        recorder_->record({st, pr, spans.data(), tex ? tmem_.data() : nullptr, tmem_gen_, rdram, rdram_size});
+        return;
     }
 
     // Lanes: which rows this copy draws, and - when primitives that walk
@@ -2277,11 +2479,17 @@ void ExactRdp::draw(Setup& setup, Attr attr, u8* rdram, size_t rdram_size) {
                         }
                     }
 
+                    static const int dbg_hx = [] { int a = -1, b = -1; if (const char* e = std::getenv("ORBIT64_EXACT_HPIX")) std::sscanf(e, "%d,%d", &a, &b); return a | (b << 16); }();
+                    if (hires && dbg_hx >= 0 && x == (dbg_hx & 0xffff) && y == (dbg_hx >> 16))
+                        std::fprintf(stderr, "HPIX x=%d y=%d prim=%u kind=%d comb=%d,%d,%d,%d cvg=%d z=%05x depth=%04x dz=%x -> col=%d,%d,%d,%d\n", x,
+                                     y, p.prim_serial, kind, comb[0], comb[1], comb[2], comb[3], cov_count, z, cur_depth, cur_dz, col[0], col[1],
+                                     col[2], col[3]);
                     if (dbg_addr >= 0 && !hires) {
                         const size_t bpp = p.fb_fmt == FB_RGBA8888 ? 4 : p.fb_fmt <= FB_I8 ? 1 : 2;
-                        if (static_cast<long>(cidx * bpp) == (dbg_addr & ~static_cast<long>(bpp - 1)))
-                            std::fprintf(stderr, "PIX x=%d y=%d kind=%d comb=%d,%d,%d,%d cvg=%d dith=%03x z=%05x -> col=%d,%d,%d,%d\n", x,
-                                         y, kind, comb[0], comb[1], comb[2], comb[3], cov_count, dith, z, col[0], col[1],
+                        if (static_cast<long>(cidx * bpp) == (dbg_addr & ~static_cast<long>(bpp - 1)) ||
+                            static_cast<long>(zidx * 2) == dbg_addr)
+                            std::fprintf(stderr, "PIX x=%d y=%d prim=%u kind=%d comb=%d,%d,%d,%d cvg=%d dith=%03x z=%05x depth=%04x dz=%x -> col=%d,%d,%d,%d\n", x,
+                                         y, p.prim_serial, kind, comb[0], comb[1], comb[2], comb[3], cov_count, dith, z, cur_depth, cur_dz, col[0], col[1],
                                          col[2], col[3]);
                     }
                     // ---- Store
@@ -2370,6 +2578,7 @@ void ExactRdp::load(const u32* w, LoadMode mode, const u8* rdram, size_t rdram_s
     const bool ltlut = mode == LoadMode::Tlut;
     const bool coord_quad = mode != LoadMode::Tile;
     if (ti_size_ == 0) return; // 4-bit images hang the RDP
+    ++tmem_gen_;
 
     int formatting;
     if (tile.fmt == TF_YUV) formatting = 0;
@@ -2546,12 +2755,16 @@ ExactRdpLanes::ExactRdpLanes() {
     if (n > 1) pool_ = std::make_unique<RasterPool>(n - 1);
 }
 
-ExactRdpLanes::~ExactRdpLanes() = default;
+ExactRdpLanes::~ExactRdpLanes() {
+    if (accel_on_) jit::set_read_checks(false);
+}
 
 void ExactRdpLanes::reset() {
+    if (accel_on_ && rdram_) flush(); // (what was recorded is drawn, as the lanes' queue isn't)
     buf_.clear();
     starts_.clear();
     for (auto& l : lanes_) l->reset();
+    if (accel_) accel_->invalidate_all();
     other_h_ = other_l_ = 0;
     ti_addr_ = 0;
     ti_width_ = 1;
@@ -2568,9 +2781,54 @@ void ExactRdpLanes::reset() {
     void ExactRdpLanes::set_scale(u32 scale) {
         flush();
         for (auto& l : lanes_) l->set_scale(scale);
+        if (accel_on_) {
+            lanes_[0]->set_record_scale(lanes_[0]->scale());
+            accel_->set_scale(lanes_[0]->scale());
+        }
     }
 
-    void ExactRdpLanes::add_sync_range(u64 lo, u64 hi) {
+void ExactRdpLanes::set_accel(std::unique_ptr<ExactAccel> accel) {
+    flush();
+    accel_.reset();
+    update_accel(); // back to the lanes
+    accel_ = std::move(accel);
+    update_accel();
+}
+
+void ExactRdpLanes::update_accel() {
+    const bool want = accel_ != nullptr;
+    if (want == accel_on_) return;
+    flush();
+    const u32 n = static_cast<u32>(lanes_.size());
+    ExactRdp& front = *lanes_[0];
+    if (want) {
+        // Lane 0 has run every command; now it alone runs them.
+        front.set_lane(0, 1);
+        front.set_recorder(accel_.get());
+        front.set_record_scale(scale());
+        front.set_native_draws(true);
+        front.set_up_fetch([this](u64 lo, u64 hi, const u8*, size_t rdram_size) {
+            if (fetching_up_) return; // (the serial path's own)
+            flush();
+            if (UpStore* up = lanes_[0]->upscaled(rdram_size)) accel_->fetch_upscaled(lo, hi, *up);
+        });
+        accel_->set_scale(scale());
+        accel_->invalidate_all();
+    } else {
+        release_up();
+        front.set_recorder(nullptr);
+        front.set_record_scale(1);
+        front.set_native_draws(false);
+        front.set_up_fetch(nullptr);
+        front.set_lane(0, n);
+        for (u32 i = 1; i < n; ++i) lanes_[i]->copy_state_from(front);
+        front.publish_tail();
+    }
+    accel_on_ = want;
+    jit::set_read_checks(want); // (reads of what the GPU draws are reported)
+}
+
+void ExactRdpLanes::add_sync_range(u64 lo, u64 hi) {
         if (scale() <= 1) return;
         for (auto& r : sync_ranges_)
             if (lo <= r.second && hi >= r.first) {
@@ -2593,6 +2851,11 @@ void ExactRdpLanes::reset() {
     }
 
 void ExactRdpLanes::flush() {
+    if (accel_on_) {
+        release_up();
+        if (accel_->dirty()) accel_->flush(*lanes_[0], rdram_, rdram_size_);
+        return;
+    }
     if (starts_.empty()) return;
     // Internal resolution: every lane draws into lane 0's high-resolution
     // copy, which first takes what the CPU changed in the frame buffers.
@@ -2618,6 +2881,17 @@ void ExactRdpLanes::flush() {
 }
 
 void ExactRdpLanes::cpu_wrote(u32 paddr, u32 len) {
+    if (accel_on_) {
+        // A write where the back end draws comes after what it draws
+        // (recorded primitives are drawn from memory as it was before).
+        if (accel_->touches(paddr, len)) {
+            note_flush(4);
+            flush();
+        }
+        lanes_[0]->cpu_wrote(paddr, len);
+        accel_->invalidate(paddr, len);
+        return;
+    }
     const auto& watched = lanes_[0]->watched_pages();
     if (watched.empty()) return;
     bool any = false;
@@ -2625,6 +2899,7 @@ void ExactRdpLanes::cpu_wrote(u32 paddr, u32 len) {
     if (!any) return;
     flush();
     lanes_[0]->cpu_wrote(paddr, len);
+    if (accel_) accel_->invalidate(paddr, len);
 }
 
 void ExactRdpLanes::run_serial(const u32* w, u32 nwords) {
@@ -2654,6 +2929,7 @@ bool ExactRdpLanes::command(const u32* w, u8* rdram, size_t rdram_size) {
     if (rdram_ != rdram || rdram_size_ != rdram_size) flush();
     rdram_ = rdram;
     rdram_size_ = rdram_size;
+    if (accel_on_) return command_accel(w, rdram, rdram_size);
     if (lanes_.size() == 1 && scale() <= 1) return lanes_[0]->command(w, rdram, rdram_size);
     // The ninth bits are allocated before any lane runs.
     if (lanes_[0]->hidden().size() != rdram_size / 2) {
@@ -2739,5 +3015,179 @@ bool ExactRdpLanes::command(const u32* w, u8* rdram, size_t rdram_size) {
     starts_.push_back(static_cast<u32>(buf_.size()));
     buf_.insert(buf_.end(), w, w + nwords);
     if (starts_.size() >= 4096) flush();
+    return false;
+}
+
+void ExactRdpLanes::note_flush(int why) {
+    static const bool stats = std::getenv("ORBIT64_GPU_STATS") != nullptr;
+    if (!stats || !accel_->dirty()) return;
+    ++accel_flushes_[why];
+    u64 n = 0;
+    for (u64 c : accel_flushes_) n += c;
+    if (n % 500 == 0)
+        std::fprintf(stderr, "exact gpu finished for: sync full %llu, texture load %llu, serial %llu, read %llu, write %llu\n",
+                     static_cast<unsigned long long>(accel_flushes_[0]), static_cast<unsigned long long>(accel_flushes_[1]),
+                     static_cast<unsigned long long>(accel_flushes_[2]), static_cast<unsigned long long>(accel_flushes_[3]),
+                     static_cast<unsigned long long>(accel_flushes_[4]));
+}
+
+void ExactRdpLanes::cpu_read(u32 paddr, u32 len) {
+    if (!accel_on_ || !accel_->touches(paddr, len)) return;
+    note_flush(3);
+    flush();
+}
+
+void ExactRdpLanes::release_up() {
+    if (cpu_up_.empty()) return;
+    if (const UpStore* up = lanes_[0]->upscaled())
+        for (const auto& r : cpu_up_) accel_->store_upscaled(*lanes_[0], r.first, r.second, *up, rdram_);
+    cpu_up_.clear();
+}
+
+bool ExactRdpLanes::command_accel(const u32* w, u8* rdram, size_t rdram_size) {
+    const u32 op = (w[0] >> 24) & 0x3f;
+    ExactRdp& front = *lanes_[0];
+    const bool pending_draws = accel_->dirty();
+    auto bytes_pp = [](u32 size) { return size == 0 ? 1u : 1u << (size - 1); };
+    bool draw = false;
+    switch (op) {
+        case 0x29: // Sync Full
+            front.command(w, rdram, rdram_size);
+            note_flush(0);
+            flush();
+            return true;
+        case 0x2d:
+            scissor_yhi_ = w[1] & 0xfff;
+            scissor_xhi_ = (w[1] >> 12) & 0xfff;
+            scissor_ylo_ = w[0] & 0xfff;
+            break;
+        case 0x2f:
+            other_h_ = w[0] & 0x00ffffff;
+            other_l_ = w[1];
+            break;
+        case 0x3d:
+            ti_size_ = (w[0] >> 19) & 3;
+            ti_width_ = (w[0] & 0x3ff) + 1;
+            ti_addr_ = w[1] & 0x00ffffff;
+            break;
+        case 0x3e: zi_addr_ = w[1] & 0x00ffffff; break;
+        case 0x3f:
+            ci_size_ = (w[0] >> 19) & 3;
+            ci_width_ = (w[0] & 1023) + 1;
+            ci_addr_ = w[1] & 0x00ffffff;
+            break;
+        case 0x30: case 0x33: case 0x34: {
+            // A load reads RDRAM now: what is recorded for memory it reads is drawn first.
+            if (pending_draws) {
+                const u32 sl = (w[0] >> 12) & 0xfff, tl = w[0] & 0xfff, sh = (w[1] >> 12) & 0xfff, th = w[1] & 0xfff;
+                const u64 bpp = bytes_pp(ti_size_);
+                u64 lo, hi;
+                if (op == 0x33) {
+                    lo = ti_addr_ + (static_cast<u64>(tl & 0x3ff) * ti_width_ + sl) * bpp;
+                    hi = lo + (static_cast<u64>(sh) + 1) * bpp + 16;
+                } else {
+                    lo = ti_addr_ + static_cast<u64>(tl >> 2) * ti_width_ * bpp;
+                    hi = ti_addr_ + (static_cast<u64>(th >> 2) + 1) * ti_width_ * bpp + 16;
+                }
+                if (accel_->touches(lo, hi - lo)) {
+                    note_flush(1);
+                    flush();
+                }
+            }
+            break;
+        }
+        case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f:
+        case 0x24: case 0x25: case 0x36:
+            draw = true;
+            break;
+        default: break;
+    }
+
+    if (draw) {
+        const u32 cycle = (other_h_ >> 20) & 3;
+        // Drawn here, in order, after everything recorded: primitives whose
+        // pixels depend on others' (the first blender cycle reading memory in
+        // 2-cycle mode: the previous pixel's; pixels past the end of a row,
+        // which land in the next; rectangles reading the stale frame buffer).
+        u64 lo, hi, zlo, zhi;
+        draw_ranges(lo, hi, zlo, zhi);
+        // (1- and 2-cycle pixels at x >= the image's width - any fraction of
+        // the scissor past it can cover one - and copy/fill ones past it land
+        // in the next row. A depth image that overlaps the colour image other
+        // than pixel for pixel makes pixels write each other's memory.)
+        const bool uses_z = cycle < 2 && (other_l_ & 0x30) != 0;
+        const bool z_overlap = uses_z && lo < zhi && zlo < hi && !(ci_addr_ == zi_addr_ && ci_size_ == 2);
+        const bool serial = (cycle == 1 && (((other_l_ >> 30) & 3) == 1 || ((other_l_ >> 22) & 3) == 1 ||
+                                            ((other_l_ >> 18) & 3) == 1)) ||
+                            (cycle < 2 ? scissor_xhi_ > ci_width_ * 4 : (scissor_xhi_ >> 2) > ci_width_) ||
+                            z_overlap || (op == 0x36 && front.fill_reads_stale(w));
+        if (serial) {
+            note_flush(2);
+            UpStore* up = scale() > 1 ? front.upscaled(rdram_size) : nullptr;
+            if (!up) {
+                flush();
+                front.set_recorder(nullptr);
+                front.command(w, rdram, rdram_size);
+                front.set_recorder(accel_.get());
+                accel_->invalidate(lo, hi - lo);
+                accel_->invalidate(zlo, zhi - zlo);
+                return false;
+            }
+            // At internal resolution the high-resolution copy of the rows it
+            // can draw comes here to be drawn into as well (staying for the
+            // serial primitives after it).
+            if (accel_->dirty()) accel_->flush(front, rdram, rdram_size);
+            u32 yh, yl;
+            if (op == 0x36 || op == 0x24 || op == 0x25) {
+                yh = w[1] & 0xfff;
+                yl = w[0] & 0xfff;
+            } else {
+                yh = static_cast<u32>(std::max(sext(static_cast<s32>(w[1]), 14), 0));
+                yl = static_cast<u32>(std::max(sext(static_cast<s32>(w[0]), 14), 0));
+            }
+            const u64 y0 = std::max(yh, scissor_ylo_) >> 2, y1 = (std::min(yl, scissor_yhi_) >> 2) + 2;
+            const u64 bpp = bytes_pp(ci_size_);
+            std::vector<std::pair<u64, u64>> rs = {{ci_addr_ + y0 * ci_width_ * bpp, ci_addr_ + y1 * ci_width_ * bpp + 8}};
+            if (uses_z) rs.emplace_back(zi_addr_ + y0 * ci_width_ * 2, zi_addr_ + y1 * ci_width_ * 2 + 8);
+            bool held = true;
+            for (const auto& r : rs) {
+                bool in = false;
+                for (const auto& c : cpu_up_) in |= r.first >= c.first && r.second <= c.second;
+                held &= in;
+            }
+            if (!held) {
+                // (the first serial primitive takes its own rows; when one
+                // after it needs more, the images go back and come whole)
+                const bool more = !cpu_up_.empty();
+                release_up();
+                if (more) {
+                    rs = {{lo, hi}};
+                    if (uses_z) rs.emplace_back(zlo, zhi);
+                }
+                for (const auto& r : rs) {
+                    accel_->fetch_upscaled(r.first, r.second, *up);
+                    fetching_up_ = true;
+                    front.up_sync_before(r.first, r.second, rdram, rdram_size);
+                    fetching_up_ = false;
+                    cpu_up_.push_back(r);
+                }
+            }
+            front.set_native_draws(false);
+            front.set_recorder(nullptr);
+            front.command(w, rdram, rdram_size);
+            front.set_recorder(accel_.get());
+            front.set_native_draws(true);
+            for (const auto& r : rs) front.up_sync_after(r.first, r.second, rdram, rdram_size);
+            return false;
+        }
+        release_up();
+    }
+    front.command(w, rdram, rdram_size);
+    // The GPU starts on what is recorded while the CPU goes on.
+    static const u32 submit_at = [] {
+        const char* e = std::getenv("ORBIT64_EXACT_GPU_BATCH");
+        return e ? static_cast<u32>(std::max(1, std::atoi(e))) : 64u;
+    }();
+    if (accel_->pending() >= submit_at) accel_->submit(front, rdram, rdram_size);
     return false;
 }

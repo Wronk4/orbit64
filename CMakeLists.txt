@@ -114,9 +114,10 @@ foreach(check rdp_check rdp_check_exact)
 endforeach()
 target_compile_definitions(rdp_check_exact PRIVATE HIRES_EXACT_TEST)
 # Save state round trip (tools/savestate_check.cpp), not built by default.
-add_executable(savestate_check EXCLUDE_FROM_ALL tools/savestate_check.cpp ${CHECK_SOURCES})
+# (--gpu-exact runs the bit-exact RDP on the GPU.)
+add_executable(savestate_check EXCLUDE_FROM_ALL tools/savestate_check.cpp ${CHECK_SOURCES} ${GPU_SOURCES})
 target_include_directories(savestate_check PRIVATE src third_party/stb)
-target_link_libraries(savestate_check PRIVATE Threads::Threads)
+target_link_libraries(savestate_check PRIVATE SDL3::SDL3 Threads::Threads)
 
 # Plays a ROM headless and records how it reacts to input (tools/game_probe.cpp,
 # driven by tools/game_status.py), not built by default.
@@ -135,6 +136,15 @@ target_include_directories(gpu_check PRIVATE src third_party/stb)
 target_link_libraries(gpu_check PRIVATE SDL3::SDL3 Threads::Threads)
 if(WIN32)
     target_compile_definitions(gpu_check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# Bit-exact RDP on the GPU vs on the CPU (tools/exact_gpu_check.cpp), not built by default.
+add_executable(exact_gpu_check EXCLUDE_FROM_ALL tools/exact_gpu_check.cpp ${CHECK_SOURCES} ${GPU_SOURCES})
+target_include_directories(exact_gpu_check PRIVATE src third_party/stb)
+target_link_libraries(exact_gpu_check PRIVATE SDL3::SDL3 Threads::Threads)
+if(WIN32)
+    target_compile_definitions(exact_gpu_check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(savestate_check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 endif()
 
 # Host audio path checks (tools/audio_check.cpp), not built by default.

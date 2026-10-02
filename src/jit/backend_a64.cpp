@@ -385,6 +385,15 @@ void emit_load_store(Gen& g, const Decoded& d, u32 site, const void* helper) {
     if (k) a.ror_imm(1, 1, k, false);
     a.cmp_imm(1, (g.ram_limit >> k) >> 12, false, true); // 4 or 8 MB (Bus::get_ram_limit)
     const size_t to_slow = a.bcond(HS);
+    // A load from memory the RDP is drawing on the GPU reports it first
+    // (jit::notify_read, through the slow path's Bus::read*).
+    size_t to_slow_read = ~size_t{0};
+    if (!is_store && jit::g_read_checks) {
+        a.lsr_imm(3, 1, 6 - k, false);
+        a.ldrb_r(3, X_PAGES, 3, Extend::UXTW, false);
+        a.tst_imm(3, jit::kReadWatched, false);
+        to_slow_read = a.bcond(Cond::NE);
+    }
 
     if (is_store) {
         int v;
@@ -471,8 +480,9 @@ void emit_load_store(Gen& g, const Decoded& d, u32 site, const void* helper) {
         store(g, d.rt, 2);
     }
     const size_t cont = a.pos();
-    g.stubs.push_back([&g, to_slow, cont, slow_call]() {
+    g.stubs.push_back([&g, to_slow, to_slow_read, cont, slow_call]() {
         g.a.patch_branch(to_slow, g.a.pos());
+        if (to_slow_read != ~size_t{0}) g.a.patch_branch(to_slow_read, g.a.pos());
         g.a.patch_branch(slow_call(), cont);
     });
 }

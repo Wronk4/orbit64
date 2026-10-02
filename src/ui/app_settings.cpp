@@ -145,7 +145,7 @@ void App::draw_settings() {
             case SettingsPage::Audio: settings_.reset_audio(); open_audio(); break;
             case SettingsPage::Controller: settings_.reset_port(settings_port_); break;
             case SettingsPage::Shortcuts: settings_.reset_shortcuts(); hotkey_capture_ = -1; break;
-            case SettingsPage::Emulation: settings_.reset_emulation(); core_.set_ucode_override(0); core_.set_cpu_core(settings_.cpu_core); core_.set_rsp_mode(settings_.rsp_mode); core_.set_rdp_exact(settings_.rdp_exact); break;
+            case SettingsPage::Emulation: settings_.reset_emulation(); core_.set_ucode_override(0); core_.set_cpu_core(settings_.cpu_core); core_.set_rsp_mode(settings_.rsp_mode); core_.set_rdp_exact(settings_.rdp_exact); core_.set_rdp_exact_gpu(settings_.rdp_exact_gpu); break;
             default: break;
         }
         toast(std::string(pi.name) + " settings restored to defaults");
@@ -1110,14 +1110,18 @@ void App::settings_emulation() {
     row_begin("Low-level RDP",
               "How low-level graphics are drawn. Bit-exact reproduces the console's RDP pixel for pixel (dithering, "
               "coverage, depth precision); at a higher internal resolution the game still sees the exact picture "
-              "and the screen shows the same pipeline drawn at that resolution. Fast draws them through the "
-              "high-level renderer, which is quicker but not exact.", cw);
+              "and the screen shows the same pipeline drawn at that resolution. Bit-exact (GPU) draws the same "
+              "pixels, internal resolution included, with compute shaders on the graphics card, leaving the CPU to "
+              "the rest of the console (needs the GPU video backend). Fast draws them through the high-level "
+              "renderer, which is quicker but not exact.", cw);
     {
-        const char* items[] = {"Bit-exact", "Fast"};
-        int cur = settings_.rdp_exact ? 0 : 1;
-        if (combo("rdpexact", &cur, items, 2, cw)) {
-            settings_.rdp_exact = cur == 0;
+        const char* items[] = {"Bit-exact (GPU)", "Bit-exact (CPU)", "Fast"};
+        int cur = !settings_.rdp_exact ? 2 : settings_.rdp_exact_gpu ? 0 : 1;
+        if (combo("rdpexact", &cur, items, 3, cw)) {
+            settings_.rdp_exact = cur != 2;
+            if (cur != 2) settings_.rdp_exact_gpu = cur == 0;
             core_.set_rdp_exact(settings_.rdp_exact);
+            core_.set_rdp_exact_gpu(settings_.rdp_exact_gpu);
         }
     }
     row_end();

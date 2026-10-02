@@ -46,16 +46,29 @@ def compile_shader(path, tmp):
     return name, spirv, msl, hlsl
 
 
-def c_bytes(data):
+def c_words(data):
+    # SPIR-V is a stream of 32-bit words.
+    words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
     lines = []
-    for i in range(0, len(data), 20):
-        lines.append("    " + ", ".join("0x%02x" % b for b in data[i:i + 20]) + ",")
+    for i in range(0, len(words), 10):
+        lines.append("    " + ", ".join("0x%08x" % w for w in words[i:i + 10]) + ",")
     return "\n".join(lines)
 
 
 def c_text(text):
-    # As bytes (plus a terminating zero): MSVC caps string literals at 64 KB.
-    return c_bytes(text.encode("utf-8") + b"\0")
+    # Raw string literals of at most ~12 KB each (MSVC caps a literal at 16 KB,
+    # a concatenation at 64 KB), split at line ends, joined at run time.
+    parts, cur = [], ""
+    for line in text.splitlines(keepends=True):
+        if len(cur) + len(line) > 12000 and cur:
+            parts.append(cur)
+            cur = ""
+        cur += line
+    if cur:
+        parts.append(cur)
+    for p in parts:
+        assert ")orbit\"" not in p
+    return "\n".join('    R"orbit(%s)orbit",' % p for p in parts) + "\n    nullptr,"
 
 
 def main():
@@ -71,19 +84,27 @@ def main():
     ]
     for name, spirv, msl, hlsl in built:
         parts += [
-            "static const unsigned char %s_spirv[] = {" % name,
-            c_bytes(spirv),
+            "static const unsigned int %s_spirv[] = {" % name,
+            c_words(spirv),
             "};",
-            "static const unsigned char %s_msl[] = {" % name,
+            "static const char* const %s_msl[] = {" % name,
             c_text(msl),
             "};",
-            "static const unsigned char %s_hlsl[] = {" % name,
+            "static const char* const %s_hlsl[] = {" % name,
             c_text(hlsl),
             "};",
-            "const Blob %s = {%s_spirv, sizeof(%s_spirv), reinterpret_cast<const char*>(%s_msl),"
-            " reinterpret_cast<const char*>(%s_hlsl)};" % (name, name, name, name, name),
+            "const Blob %s = {reinterpret_cast<const unsigned char*>(%s_spirv), sizeof(%s_spirv), %s_msl, %s_hlsl};"
+            % (name, name, name, name, name),
             "",
         ]
+    parts += [
+        "std::string text(const char* const* parts) {",
+        "    std::string s;",
+        "    for (; *parts; ++parts) s += *parts;",
+        "    return s;",
+        "}",
+        "",
+    ]
     parts.append("} // namespace gpu::shaders")
     with open(OUT, "w", newline="\n") as f:
         f.write("\n".join(parts) + "\n")

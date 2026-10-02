@@ -54,6 +54,7 @@ void SI::write_reg(u32 addr, u32 val, MI& mi, PIF& pif, Controller controllers[4
 
             u32 cur_dram = dram_addr & (rdram_size - 1);
             u8* pif_ram = pif.get_ram();
+            jit::notify_read(cur_dram, static_cast<u32>(std::min<size_t>(64, rdram_size - cur_dram)));
             for (u32 i = 0; i < 64 && cur_dram + i < rdram_size; ++i) {
                 pif_ram[i] = rdram[cur_dram + i];
             }

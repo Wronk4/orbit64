@@ -142,6 +142,10 @@ public:
     // Low-level graphics drawn by the bit-exact RDP or the fast one (both
     // follow the internal resolution).
     void set_rdp_exact(bool on) { rdp_exact_ = on; }
+    // The bit-exact RDP's pixels on the GPU (when the factory below is set).
+    void set_rdp_exact_gpu(bool on) { rdp_exact_gpu_ = on; }
+    // Who draws them (gpu::make_exact_accel_factory), or nullptr. Applied at the next frame.
+    void set_exact_accel_factory(ExactAccelFactory f);
     // Frame rate limit: 0 = console default (VI rate), >0 = that many frames per second.
     void set_fps_limit(int fps) { fps_limit_ = fps; }
     // Internal resolution of the software RDP: 1 = the game's frame buffer
@@ -238,6 +242,9 @@ private:
     std::atomic<int> cpu_core_{1};
     std::atomic<int> rsp_mode_{0};
     std::atomic<bool> rdp_exact_{true};
+    std::atomic<bool> rdp_exact_gpu_{true};
+    ExactAccelFactory exact_factory_;  // guarded by factory_mutex_
+    bool exact_factory_dirty_ = false; // guarded by factory_mutex_
     std::atomic<int> fps_limit_{0};
     std::atomic<int> internal_scale_{1};
     std::mutex factory_mutex_;

@@ -129,6 +129,10 @@ RDP::RDP(bool geometry_only) : geometry_only_(geometry_only) {
     jit::set_write_hook(this, [](void* owner, u32 paddr, u32 len) {
         static_cast<RDP*>(owner)->exact_.cpu_wrote(paddr, len);
     });
+    // Reads of what the bit-exact RDP still draws on the GPU wait for it.
+    jit::set_read_hook(this, [](void* owner, u32 paddr, u32 len) {
+        static_cast<RDP*>(owner)->exact_.cpu_read(paddr, len);
+    });
     if (const char* e = std::getenv("ORBIT64_PICK")) std::sscanf(e, "%d,%d,%d", &pick_x_, &pick_y_, &pick_frame_);
     if (const char* e = std::getenv("ORBIT64_DL_TRACE")) {
         dl_trace_frame_ = std::atoi(e);
@@ -138,6 +142,7 @@ RDP::RDP(bool geometry_only) : geometry_only_(geometry_only) {
 
 RDP::~RDP() {
     jit::clear_write_hook_if(this);
+    jit::clear_read_hook_if(this);
 }
 
 void RDP::set_capture(bool on) {
@@ -196,7 +201,9 @@ void RDP::reset() {
     raw_unbind_ = true;
     exact_.reset();
     if (const char* e = std::getenv("ORBIT64_RDP")) {
-        env_exact_ = std::strcmp(e, "exact") == 0 ? 1 : std::strcmp(e, "fast") == 0 ? 0 : -1;
+        const bool gpu = std::strcmp(e, "exact-gpu") == 0;
+        env_exact_ = std::strcmp(e, "exact") == 0 || gpu ? 1 : std::strcmp(e, "fast") == 0 ? 0 : -1;
+        env_exact_gpu_ = gpu ? 1 : env_exact_ == 1 ? 0 : -1;
         if (env_exact_ >= 0) exact_mode_ = env_exact_ != 0;
     }
     dpc_current = 0;
@@ -336,6 +343,19 @@ void RDP::recreate_hires() {
 void RDP::clear_zbuffer() {
     flush_native();
     if (hires_) hires_->clear_depth();
+}
+
+void RDP::set_exact_accel_factory(ExactAccelFactory f) {
+    exact_accel_factory_ = std::move(f);
+    exact_.set_accel(nullptr); // (made with the previous factory)
+    set_exact_gpu(exact_gpu_);
+}
+
+void RDP::set_exact_gpu(bool on) {
+    exact_gpu_ = env_exact_gpu_ >= 0 ? env_exact_gpu_ != 0 : on;
+    const bool want = exact_gpu_ && exact_accel_factory_;
+    if (want == exact_.has_accel()) return;
+    exact_.set_accel(want ? exact_accel_factory_() : nullptr);
 }
 
 void RDP::set_hires_scale(u32 scale) {

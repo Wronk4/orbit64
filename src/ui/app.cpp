@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "platform.hpp"
+#include "../gpu/rdp_exact_gpu.hpp"
 #include "../gpu/rdp_gpu.hpp"
 
 #include "imgui.h"
@@ -214,10 +215,12 @@ void App::apply_hires_renderer() {
     const char* force = std::getenv("ORBIT64_HIRES");
     const bool use_gpu = gpu_dev_ && gpu_dev_->ok() && !(force && std::string(force) == "cpu");
     core_.set_hires_factory(use_gpu ? gpu::make_hires_factory(gpu_dev_) : HiResFactory());
+    core_.set_exact_accel_factory(gpu_dev_ ? gpu::make_exact_accel_factory(gpu_dev_) : ExactAccelFactory());
 }
 
 void App::destroy_renderer() {
     core_.set_hires_factory(nullptr);
+    core_.set_exact_accel_factory(nullptr);
     release_gpu_frames();
     if (stream_tex_) SDL_DestroyTexture(stream_tex_);
     stream_tex_ = nullptr;
@@ -783,6 +786,7 @@ void App::launch(const fs::path& rom) {
         core_.set_cpu_core(settings_.cpu_core);
         core_.set_rsp_mode(settings_.rsp_mode);
         core_.set_rdp_exact(settings_.rdp_exact);
+        core_.set_rdp_exact_gpu(settings_.rdp_exact_gpu);
         std::string err;
         if (!core_.start(rom, err)) {
             error_title_ = "Failed to start emulation";

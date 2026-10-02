@@ -29,11 +29,32 @@ Recompiler::Recompiler() : code_pages_(RDRAM_SIZE >> kPageShift, 0), jcache_(1u 
     jit::set_invalidate_hook(this, [](void* owner, u32 paddr, u32 len) {
         static_cast<Recompiler*>(owner)->request_invalidate(paddr, len);
     });
+    jit::set_read_watch_hook(this, [](void* owner, u32 paddr, u32 len, bool on) {
+        auto& pages = static_cast<Recompiler*>(owner)->code_pages_;
+        const u32 last = (paddr + len - 1) >> kPageShift;
+        for (u32 p = paddr >> kPageShift; p <= last && p < pages.size(); ++p) {
+            if (on) pages[p] |= kPageReadWatched;
+            else pages[p] &= ~kPageReadWatched;
+        }
+    });
+    jit::set_codegen_hook(this, [](void* owner) {
+        auto* r = static_cast<Recompiler*>(owner);
+        r->pending_invalidate_ = true;
+        if (r->active_ctx_) r->active_ctx_->exit_req = 1;
+    });
+    jit::g_page_flags = code_pages_.data();
+    jit::g_page_count = static_cast<u32>(code_pages_.size());
 }
 
 Recompiler::~Recompiler() {
     jit::clear_invalidate_hook_if(this);
     jit::clear_watch_hook_if(this);
+    jit::clear_read_watch_hook_if(this);
+    jit::clear_codegen_hook_if(this);
+    if (jit::g_page_flags == code_pages_.data()) {
+        jit::g_page_flags = nullptr;
+        jit::g_page_count = 0;
+    }
 }
 
 void Recompiler::invalidate_all() {
@@ -43,7 +64,7 @@ void Recompiler::invalidate_all() {
         map->last_block = nullptr;
     }
     code_.reset();
-    for (u8& page : code_pages_) page &= kPageWatched;
+    for (u8& page : code_pages_) page &= kPageWatched | kPageReadWatched;
     page_blocks_.clear();
     dirty_pages_.clear();
     pending_links_.clear();
@@ -718,6 +739,16 @@ void emit_fast_load(Assembler& x, const Decoded& d, void* fn, u32 site, std::vec
     default: break;                        // LW, LWU
     }
     const size_t slow = emit_fastmem_address(x, d, size);
+    // A load from memory the RDP is drawing on the GPU reports it first
+    // (jit::notify_read, through the helper's Bus::read*).
+    size_t slow_read = 0;
+    if (jit::g_read_checks) {
+        x.mov_reg_reg32(RDX, RCX);
+        x.shr_ri(false, RDX, 6);
+        x.load_idx8_zx(RDX, R_PAGES, RDX);
+        x.and_ri(false, RDX, jit::kReadWatched);
+        slow_read = x.jcc_rel32(Cc::NE);
+    }
     switch (d.op) {
     case 0x20: // LB
         x.load_idx8_zx(RAX, R_MEM, RCX);
@@ -756,6 +787,7 @@ void emit_fast_load(Assembler& x, const Decoded& d, void* fn, u32 site, std::vec
     if (d.rt != 0) x.store_mem64(R_GPR, d.rt * 8, RAX);
     const size_t done = x.jmp_rel32();
     x.patch_rel32(slow, x.pos());
+    if (jit::g_read_checks) x.patch_rel32(slow_read, x.pos());
     emit_load(x, d, fn, site, fault_patches);
     x.patch_rel32(done, x.pos());
 }

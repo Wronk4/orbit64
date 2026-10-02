@@ -1,6 +1,7 @@
 #include "ai.hpp"
 #include "mi.hpp"
 #include "audio_stream.hpp"
+#include "jit/jit_invalidate.hpp"
 
 AI::AI() {
     reset();
@@ -65,6 +66,7 @@ void AI::write_reg(u32 addr, u32 val, MI& mi, const u8* rdram, size_t rdram_size
             // The samples play at the native AI_DACRATE rate; the host side
             // (AudioStream) resamples them to the device rate.
             if (dram_addr_reg + length <= rdram_size && (sink_ || capture)) {
+                jit::notify_read(dram_addr_reg, length);
                 const u32 frame_count = length / 4;
                 frames_.resize(frame_count * 2);
                 for (u32 i = 0; i < frame_count * 2; i++) {

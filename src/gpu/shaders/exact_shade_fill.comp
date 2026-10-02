@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// The bit-exact RDP's shading, for fill-mode primitives (exact_shade_main.glsl).
+#define EXACT_VARIANT 5
+#include "exact_shade_main.glsl"

@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// The bit-exact RDP at internal resolution: RDRAM blocks the CPU changed go to
+// the GPU's copy of RDRAM, and every halfword whose bytes changed to all the
+// samples of the high-resolution copy too (ExactRdp::up_sync_before).
+// A thread per 8 bytes of a 64-byte block.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 2
+#define NUM_RW_TEX 0
+#include "common.glsl"
+#include "exact_layout.h"
+
+layout(std430, RO_BUFFER(0)) readonly buffer Data { uint D[]; };
+layout(std430, RO_BUFFER(1)) readonly buffer Pages { uint PT[]; };
+layout(std430, RW_BUFFER(0)) buffer Rdram { uint R[]; };
+layout(std430, RW_BUFFER(1)) buffer Hidden { uint H[]; };
+layout(std430, RW_BUFFER(2)) buffer UpColor { uint UC[]; };
+layout(std430, RW_BUFFER(3)) buffer UpHidden { uint UH[]; };
+
+layout(std140, UNIFORM(0)) uniform Params {
+    uint blocks;   // word offset of the blocks' RDRAM addresses
+    uint count;    // blocks
+    uint bytes;    // word offset of their new bytes (16 words each)
+    uint hidden;   // word offset of their ninth bits (8 words each)
+    uint scale;
+    uint pad0, pad1, pad2;
+} P;
+
+void main() {
+    const uint t = gl_GlobalInvocationID.x;
+    const uint b = t >> 3, part = t & 7u;
+    if (b >= P.count) return;
+    const uint addr = D[P.blocks + b] + part * 8u; // the RDRAM bytes [addr, addr + 8)
+    const uint w = addr >> 2, hw = addr >> 3;     // colour words w, w + 1; hidden word hw (halfwords 4hw..)
+    const uint n0 = D[P.bytes + b * 16u + part * 2u], n1 = D[P.bytes + b * 16u + part * 2u + 1u];
+    const uint nh = D[P.hidden + b * 8u + part];
+    const uint o0 = R[w], o1 = R[w + 1u];
+    R[w] = n0;
+    R[w + 1u] = n1;
+    H[hw] = nh;
+    if (P.scale <= 1u) return;
+    const uint slot = PT[addr >> EXACT_PAGE_SHIFT];
+    if (slot == EXACT_NO_SLOT) return;
+    // halfwords whose bytes changed: masks per colour word and on the ninth-bit word
+    uint m0 = 0u, m1 = 0u, mh = 0u;
+    if ((n0 & 0xffffu) != (o0 & 0xffffu)) { m0 |= 0xffffu; mh |= 0xffu; }
+    if ((n0 >> 16) != (o0 >> 16)) { m0 |= 0xffff0000u; mh |= 0xff00u; }
+    if ((n1 & 0xffffu) != (o1 & 0xffffu)) { m1 |= 0xffffu; mh |= 0xff0000u; }
+    if ((n1 >> 16) != (o1 >> 16)) { m1 |= 0xffff0000u; mh |= 0xff000000u; }
+    if ((m0 | m1) == 0u) return;
+    const uint samples = P.scale * P.scale;
+    const uint page_words = (1u << EXACT_PAGE_SHIFT) >> 2;
+    const uint cw = (addr & ((1u << EXACT_PAGE_SHIFT) - 1u)) >> 2; // colour word in the page
+    const uint hwp = cw >> 1;                                       // hidden word in the page
+    for (uint s = 0u; s < samples; ++s) {
+        const uint cbase = (slot * samples + s) * page_words + cw;
+        UC[cbase] = (UC[cbase] & ~m0) | (n0 & m0);
+        UC[cbase + 1u] = (UC[cbase + 1u] & ~m1) | (n1 & m1);
+        const uint hbase = (slot * samples + s) * (page_words >> 1) + hwp;
+        UH[hbase] = (UH[hbase] & ~mh) | (nh & mh);
+    }
+}

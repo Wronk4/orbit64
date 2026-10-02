@@ -117,6 +117,7 @@ struct Settings {
     int ucode_override = 0;  // 0 = Auto, then MicrocodeType order
     int rsp_mode = 0;        // RspMode: 0 = HLE, 1 = LLE graphics, 2 = LLE graphics and audio
     bool rdp_exact = true;   // low-level graphics: bit-exact RDP instead of the fast one
+    bool rdp_exact_gpu = true; // ...drawing its pixels on the GPU
     int ff_speed = 3;        // fast-forward multiplier (0 = unlimited)
     bool limit_speed = true;
     bool expansion_pak = true; // 8 MB RDRAM; off = 4 MB (applies at the next start / reset)

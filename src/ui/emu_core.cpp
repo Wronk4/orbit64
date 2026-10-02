@@ -73,6 +73,8 @@ bool EmuCore::start(const std::filesystem::path& rom, std::string& error) {
         std::lock_guard<std::mutex> lk(factory_mutex_);
         emu->get_rdp().set_hires_factory(hires_factory_);
         factory_dirty_ = false;
+        emu->get_rdp().set_exact_accel_factory(exact_factory_);
+        exact_factory_dirty_ = false;
     }
 
     {
@@ -352,6 +354,12 @@ bool EmuCore::snapshot(std::vector<std::uint32_t>& out, int& w, int& h, int* sca
     return true;
 }
 
+void EmuCore::set_exact_accel_factory(ExactAccelFactory f) {
+    std::lock_guard<std::mutex> lk(factory_mutex_);
+    exact_factory_ = std::move(f);
+    exact_factory_dirty_ = true;
+}
+
 void EmuCore::set_hires_factory(HiResFactory f) {
     std::lock_guard<std::mutex> lk(factory_mutex_);
     hires_factory_ = std::move(f);
@@ -501,7 +509,12 @@ void EmuCore::run_one_frame(FrameClock& fc) {
             emu_->get_rdp().recreate_hires();
             factory_dirty_ = false;
         }
+        if (exact_factory_dirty_) {
+            emu_->get_rdp().set_exact_accel_factory(exact_factory_);
+            exact_factory_dirty_ = false;
+        }
     }
+    emu_->get_rdp().set_exact_gpu(rdp_exact_gpu_.load());
     emu_->get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale_.load(), 1, 8)));
     std::string gb_rom[4];
     {

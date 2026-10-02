@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// The bit-exact RDP at internal resolution: a page newly in the
+// high-resolution copy starts as the GPU's copy of RDRAM has it, in every
+// sample. A thread per word of the page.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 2
+#define NUM_RW_TEX 0
+#include "common.glsl"
+#include "exact_layout.h"
+
+layout(std430, RO_BUFFER(0)) readonly buffer Data { uint D[]; };
+layout(std430, RO_BUFFER(1)) readonly buffer Pages { uint PT[]; };
+layout(std430, RW_BUFFER(0)) buffer Rdram { uint R[]; };
+layout(std430, RW_BUFFER(1)) buffer Hidden { uint H[]; };
+layout(std430, RW_BUFFER(2)) buffer UpColor { uint UC[]; };
+layout(std430, RW_BUFFER(3)) buffer UpHidden { uint UH[]; };
+
+layout(std140, UNIFORM(0)) uniform Params {
+    uint pages; // word offset of the RDRAM page numbers
+    uint count;
+    uint scale;
+    uint pad0;
+} P;
+
+void main() {
+    const uint page_words = (1u << EXACT_PAGE_SHIFT) >> 2;
+    const uint t = gl_GlobalInvocationID.x;
+    const uint p = t / page_words, w = t % page_words;
+    if (p >= P.count) return;
+    const uint page = D[P.pages + p];
+    const uint slot = PT[page];
+    const uint samples = P.scale * P.scale;
+    const uint c = R[page * page_words + w];
+    for (uint s = 0u; s < samples; ++s) UC[(slot * samples + s) * page_words + w] = c;
+    if (w < (page_words >> 1)) {
+        const uint h = H[page * (page_words >> 1) + w];
+        for (uint s = 0u; s < samples; ++s) UH[(slot * samples + s) * (page_words >> 1) + w] = h;
+    }
+}

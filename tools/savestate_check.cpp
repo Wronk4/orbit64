@@ -14,14 +14,19 @@
 //
 //   make savestate_check   -> bin/savestate_check
 //
-//   bin/savestate_check rom.z64 [--at N] [--after M] [--mash btn|none] [--int] [--scale S]
+//   bin/savestate_check rom.z64 [--at N] [--after M] [--mash btn|none] [--int] [--scale S] [--gpu-exact]
 //
 // --int runs on the interpreter instead of the JIT. --scale runs B and C at
 // that internal resolution: RDRAM must not change (images are compared at 1
-// only). Save files next to the ROM are neither read nor written.
+// only). --gpu-exact draws low-level graphics with the bit-exact RDP on the
+// GPU (with ORBIT64_RSP=lle-gfx). Save files next to the ROM are neither
+// read nor written.
 
 #include "emulator.hpp"
+#include "gpu/device.hpp"
+#include "gpu/rdp_exact_gpu.hpp"
 #include "savestate.hpp"
+#include <SDL3/SDL.h>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -46,6 +51,7 @@ struct Options {
     std::string rom, mash = "start";
     int at = 600, after = 600, scale = 1;
     bool interp = false;
+    ExactAccelFactory exact_gpu; // --gpu-exact
 };
 
 struct Run {
@@ -59,6 +65,10 @@ bool boot(Run& r, const Options& o, int scale) {
     if (!r.emu->load_rom(o.rom)) return false;
     r.emu->set_cpu_core(o.interp ? CpuCore::Interpreter : CpuCore::Recompiler);
     r.emu->get_rdp().set_hires_scale(static_cast<u32>(scale));
+    if (o.exact_gpu) {
+        r.emu->get_rdp().set_exact_accel_factory(o.exact_gpu);
+        r.emu->get_rdp().set_exact_gpu(true);
+    }
     return true;
 }
 
@@ -117,6 +127,14 @@ int main(int argc, char** argv) {
         else if (a == "--mash") o.mash = next();
         else if (a == "--int") o.interp = true;
         else if (a == "--scale") o.scale = std::stoi(next());
+        else if (a == "--gpu-exact") {
+            static std::shared_ptr<gpu::Device> dev;
+            if (!SDL_Init(SDL_INIT_VIDEO) || !(dev = std::make_shared<gpu::Device>(gpu::create_device()))->exact_ok()) {
+                std::fprintf(stderr, "no GPU for the bit-exact RDP\n");
+                return 1;
+            }
+            o.exact_gpu = gpu::make_exact_accel_factory(dev);
+        }
         else o.rom = a;
     }
     if (o.mash == "none") o.mash.clear();
