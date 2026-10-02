@@ -1,4 +1,4 @@
-# Builds Orbit64 for macOS, Linux and Windows (x64 and ARM64) on every push.
+# Builds Orbit64 for macOS, Linux, Windows and FreeBSD (x64 and ARM64) on every push.
 #
 #   push to main     -> a new release v<major>.<minor>.<commits on main>; major.minor
 #                       come from project(VERSION) in CMakeLists.txt
@@ -7,7 +7,8 @@
 #                       artifacts in the Actions tab, kept 14 days, no release page
 #
 # SDL3 is built from source and linked statically, so every archive holds a
-# single self-contained executable.
+# single self-contained executable. FreeBSD has no hosted runners: it builds
+# inside a FreeBSD VM on an Ubuntu runner (ARM64 emulated, so it's the slowest job).
 name: Build
 
 on:
@@ -152,8 +153,59 @@ jobs:
           path: dist/orbit64-${{ matrix.name }}.*
           retention-days: 14
 
+  # GitHub has no FreeBSD runners: vmactions/freebsd-vm boots FreeBSD in QEMU on
+  # an x86-64 Ubuntu runner (aarch64 is fully emulated, so expect a long build).
+  # Built on 14.3 so the binary also runs on 15.x. Base clang + libc++.
+  freebsd:
+    name: freebsd-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            vmarch: x86_64
+          - arch: arm64
+            vmarch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14.3'
+          arch: ${{ matrix.vmarch }}
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkg install -y cmake ninja pkgconf evdev-proto libinotify libudev-devd \
+              libX11 libXext libXrandr libXcursor libXfixes libXi libXScrnSaver libXtst \
+              libxkbcommon wayland wayland-protocols libdecor mesa-libs libglvnd \
+              alsa-lib pulseaudio pipewire sndio dbus
+          run: |
+            set -e
+            cmake -S . -B out -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DORBIT64_VENDOR_SDL3=ON \
+              -DORBIT64_SDL3_STATIC=ON
+            cmake --build out --config Release --parallel
+            cmake --build out --config Release --target jit_selftest
+            ./out/jit_selftest
+            mkdir -p dist/orbit64/roms
+            cp out/orbit64 README.md dist/orbit64/
+            cp roms/README.md dist/orbit64/roms/
+            cd dist && tar -czf orbit64-freebsd-${{ matrix.arch }}.tar.gz orbit64 && ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-freebsd-${{ matrix.arch }}
+          path: dist/orbit64-freebsd-${{ matrix.arch }}.tar.gz
+          retention-days: 14
+
   release:
-    needs: build
+    needs: [build, freebsd]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
@@ -203,6 +255,8 @@ jobs:
             echo "| macOS 11+ (Apple Silicon and Intel) | \`orbit64-macos-universal.zip\` |"
             echo "| Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | \`orbit64-linux-x64.tar.gz\` |"
             echo "| Linux ARM64 (glibc 2.35+, e.g. Ubuntu 22.04+, Raspberry Pi OS 64-bit bookworm+) | \`orbit64-linux-arm64.tar.gz\` |"
+            echo "| FreeBSD 14.3+ x64 | \`orbit64-freebsd-x64.tar.gz\` |"
+            echo "| FreeBSD 14.3+ ARM64 | \`orbit64-freebsd-arm64.tar.gz\` |"
             echo
             echo "macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`"
             echo "(or right-click the executable, Open) before starting it the first time."
