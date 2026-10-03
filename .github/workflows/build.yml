@@ -244,68 +244,61 @@ jobs:
           path: dist/orbit64-linux-x86.tar.gz
           retention-days: 14
 
-  # Linux ARMv7 (32-bit armhf) and RISC-V 64 via QEMU user emulation
-  linux-emulated:
+  # Linux cross-compiled targets: ARMv7 (32-bit armhf) and RISC-V 64
+  # Cross-compiled natively on x86-64 runners in seconds, tested with qemu-user
+  linux-cross:
     name: linux-${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: armhf
-            image: arm32v7/debian:bookworm
-            platform: linux/arm/v7
+            arch: arm-linux-gnueabihf
+            proc: armv7l
+            qemu: qemu-arm-static
+            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
           - name: riscv64
-            image: riscv64/debian:sid
-            platform: linux/riscv64
+            arch: riscv64-linux-gnu
+            proc: riscv64
+            qemu: qemu-riscv64-static
+            packages: gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Install cross-toolchain and QEMU runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build qemu-user-static ${{ matrix.packages }}
       - name: Build
         run: |
-          docker run --platform ${{ matrix.platform }} --rm -v ${{ github.workspace }}:/work -w /work ${{ matrix.image }} sh -c "
-            apt-get update && apt-get install -y --no-install-recommends \
-              cmake ninja-build gcc g++ git pkg-config ca-certificates \
-              libasound2-dev libpulse-dev libx11-dev libxext-dev libxrandr-dev \
-              libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
-              libxkbcommon-dev libwayland-dev libdecor-0-dev libdrm-dev \
-              libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
-              libdbus-1-dev libudev-dev
-            cmake -S . -B out -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DORBIT64_VENDOR_SDL3=ON \
-              -DORBIT64_SDL3_STATIC=ON \
-              '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc'
-            cmake --build out --config Release --parallel
-            cmake --build out --config Release --target jit_selftest
-            ./out/jit_selftest
-            mkdir -p dist/orbit64/roms
-            cp out/orbit64 README.md dist/orbit64/
-            cp roms/README.md dist/orbit64/roms/
-            cd dist && tar -czf orbit64-linux-${{ matrix.name }}.tar.gz orbit64
-          "
+          cmake -S . -B out -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.proc }} \
+            -DCMAKE_C_COMPILER=${{ matrix.arch }}-gcc \
+            -DCMAKE_CXX_COMPILER=${{ matrix.arch }}-g++ \
+            -DORBIT64_VENDOR_SDL3=ON \
+            -DORBIT64_SDL3_STATIC=ON \
+            -DSDL_UNIX_CONSOLE_BUILD=ON \
+            '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc'
+          cmake --build out --config Release --parallel
+          cmake --build out --config Release --target jit_selftest
+          ${{ matrix.qemu }} ./out/jit_selftest
+          mkdir -p dist/orbit64/roms
+          cp out/orbit64 README.md dist/orbit64/
+          cp roms/README.md dist/orbit64/roms/
+          cd dist && tar -czf orbit64-linux-${{ matrix.name }}.tar.gz orbit64
       - uses: actions/upload-artifact@v4
         with:
           name: orbit64-linux-${{ matrix.name }}
           path: dist/orbit64-linux-${{ matrix.name }}.tar.gz
           retention-days: 14
 
-  # GitHub has no FreeBSD runners: vmactions/freebsd-vm boots FreeBSD in QEMU on
-  # an x86-64 Ubuntu runner (aarch64 is fully emulated, so expect a long build).
-  # Built on 14.3 so the binary also runs on 15.x. Base clang + libc++.
+  # FreeBSD 14.3 x64 running inside QEMU with KVM acceleration on an Ubuntu runner.
   freebsd:
-    name: freebsd-${{ matrix.arch }}
+    name: freebsd-x64
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            vmarch: x86_64
-          - arch: arm64
-            vmarch: aarch64
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -313,7 +306,7 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           release: '14.3'
-          arch: ${{ matrix.vmarch }}
+          arch: x86_64
           usesh: true
           sync: rsync
           copyback: true
@@ -334,19 +327,19 @@ jobs:
             mkdir -p dist/orbit64/roms
             cp out/orbit64 README.md dist/orbit64/
             cp roms/README.md dist/orbit64/roms/
-            cd dist && tar -czf orbit64-freebsd-${{ matrix.arch }}.tar.gz orbit64 && ls -l
+            cd dist && tar -czf orbit64-freebsd-x64.tar.gz orbit64 && ls -l
 
       - uses: actions/upload-artifact@v4
         with:
-          name: orbit64-freebsd-${{ matrix.arch }}
-          path: dist/orbit64-freebsd-${{ matrix.arch }}.tar.gz
+          name: orbit64-freebsd-x64
+          path: dist/orbit64-freebsd-x64.tar.gz
           retention-days: 14
 
   # OpenBSD 7.9 x64 build running inside QEMU on an Ubuntu runner.
   openbsd:
     name: openbsd-x64
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -385,7 +378,7 @@ jobs:
   netbsd:
     name: netbsd-x64
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -401,7 +394,9 @@ jobs:
             export PATH="/usr/pkg/bin:/usr/pkg/sbin:$PATH"
             /usr/sbin/pkg_add pkgin || true
             pkgin -y update || true
-            pkgin -y install cmake ninja-build pkgconf mozilla-rootcerts-openssl git libX11 libXext libXrandr libXcursor libXfixes libXi libxkbcommon || true
+            pkgin -y install cmake ninja-build pkgconf mozilla-rootcerts-openssl git || true
+            ftp -o - https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/amd64/binary/sets/xbase.tar.xz | tar -xpJf - -C / || true
+            ftp -o - https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/amd64/binary/sets/xcomp.tar.xz | tar -xpJf - -C / || true
           run: |
             set -e
             export PATH="/usr/pkg/bin:/usr/pkg/sbin:$PATH"
@@ -409,7 +404,7 @@ jobs:
               -DCMAKE_BUILD_TYPE=Release \
               -DORBIT64_VENDOR_SDL3=ON \
               -DORBIT64_SDL3_STATIC=ON \
-              -DSDL_UNIX_CONSOLE=ON \
+              -DSDL_UNIX_CONSOLE_BUILD=ON \
               -DCMAKE_PREFIX_PATH="/usr/X11R7;/usr/pkg" \
               -DCMAKE_INCLUDE_PATH="/usr/X11R7/include;/usr/pkg/include" \
               -DCMAKE_LIBRARY_PATH="/usr/X11R7/lib;/usr/pkg/lib"
@@ -427,8 +422,46 @@ jobs:
           path: dist/orbit64-netbsd-x64.tar.gz
           retention-days: 14
 
+  # Haiku OS R1/beta5 x86_64 running inside QEMU on an Ubuntu runner
+  haiku:
+    name: haiku-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in Haiku
+        uses: vmactions/haiku-vm@v1
+        with:
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkgman refresh || true
+            pkgman install -y cmake ninja gcc_syslibs_devel || true
+          run: |
+            set -e
+            cmake -S . -B out -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DORBIT64_VENDOR_SDL3=ON \
+              -DORBIT64_SDL3_STATIC=ON \
+              -DSDL_UNIX_CONSOLE_BUILD=ON
+            cmake --build out --config Release --parallel
+            cmake --build out --config Release --target jit_selftest
+            ./out/jit_selftest
+            mkdir -p dist/orbit64/roms
+            cp out/orbit64 README.md dist/orbit64/
+            cp roms/README.md dist/orbit64/roms/
+            cd dist && zip -r -9 orbit64-haiku-x64.zip orbit64 && ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-haiku-x64
+          path: dist/orbit64-haiku-x64.zip
+          retention-days: 14
+
   release:
-    needs: [build, freebsd, openbsd, netbsd, linux-musl, linux-x86, linux-emulated]
+    needs: [build, freebsd, openbsd, netbsd, haiku, linux-musl, linux-x86, linux-cross]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
@@ -485,9 +518,9 @@ jobs:
             echo "| Linux x64 Musl (static, Alpine / Void / any Linux) | \`orbit64-linux-musl-x64.tar.gz\` |"
             echo "| Linux ARM64 Musl (static, Alpine / Void / any Linux) | \`orbit64-linux-musl-arm64.tar.gz\` |"
             echo "| FreeBSD 14.3+ x64 | \`orbit64-freebsd-x64.tar.gz\` |"
-            echo "| FreeBSD 14.3+ ARM64 | \`orbit64-freebsd-arm64.tar.gz\` |"
             echo "| OpenBSD 7.9+ x64 | \`orbit64-openbsd-x64.tar.gz\` |"
             echo "| NetBSD 10.0+ x64 | \`orbit64-netbsd-x64.tar.gz\` |"
+            echo "| Haiku OS R1/beta5 x64 | \`orbit64-haiku-x64.zip\` |"
             echo
             echo "macOS: the binary is not notarized. After unpacking run \`xattr -dr com.apple.quarantine orbit64\`"
             echo "(or right-click the executable, Open) before starting it the first time."

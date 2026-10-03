@@ -23,9 +23,9 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 
 ## Downloads
 
-Every push to GitHub is built for Windows, macOS, Linux, FreeBSD, OpenBSD and NetBSD across multiple architectures by `.github/workflows/build.yml`. Each push to `main`
+Every push to GitHub is built for Windows, macOS, Linux, FreeBSD, OpenBSD, NetBSD and Haiku across multiple architectures by `.github/workflows/build.yml`. Each push to `main`
 publishes a new release on the Releases page (`v1.0.<commits on main>`, the first two numbers come from
-`project(VERSION)` in `CMakeLists.txt`) with binaries for Windows (x64, x86, ARM64), macOS (Universal), Linux (glibc x64/arm64/x86, musl x64/arm64, ARMv7 armhf, RISC-V 64), FreeBSD (x64, ARM64), OpenBSD (x64) and NetBSD (x64); pushing a tag such as `v2.0.0` publishes that version. Day-to-day work goes to the
+`project(VERSION)` in `CMakeLists.txt`) with binaries for Windows (x64, x86, ARM64), macOS (Universal), Linux (glibc x64/arm64/x86, musl x64/arm64, ARMv7 armhf, RISC-V 64), FreeBSD (x64), OpenBSD (x64), NetBSD (x64) and Haiku (x64); pushing a tag such as `v2.0.0` publishes that version. Day-to-day work goes to the
 `nightly` branch, whose builds (like those of any other branch) are only kept as artifacts of their run in the Actions
 tab. The macOS binary is not notarized: run `xattr -dr com.apple.quarantine orbit64` once after unpacking.
 
