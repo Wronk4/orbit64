@@ -27,6 +27,11 @@ static u32 stat_scissor_reject = 0;
 // RDP::PixelStats and add them here once their flush is done.
 static RDP::PixelStats stat_pixels;
 
+RDP::RenderCounters RDP::render_counters() {
+    return {stat_tri_called, stat_rast_called, stat_cull_back, stat_cull_front, stat_scissor_reject,
+            stat_pixels.drawn, stat_pixels.z_fail, stat_pixels.a_fail};
+}
+
 // SHIFT_S/T applied to a texture coordinate (used by the debugger capture;
 // the rasterizer uses raster::TexUnit).
 static inline f32 apply_tile_shift(f32 coord, u8 shift) {

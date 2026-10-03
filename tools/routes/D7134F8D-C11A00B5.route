@@ -1,0 +1,50 @@
+orbit-route 1
+rom Madden NFL 2002 (U) [!].z64
+crc D7134F8D-C11A00B5
+title Madden NFL 2002
+state_version 11
+rsp hle
+boot 240
+reached big
+play stick
+ingame_frame -1
+sig 240 dff8f7dfd9e5f8e5dff6ddb8b4d6e9e5dfe5bf8fa7c0d5e5dff1bdd4d0d1eee5dff8e1dbdbeef8e5ced08c939095cfd4
+sig 285 9ab9c5cccecfcfb7aabdc4c5c5c5cfb7a7bfafb2bbcacfb68b8aa6abb0c7ceafb2cec4c8d0cebaaea4bfc0bebcb4a48e
+sig 330 9ab9c5cccecfcfb7aabdc4c5c5c5cfb7a7bfafb2bbcacfb68b8aa6abb0c7ceafb2cec4c8d0cebaaea4bfc0bebcb4a48e
+sig 375 9ab9c5cccecfcfb7aabdc4c5c5c5cfb7a7bfafb2bbcacfb68b8aa6abb0c7ceafb2cec4c8d0cebaaea4bfc0bebcb4a48e
+sig 420 9ab9c5cccecfcfb7aabdc4c5c5c5cfb7a7bfafb2bbcacfb68b8aa6abb0c7ceafb2cec4c8d0cebaaea4bfc0bebcb4a48e
+sig 510 9ab9c5cccecfcfb7aabdc4c5c5c5cfb7a7bfafb2bbcacfb68b8aa6abb0c7ceafb2cec4c8d0cebaaea4bfc0bebcb4a48e
+sig 555 9ab9c5cccecfcfb7aabdc4c5c5c5cfb7a7bfafb2bbcacfb68b8aa6abb0c7ceafb2cec4c8d0cebaaea4bfc0bebcb4a48e
+sig 600 9bb4c5d2d4bad7bc956e72be886fbebcafcfd0d837367cbbb5d7d8d87f18a0b3b7c9cbcf92279db4a3a4a6afa862a490
+sig 645 9bb3c6d4bab4bfbb916f71b6d0bbcbb1b0aea9d7c8bbbebbb4b5b3c5c7afbabab6d3bbc9c8b1bebba2b8b4c6c6beac90
+sig 690 9bb3c6d4bab4bfbb916f71b6d0bbcbb1b0aea9d7c8bbbebbb5b5b3c5c7afbabbb6d3bbc9c8b1bebba2b8b4c6c6beac90
+sig 735 9bbdc9d4b3a9c0bbb0ccd5d1c9c9d7bcb08bccaeb3cfb4b9ad8ac7b1b1cac1b6b6c4d3c1bfcfc7bba1b7c1c7c7c0ad90
+sig 780 9bbdc9d4b3a9bebbb0cfd7cec5cbd5bcb08bd6ceccd8b4b9ad8acecfccd5c1b6b6c7d7cfcdd7c7bb9fb6c3c3c1c0ad90
+sig 825 b9cecfd0d0cfd5cdb09b745c5e5b86cec4c7755249446fcdc5cc75564f3870ccc8dd784a443b71ceb6ccb4a5a4a4aeb6
+sig 870 9bacb5c0b2a9bebbb0cfd6cdc5cbd5bcb08bd6d7c5b9b4b9ad8aced0ccd0c1b6b6c7d7cfcdd7c7bb9fb6c1bbbabfad90
+sig 915 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+sig 960 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+sig 1005 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+in 0 240 0 0 0
+in 240 6 1000 0 0
+in 246 174 0 0 0
+in 420 6 1000 0 0
+in 426 174 0 0 0
+in 600 6 1000 0 0
+in 606 39 0 0 0
+in 645 6 1000 0 0
+in 651 39 0 0 0
+in 690 6 8000 0 0
+in 696 39 0 0 0
+in 735 6 8000 0 0
+in 741 39 0 0 0
+in 780 20 0 80 0
+in 800 4 0 0 0
+in 804 6 8000 0 0
+in 810 15 0 0 0
+in 825 20 0 0 -80
+in 845 4 0 0 0
+in 849 6 8000 0 0
+in 855 15 0 0 0
+in 870 6 1000 0 0
+in 876 129 0 0 0

@@ -1,0 +1,12 @@
+orbit-route 1
+rom Mia Hamm Soccer 64 (U) [!].z64
+crc 1001F10C-3D51D8C1
+title Mia Hamm Soccer 64
+state_version 11
+rsp hle
+boot 240
+reached big
+play stick
+ingame_frame -1
+sig 240 0000000000000000001617181b1911000004040a090500000000000e0800000000000002000000000000000000000000
+in 0 240 0 0 0

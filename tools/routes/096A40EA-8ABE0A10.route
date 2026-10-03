@@ -1,0 +1,12 @@
+orbit-route 1
+rom LEGO Racers (U) [!].z64
+crc 096A40EA-8ABE0A10
+title LEGORacers
+state_version 11
+rsp hle
+boot 240
+reached big
+play stick
+ingame_frame -1
+sig 240 0000000000000000000044354332000000000013140100000000054f4f07000000000127290100000000000000000000
+in 0 240 0 0 0

@@ -1,0 +1,71 @@
+orbit-route 1
+rom Madden NFL 2001 (U) [!].z64
+crc EB38F792-190EA246
+title Madden NFL 2001
+state_version 11
+rsp hle
+boot 240
+reached furthest
+play stick
+ingame_frame -1
+sig 240 dff8f7dfd9e5f8e5dff6ddb8b4d6e9e5dfe5bf8fa7c0d5e5dff1bdd4d0d1eee5dff8e1dbdbeef8e5ced08c939095cfd4
+sig 285 499bb2c2c7ccd0c4a8b1abacb2b9c8c3abbab0b1b1bfd2c3b2b7b0afb2b8d2c3998fa8a7b5bbb9b6b0c2b8b9c3b58e57
+sig 330 499bb2c2c7ccd0c4a8b1abacb2b9c8c3abbab0b1b1bfd2c3b2b7b0afb2b8d2c3998fa8a7b5bbb9b6b0c2b8b9c3b58e57
+sig 375 499bb2c2c7ccd0c4a8b1abacb2b9c8c3abbab0b1b1bfd2c3b2b7b0afb2b8d2c3998fa8a7b5bbb9b6b0c2b8b9c3b58e57
+sig 420 499bb2c2c7ccd0c4a8b1abacb2b9c8c3abbab0b1b1bfd2c3b2b7b0afb2b8d2c3998fa8a7b5bbb9b6b0c2b8b9c3b58e57
+sig 510 499bb2c2c7ccd0c4a8b1abacb2b9c8c3abbab0b1b1bfd2c3b2b7b0afb2b8d2c3998fa8a7b5bbb9b6b0c2b8b9c3b58e57
+sig 555 499bb2c2c7ccd0c4a8b1abacb2b9c8c3abbab0b1b1bfd2c3b2b7b0afb2b8d2c3998fa8a7b5bbb9b6b0c2b8b9c3b58e57
+sig 600 4990a3c8ca8dcfc4948985b8bf91d6c3b4b9c8d395aebbbebdd3d3d2a994bdc3bec6c7caa282c0c0aba0a4a8975c8a59
+sig 645 c4e0e1e4e3e2e3d4adbdb4b5b6b6dad2c3c149494138bdd3cdcd3c3d3c37afc2cedbb3b5b4b3c3babed2d1d3d3d2d0bc
+sig 690 a9cfd5dfdad8dcd1a4a6767a7d7dcacdc8b84957574ab6cfc9c0373f3d3bb6cfcbc45e656560a5afbbc9c7d0d1ccc3a6
+sig 735 4a94a8cebab6c3c7988c88b2cebac9b9b69783c8c3b4b8c0bab881bdc3a8b3bfbfab97d7c8abb9beafada2c5c7b7955a
+sig 780 4aa0bdcfb7afc6c7b6ccd5d1c8c7d4c4b69ecdaeafc7a3beb5b5c6b0afc4a5babfc4cfbfbecdc2beaeb8c1c7c7b9965a
+sig 825 4aa0bdcfb7afc4c7b6cfd7cec3c8d2c4b69ed7cec7cfa3beb5b5d0cfc8cda5babfc7d7cfcad1c2beabb7c3c3c1b9965a
+sig 870 a9ced5dad8d6dcd19f8e73675e549ed0c0b86c524d4287cec8d87156513b8acdcadd734d463d8eceb9ccbaafaeadb4a6
+sig 915 4a90a9bbb6afc4c7b6cfd6cdc3c8d2c4b69ebdc2d2cfa3beb5b5cdcdcacda5babfc7d7cfcad1c3beabb7c1bbbab7965a
+sig 960 a9ced5dad8d6dcd19f8e73675e549ed0c0b86c524d4287cec8d87156513b8acdcbdd734d463d8eceb9ccbaafafacb4a6
+sig 1005 4a90a9bbb6afc4c7b6cfd6cdc3c8d2c4b69ebdc2d2cfa3beb5b5cdcdcacda5babfc7d7cfcad1c3beabb7c1bbbab7965a
+sig 1050 aaced5dad8d6dcd19f8e73675e549ed0c0b86c524d4287cec8d87156513b8bcdcadd734d463d8ecebaccbaafafacb4a6
+sig 1095 4a90a9bbb6afc4c7b6cfd6cdc3c8d2c4b69ebdc2d2cfa3beb5b5cdcdcacda5babfc7d7cfcad1c2beabb7c1bbbab7965a
+sig 1140 aaced5dad8d6dcd19f8e73675e549ed0c0b86c524d4287cec8d87156513b8bcdcadd734d463d8eceb9ccbaafaeacb4a6
+sig 1185 4a90a9bbb6afc4c7b6cfd6cdc3c8d2c4b69ebdc2d2cfa3beb5b5cdcdcacda5babfc7d7cfcad1c3beabb7c1bbbab7965a
+sig 1230 aaced5dad8d6dcd19f8e73675e549ed0c0b86c524d4287cec8d87156513b8bcdcbdd734d463d8ecebaccbaafaeadb4a6
+sig 1275 4a90a9bbb6afc4c7b6cfd6cdc3c8d2c4b69ebdc2d2cfa3beb5b5cdcdcacda5babfc7d7cfcad1c3beabb7c1bbbab7965a
+sig 1320 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+in 0 240 0 0 0
+in 240 6 1000 0 0
+in 246 174 0 0 0
+in 420 6 1000 0 0
+in 426 174 0 0 0
+in 600 6 1000 0 0
+in 606 84 0 0 0
+in 690 6 8000 0 0
+in 696 39 0 0 0
+in 735 6 8000 0 0
+in 741 39 0 0 0
+in 780 6 8000 0 0
+in 786 39 0 0 0
+in 825 20 0 -80 0
+in 845 4 0 0 0
+in 849 6 8000 0 0
+in 855 15 0 0 0
+in 870 6 8000 0 0
+in 876 39 0 0 0
+in 915 6 8000 0 0
+in 921 39 0 0 0
+in 960 6 8000 0 0
+in 966 39 0 0 0
+in 1005 6 8000 0 0
+in 1011 39 0 0 0
+in 1050 6 8000 0 0
+in 1056 39 0 0 0
+in 1095 6 8000 0 0
+in 1101 39 0 0 0
+in 1140 6 8000 0 0
+in 1146 39 0 0 0
+in 1185 6 8000 0 0
+in 1191 39 0 0 0
+in 1230 6 8000 0 0
+in 1236 39 0 0 0
+in 1275 6 1000 0 0
+in 1281 39 0 0 0

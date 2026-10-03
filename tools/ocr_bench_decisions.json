@@ -1,0 +1,179 @@
+{
+  "_comment": "Ground truth for tools/screen_reader_test.py: for a screenshot in tools/ocr_bench/ (dec_NAME.png or NN.png) the kinds of screen it is accepted as, the buttons a sensible first move may end in ([] = nothing to press: gameplay), and optionally text that the option it targets has to contain. Written by looking at the pictures.",
+  "dec_re2": {
+    "kind": [
+      "prompt",
+      "game_over"
+    ],
+    "press": [
+      "A"
+    ],
+    "target": "Try Again"
+  },
+  "dec_chameleon": {
+    "kind": [
+      "warning"
+    ],
+    "press": [
+      "A",
+      "START"
+    ],
+    "notes": true
+  },
+  "dec_goldennugget": {
+    "kind": [
+      "options"
+    ],
+    "press": [
+      "B",
+      "A"
+    ]
+  },
+  "dec_aerofighter": {
+    "kind": [
+      "menu"
+    ],
+    "press": [
+      "A"
+    ]
+  },
+  "dec_superman": {
+    "kind": [
+      "legal",
+      "unknown"
+    ],
+    "press": [
+      "A",
+      "START"
+    ]
+  },
+  "dec_mischief": {
+    "kind": [
+      "dialog"
+    ],
+    "press": [
+      "A"
+    ]
+  },
+  "dec_asteroids": {
+    "kind": [
+      "gameplay",
+      "unknown",
+      "no_text"
+    ],
+    "press": []
+  },
+  "dec_hotwheels": {
+    "kind": [
+      "gameplay"
+    ],
+    "press": []
+  },
+  "dec_starfox": {
+    "kind": [
+      "gameplay",
+      "unknown",
+      "no_text"
+    ],
+    "press": []
+  },
+  "21": {
+    "kind": [
+      "pause"
+    ],
+    "press": [
+      "START",
+      "A"
+    ]
+  },
+  "27": {
+    "kind": [
+      "pause"
+    ],
+    "press": [
+      "START",
+      "A"
+    ]
+  },
+  "41": {
+    "kind": [
+      "pause"
+    ],
+    "press": [
+      "START",
+      "A"
+    ]
+  },
+  "13": {
+    "kind": [
+      "options"
+    ],
+    "press": [
+      "B",
+      "A"
+    ]
+  },
+  "40": {
+    "kind": [
+      "menu"
+    ],
+    "press": [
+      "A"
+    ]
+  },
+  "37": {
+    "kind": [
+      "game_over",
+      "menu",
+      "unknown"
+    ],
+    "press": [
+      "START",
+      "A"
+    ]
+  },
+  "5": {
+    "kind": [
+      "press_start",
+      "gameplay"
+    ],
+    "press": [
+      "START"
+    ]
+  },
+  "dec_pokemonsnap": {
+    "kind": [
+      "prompt"
+    ],
+    "press": [
+      "B"
+    ]
+  },
+  "dec_rainbow6": {
+    "kind": [
+      "error_dialog"
+    ],
+    "press": [
+      "B"
+    ],
+    "notes": true
+  },
+  "dec_nuggetcredits": {
+    "kind": [
+      "credits"
+    ],
+    "press": [
+      "B",
+      "START"
+    ]
+  },
+  "dec_re2title": {
+    "kind": [
+      "menu"
+    ],
+    "press": [
+      "A"
+    ],
+    "target": "NEW"
+  }
+}

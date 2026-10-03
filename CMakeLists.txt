@@ -129,6 +129,12 @@ add_executable(game_probe EXCLUDE_FROM_ALL tools/game_probe.cpp ${CHECK_SOURCES}
 target_include_directories(game_probe PRIVATE src third_party/stb)
 target_link_libraries(game_probe PRIVATE Threads::Threads)
 
+# Plays recorded routes and judges what is drawn (tools/game_qa.cpp, driven by
+# tools/qa.py), not built by default.
+add_executable(game_qa EXCLUDE_FROM_ALL tools/game_qa.cpp ${CHECK_SOURCES})
+target_include_directories(game_qa PRIVATE src third_party/stb)
+target_link_libraries(game_qa PRIVATE Threads::Threads)
+
 # Interpreter-vs-JIT differential test (src/jit/jit_selftest_main.cpp), not built by default.
 add_executable(jit_selftest EXCLUDE_FROM_ALL src/jit/jit_selftest_main.cpp ${CHECK_SOURCES})
 target_include_directories(jit_selftest PRIVATE src third_party/stb)

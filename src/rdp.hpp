@@ -175,6 +175,15 @@ public:
         u32 drawn{0}, z_fail{0}, a_fail{0};
     };
 
+    // Running totals of what the HLE geometry and the native pixel pipeline did
+    // (wrapping u32; take differences). The QA tools (tools/game_qa.cpp) judge a
+    // frame by them: triangles called, how many were culled or failed a test.
+    struct RenderCounters {
+        u32 triangles{0}, rasterized{0}, cull_back{0}, cull_front{0}, scissor_rejected{0};
+        u32 pixels_drawn{0}, z_fail{0}, a_fail{0};
+    };
+    static RenderCounters render_counters();
+
     // Save states (savestate.hpp): the microcode's and the RDP's state
     // between display lists. Only valid between them (queued draws are
     // flushed at the end of every list); state_loaded() then drops what was

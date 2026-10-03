@@ -1,0 +1,12 @@
+orbit-route 1
+rom Quake 64 (U) [!].z64
+crc 9F5BF79C-D2FE08A0
+title Quake
+state_version 11
+rsp hle
+boot 240
+reached big
+play stick_a
+ingame_frame -1
+sig 240 1f211f21201f201e22231e2323212222232f2e2e2f2d2d24232f2c27262d2f2425272825212727262b2f2b2e2e2e2f2d
+in 0 240 0 0 0

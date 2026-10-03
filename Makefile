@@ -119,10 +119,21 @@ GAME_PROBE_TARGET := $(BIN_DIR)/game_probe$(EXE)
 game_probe: $(GAME_PROBE_TARGET)
 $(GAME_PROBE_TARGET): $(BUILD_DIR)/tools/game_probe.o $(CHECK_OBJS) | $(BIN_DIR)
 	$(CXX) $^ -o $@ -lpthread
-$(BUILD_DIR)/tools/game_probe.o: tools/game_probe.cpp
+$(BUILD_DIR)/tools/game_probe.o: tools/game_probe.cpp tools/probe_common.hpp tools/probe_route.hpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
 DEPS += $(BUILD_DIR)/tools/game_probe.d
+
+# Plays recorded routes and judges what is drawn, HLE against the real microcode (tools/game_qa.cpp, tools/qa.py).
+GAME_QA_TARGET := $(BIN_DIR)/game_qa$(EXE)
+.PHONY: game_qa
+game_qa: $(GAME_QA_TARGET)
+$(GAME_QA_TARGET): $(BUILD_DIR)/tools/game_qa.o $(CHECK_OBJS) | $(BIN_DIR)
+	$(CXX) $^ -o $@ -lpthread
+$(BUILD_DIR)/tools/game_qa.o: tools/game_qa.cpp tools/probe_common.hpp tools/probe_route.hpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Umain -c $< -o $@
+DEPS += $(BUILD_DIR)/tools/game_qa.d
 
 # Console tools without SDL keep their own main().
 $(BUILD_DIR)/jit/jit_selftest_main.o $(BUILD_DIR)/tools/rdp_check.o $(BUILD_DIR)/tools/rdp_check_exact.o \
