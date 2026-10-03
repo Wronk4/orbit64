@@ -283,7 +283,7 @@ jobs:
             '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc'
           cmake --build out --config Release --parallel
           cmake --build out --config Release --target jit_selftest
-          ${{ matrix.qemu }} ./out/jit_selftest
+          QEMU_LD_PREFIX=/usr/${{ matrix.arch }} ${{ matrix.qemu }} -L /usr/${{ matrix.arch }} ./out/jit_selftest
           mkdir -p dist/orbit64/roms
           cp out/orbit64 README.md dist/orbit64/
           cp roms/README.md dist/orbit64/roms/
@@ -410,6 +410,7 @@ jobs:
               -DCMAKE_LIBRARY_PATH="/usr/X11R7/lib;/usr/pkg/lib"
             cmake --build out --config Release --parallel
             cmake --build out --config Release --target jit_selftest
+            /usr/sbin/paxctl +m ./out/jit_selftest ./out/orbit64 || true
             ./out/jit_selftest
             mkdir -p dist/orbit64/roms
             cp out/orbit64 README.md dist/orbit64/
