@@ -475,7 +475,10 @@ def advise(img: Image.Image, engines=None, boxes=None) -> Advice:
         cand.append(Candidate("A", tap(A), 0.65, "game over: A continues"))
 
     # --- 7. a menu: choose the option that starts a game
-    if not adv.kind and len(opts) >= 2:
+    # (Two short words and a bare number - a round timer, a score - are a game's HUD, the names of two fighters
+    # above their health bars, not a menu.)
+    hud_numbers = sum(1 for t in adv.lines if oe.norm(t) and oe.norm(t).isdigit())
+    if not adv.kind and len(opts) >= 2 and not (len(opts) < 3 and hud_numbers >= 1):
         scored = [(o.score, -i) for i, o in enumerate(opts)]
         best = max(range(len(opts)), key=lambda i: (opts[i].score, -i))
         if opts[best].score > 0:

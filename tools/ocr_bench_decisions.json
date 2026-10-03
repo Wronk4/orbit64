@@ -175,5 +175,13 @@
       "A"
     ],
     "target": "NEW"
+  },
+  "dec_darkrift": {
+    "kind": [
+      "gameplay",
+      "unknown",
+      "no_text"
+    ],
+    "press": []
   }
 }

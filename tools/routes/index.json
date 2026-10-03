@@ -39,7 +39,7 @@
   "stop": "",
   "frontier": 4455,
   "reached": "ingame",
-  "frames": 4410,
+  "frames": 4365,
   "play": "stick_z",
   "attempts": 3
  },
@@ -66,15 +66,15 @@
  "E185E291-4E50766D": {
   "name": "All Star Tennis 99",
   "rom": "roms\\All Star Tennis 99 (U) (!).n64",
-  "seconds": 263.6,
-  "head": "7e49b5e",
+  "seconds": 292.6,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 5700,
+  "frontier": 8415,
   "reached": "scene",
   "frames": 3510,
   "play": "stick_b",
   "kept": "no better route found",
-  "attempts": 4
+  "attempts": 5
  },
  "1B598BF1-ECA29B45": {
   "name": "Aerofighter's Assault",
@@ -103,26 +103,28 @@
  "5E547A4D-90E60795": {
   "name": "All-Star Baseball 2000",
   "rom": "roms\\All-Star Baseball 2000 (U) [!].z64",
-  "seconds": 194.3,
-  "head": "7e49b5e",
-  "reached": "furthest",
-  "frames": 3750,
-  "play": "stick",
+  "seconds": 429.6,
+  "head": "517f850",
   "stop": "time",
-  "attempts": 4
+  "frontier": 6990,
+  "reached": "big",
+  "frames": 4155,
+  "play": "stick",
+  "kept": "no better route found",
+  "attempts": 6
  },
  "5446C6EF-E18E47BB": {
   "name": "All-Star Baseball 2001",
   "rom": "roms\\All-Star Baseball 2001 (U) [!].z64",
-  "seconds": 239.5,
-  "head": "7e49b5e",
+  "seconds": 726.1,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3165,
+  "frontier": 5235,
   "reached": "scene",
   "frames": 2760,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4
+  "attempts": 5
  },
  "4C52BBB2-CEAB0F6B": {
   "name": "Army Men - Air Combat",
@@ -137,15 +139,15 @@
  "C43E23A7-40B1681A": {
   "name": "All-Star Baseball 99",
   "rom": "roms\\All-Star Baseball 99 (U) [!].z64",
-  "seconds": 283.2,
-  "head": "7e49b5e",
+  "seconds": 452.1,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 1635,
+  "frontier": 2940,
   "reached": "big",
   "frames": 510,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4
+  "attempts": 6
  },
  "862C0657-8DFD896D": {
   "name": "Army Men - Sarge's Heroes",
@@ -170,14 +172,14 @@
  "D1F7D8AB-293B0446": {
   "name": "Asteroids Hyper 64",
   "rom": "roms\\Asteroids Hyper 64 (U) [!].z64",
-  "seconds": 223.4,
-  "head": "7e49b5e",
-  "reached": "furthest",
-  "frames": 6945,
-  "play": "stick",
-  "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "seconds": 175.7,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 9600,
+  "reached": "big",
+  "frames": 9375,
+  "play": "stick_a",
+  "attempts": 6
  },
  "C2E9AA9A-475D70AA": {
   "name": "Banjo-Tooie",
@@ -192,26 +194,28 @@
  "CD7559AC-B26CF5AE": {
   "name": "Banjo-Kazooie",
   "rom": "roms\\Banjo-Kazooie (USA) (Rev 1).z64",
-  "seconds": 209.2,
-  "head": "7e49b5e",
+  "seconds": 351.9,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 5175,
   "reached": "scene",
   "frames": 3420,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "attempts": 5
  },
  "A4BF9306-BF0CDFD1": {
   "name": "Banjo-Kazooie",
   "rom": "roms\\Banjo-Kazooie (U) [!].z64",
-  "seconds": 215.4,
-  "head": "7e49b5e",
+  "seconds": 402.5,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 5175,
   "reached": "scene",
   "frames": 3420,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "attempts": 5
  },
  "204489C1-1286CF2B": {
   "name": "Batman Beyond - Return of the Joker",
@@ -226,26 +230,27 @@
  "41B25DC4-1B726786": {
   "name": "Automobili Lamborghini",
   "rom": "roms\\Automobili Lamborghini (U) [!].z64",
-  "seconds": 199.0,
-  "head": "7e49b5e",
-  "reached": "furthest",
-  "frames": 2490,
-  "play": "stick_a",
-  "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "seconds": 60.9,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 645,
+  "reached": "ingame",
+  "frames": 645,
+  "play": "stick",
+  "attempts": 5
  },
  "BCFACCAA-B814D8EF": {
   "name": "Bassmasters 2000",
   "rom": "roms\\Bassmasters 2000 (U) (!).n64",
-  "seconds": 212.0,
-  "head": "7e49b5e",
+  "seconds": 476.7,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 2850,
   "reached": "big",
   "frames": 690,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "attempts": 5
  },
  "B20F73B6-2975FC34": {
   "name": "Army Men - Sarge's Heroes 2",
@@ -389,13 +394,15 @@
  "1E22CF2E-42AAC813": {
   "name": "Brunswick Circuit Pro Bowling",
   "rom": "roms\\Brunswick Circuit Pro Bowling (U) [!].z64",
-  "seconds": 244.1,
-  "head": "7e49b5e",
+  "seconds": 244.9,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 7035,
   "reached": "scene",
   "frames": 5955,
   "play": "stick_a",
-  "stop": "time",
-  "attempts": 4
+  "kept": "no better route found",
+  "attempts": 5
  },
  "AC16400E-CF5D071A": {
   "name": "California Speed",
@@ -533,14 +540,14 @@
  "F03C24CA-C5237BCC": {
   "name": "Clay Fighter 63 1-3",
   "rom": "roms\\Clay Fighter 63 1-3 (U) [!].z64",
-  "seconds": 207.8,
-  "head": "7e49b5e",
-  "reached": "scene",
-  "frames": 2985,
+  "seconds": 378.2,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 4380,
+  "reached": "ingame",
+  "frames": 4335,
   "play": "stick",
-  "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "attempts": 5
  },
  "95286EB4-B76AD58F": {
   "name": "Command & Conquer",
@@ -557,14 +564,15 @@
  "30C7AC50-7704072D": {
   "name": "Conker's Bad Fur Day",
   "rom": "roms\\Conker_s Bad Fur Day (U) [!].z64",
-  "seconds": 194.1,
-  "head": "7e49b5e",
+  "seconds": 250.0,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 4335,
   "reached": "big",
   "frames": 2715,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "attempts": 5
  },
  "DFE61153-D76118E6": {
   "name": "Cruis'n World",
@@ -764,7 +772,7 @@
   "seconds": 131.3,
   "head": "7e49b5e",
   "reached": "ingame",
-  "frames": 5130,
+  "frames": 5040,
   "play": "stick",
   "stop": "",
   "attempts": 3
@@ -862,7 +870,7 @@
   "seconds": 50.8,
   "head": "7e49b5e",
   "reached": "ingame",
-  "frames": 1140,
+  "frames": 1095,
   "play": "stick_b",
   "stop": "",
   "attempts": 3
@@ -894,13 +902,14 @@
  "52F78805-8B8FCAB7": {
   "name": "Fighter's Destiny",
   "rom": "roms\\Fighter_s Destiny (U) [!].z64",
-  "seconds": 68.0,
-  "head": "7e49b5e",
+  "seconds": 113.3,
+  "head": "517f850",
   "reached": "ingame",
-  "frames": 4740,
-  "play": "stick",
+  "frames": 1320,
+  "play": "stick_z",
   "stop": "",
-  "attempts": 2
+  "attempts": 2,
+  "frontier": 1365
  },
  "32EFC7CB-C3EA3F20": {
   "name": "Fighting Force 64",
@@ -927,15 +936,15 @@
  "7613A630-3ED696F3": {
   "name": "FIFA 99",
   "rom": "roms\\FIFA 99 (U) [!].z64",
-  "seconds": 237.1,
-  "head": "7e49b5e",
+  "seconds": 371.4,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 4380,
+  "frontier": 5741,
   "reached": "big",
-  "frames": 3480,
+  "frames": 1185,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4
+  "attempts": 5
  },
  "89FED774-CAAFE21B": {
   "name": "Gex 64 - Enter the Gecko",
@@ -972,13 +981,14 @@
  "AEEF2F45-F97E30F1": {
   "name": "Fighter's Destiny 2",
   "rom": "roms\\Fighter_s Destiny 2 (U) [!].z64",
-  "seconds": 76.9,
-  "head": "7e49b5e",
+  "seconds": 156.3,
+  "head": "517f850",
   "reached": "ingame",
-  "frames": 4740,
-  "play": "stick",
+  "frames": 1500,
+  "play": "stick_a",
   "stop": "",
-  "attempts": 2
+  "attempts": 2,
+  "frontier": 1545
  },
  "9E330C01-8C0314BA": {
   "name": "Forsaken 64",
@@ -1063,15 +1073,14 @@
  "9CAB6AEA-87C61C00": {
   "name": "Hexen",
   "rom": "roms\\Hexen (U) [!].z64",
-  "seconds": 203.8,
-  "head": "7e49b5e",
-  "stop": "framecap",
-  "frontier": 4815,
-  "reached": "big",
-  "frames": 915,
+  "seconds": 172.1,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 7080,
+  "reached": "ingame",
+  "frames": 7035,
   "play": "stick",
-  "kept": "no better route found",
-  "attempts": 4
+  "attempts": 5
  },
  "7F3CEB77-8981030A": {
   "name": "Hercules - The Legendary Journeys",
@@ -1108,15 +1117,15 @@
  "D3F10E5D-052EA579": {
   "name": "Hey You, Pikachu!",
   "rom": "roms\\Hey You, Pikachu! (U) [!].z64",
-  "seconds": 198.4,
-  "head": "7e49b5e",
+  "seconds": 333.6,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 4425,
+  "frontier": 5550,
   "reached": "scene",
   "frames": 3480,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4
+  "attempts": 5
  },
  "E436467A-82DE8F9B": {
   "name": "Indy Racing 2000",
@@ -1132,15 +1141,15 @@
  "8C138BE0-95700E46": {
   "name": "In-Fisherman Bass Hunter 64",
   "rom": "roms\\In-Fisherman Bass Hunter 64 (U) [!].z64",
-  "seconds": 146.7,
-  "head": "7e49b5e",
-  "stop": "stagnant",
+  "seconds": 254.0,
+  "head": "517f850",
+  "stop": "time",
   "frontier": 1935,
   "reached": "big",
   "frames": 825,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 4
+  "attempts": 5
  },
  "7F0FDA09-6061CE0B": {
   "name": "International Superstar Soccer '98",
@@ -1179,14 +1188,14 @@
  "8E835437-CD5748B4": {
   "name": "International Superstar Soccer 2000",
   "rom": "roms\\International Superstar Soccer 2000 (U) [!].z64",
-  "seconds": 195.7,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 6180,
-  "reached": "big",
-  "frames": 4695,
+  "seconds": 117.3,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 6930,
+  "reached": "ingame",
+  "frames": 6885,
   "play": "stick",
-  "attempts": 4
+  "attempts": 5
  },
  "20073BC7-5E3B0111": {
   "name": "International Track and Field 2000",
@@ -1262,28 +1271,27 @@
  "36281F23-009756CF": {
   "name": "Ken Griffey Jr. s Slugfest",
   "rom": "roms\\Ken Griffey Jr._s Slugfest (U) [!].z64",
-  "seconds": 231.5,
-  "head": "7e49b5e",
+  "seconds": 326.5,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 1725,
-  "reached": "big",
-  "frames": 960,
-  "play": "stick",
-  "kept": "no better route found",
-  "attempts": 3
+  "frontier": 3390,
+  "reached": "scene",
+  "frames": 2625,
+  "play": "stick_a",
+  "attempts": 4
  },
  "519EA4E1-EB7584E8": {
   "name": "King Hill 64 - Extreme Snowboarding",
   "rom": "roms\\King Hill 64 - Extreme Snowboarding (J) [!].v64",
-  "seconds": 205.4,
-  "head": "7e49b5e",
+  "seconds": 210.7,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 4200,
+  "frontier": 5235,
   "reached": "scene",
   "frames": 3120,
   "play": "stick_b",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "46039FB4-0337822C": {
   "name": "Kirby 64 - The Crystal Shards",
@@ -1337,7 +1345,7 @@
   "seconds": 130.7,
   "head": "7e49b5e",
   "reached": "ingame",
-  "frames": 5430,
+  "frames": 5340,
   "play": "stick",
   "stop": "",
   "attempts": 2
@@ -1357,15 +1365,14 @@
  "096A40EA-8ABE0A10": {
   "name": "LEGO Racers",
   "rom": "roms\\LEGO Racers (U) [!].z64",
-  "seconds": 239.3,
-  "head": "7e49b5e",
+  "seconds": 296.0,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 2580,
-  "reached": "big",
-  "frames": 240,
+  "frontier": 4380,
+  "reached": "scene",
+  "frames": 3660,
   "play": "stick",
-  "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "DEB78BBA-52F6BD9D": {
   "name": "Madden NFL 99",
@@ -1396,15 +1403,15 @@
  "80C1C05C-EA065EF4": {
   "name": "Major League Baseball Featuring Ken Griffey Jr.",
   "rom": "roms\\Major League Baseball Featuring Ken Griffey Jr. (U) [!].z64",
-  "seconds": 194.8,
-  "head": "7e49b5e",
+  "seconds": 274.5,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3930,
+  "frontier": 5460,
   "reached": "scene",
   "frames": 2535,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "664BA3D4-678A80B7": {
   "name": "Mario Golf",
@@ -1412,7 +1419,7 @@
   "seconds": 182.1,
   "head": "7e49b5e",
   "reached": "ingame",
-  "frames": 1965,
+  "frames": 1920,
   "play": "stick_b",
   "stop": "",
   "attempts": 2
@@ -1455,14 +1462,15 @@
  "EB38F792-190EA246": {
   "name": "Madden NFL 2001",
   "rom": "roms\\Madden NFL 2001 (U) [!].z64",
-  "seconds": 388.0,
-  "head": "17ac9c9",
+  "seconds": 1504.8,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 870,
+  "frontier": 1320,
   "reached": "furthest",
   "frames": 1320,
   "play": "stick",
-  "attempts": 4
+  "kept": "no better route found",
+  "attempts": 5
  },
  "D7134F8D-C11A00B5": {
   "name": "Madden NFL 2002",
@@ -1537,13 +1545,13 @@
  "E36166C2-8613A2E5": {
   "name": "Michael Owens WLS 2000",
   "rom": "roms\\Michael Owens WLS 2000 (E).v64",
-  "seconds": 224.2,
-  "head": "7e49b5e",
+  "seconds": 230.0,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 2550,
+  "frontier": 2385,
   "reached": "big",
   "frames": 720,
-  "play": "stick_a",
+  "play": "stick",
   "kept": "no better route found",
   "attempts": 3
  },
@@ -1738,15 +1746,15 @@
  "7EC22587-EF1AE323": {
   "name": "Nagano Olympic Hockey '98",
   "rom": "roms\\Nagano Olympic Hockey _98 (U) [!].z64",
-  "seconds": 224.3,
-  "head": "7e49b5e",
+  "seconds": 162.3,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3645,
+  "frontier": 5040,
   "reached": "scene",
   "frames": 1530,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "23749578-80DC58FD": {
   "name": "NASCAR 99",
@@ -1815,15 +1823,15 @@
  "6A121930-665CC274": {
   "name": "NBA In the Zone '98",
   "rom": "roms\\NBA In the Zone _98 (U) [!].z64",
-  "seconds": 259.2,
-  "head": "7e49b5e",
+  "seconds": 184.1,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3570,
+  "frontier": 4920,
   "reached": "big",
   "frames": 1500,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "A292524F-3D6C2A49": {
   "name": "NBA In the Zone '99",
@@ -1852,28 +1860,28 @@
  "8DF95B18-ECDA497B": {
   "name": "NBA In the Zone 2000",
   "rom": "roms\\NBA In the Zone 2000 (U) [!].z64",
-  "seconds": 224.6,
-  "head": "7e49b5e",
+  "seconds": 220.3,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3510,
+  "frontier": 3960,
   "reached": "big",
   "frames": 1950,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "810729F6-E03FCFC1": {
   "name": "NBA Jam 99",
   "rom": "roms\\NBA Jam 99 (U) [!].z64",
-  "seconds": 231.3,
-  "head": "7e49b5e",
+  "seconds": 354.1,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 1770,
+  "frontier": 3705,
   "reached": "big",
   "frames": 960,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "5F25B0EE-6227C1DB": {
   "name": "NBA Live 2000",
@@ -1945,15 +1953,15 @@
  "E3AB4ED0-83040DD2": {
   "name": "NFL Quarterback Club 2000",
   "rom": "roms\\NFL Quarterback Club 2000 (U) [!].z64",
-  "seconds": 218.6,
-  "head": "7e49b5e",
+  "seconds": 333.7,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3120,
+  "frontier": 4380,
   "reached": "scene",
   "frames": 2625,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "28784622-FFB22985": {
   "name": "NFL Quarterback Club 2001",
@@ -2195,15 +2203,15 @@
  "19C553A7-A70F4B52": {
   "name": "Pokemon Puzzle League",
   "rom": "roms\\Pokemon Puzzle League (U) [!].z64",
-  "seconds": 205.4,
-  "head": "7e49b5e",
+  "seconds": 255.1,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 2790,
+  "frontier": 5070,
   "reached": "big",
   "frames": 720,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "03571182-892FD06D": {
   "name": "Pokemon Stadium 2",
@@ -2264,15 +2272,15 @@
  "9F5BF79C-D2FE08A0": {
   "name": "Quake 64",
   "rom": "roms\\Quake 64 (U) [!].z64",
-  "seconds": 234.3,
-  "head": "7e49b5e",
+  "seconds": 168.0,
+  "head": "517f850",
   "stop": "time",
   "frontier": 600,
   "reached": "big",
   "frames": 240,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "73A88E3D-3AC5C571": {
   "name": "Rally Challenge 2000",
@@ -2288,28 +2296,28 @@
  "C29FF9E4-264BFE7D": {
   "name": "Rampage - World Tour",
   "rom": "roms\\Rampage - World Tour (U) (!).n64",
-  "seconds": 242.0,
-  "head": "7e49b5e",
+  "seconds": 166.0,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3705,
+  "frontier": 5685,
   "reached": "big",
   "frames": 465,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "673D099B-A4C808DE": {
   "name": "Rampage 2 - Universal Tour",
   "rom": "roms\\Rampage 2 - Universal Tour (U) [!].z64",
-  "seconds": 192.6,
-  "head": "7e49b5e",
+  "seconds": 174.7,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 4335,
+  "frontier": 5460,
   "reached": "scene",
   "frames": 3075,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "EAB7B429-BAC92C57": {
   "name": "Ready 2 Rumble Boxing",
@@ -2359,15 +2367,15 @@
  "0F1FA987-BFC1AFA6": {
   "name": "Re-Volt",
   "rom": "roms\\Re-Volt (U) (!).n64",
-  "seconds": 235.6,
-  "head": "7e49b5e",
+  "seconds": 357.3,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 1950,
+  "frontier": 4155,
   "reached": "big",
   "frames": 1050,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "AA18B1A5-07DB6AEB": {
   "name": "Resident Evil 2",
@@ -2420,14 +2428,15 @@
  "AC8E4B32-E7B47326": {
   "name": "Robotron 64",
   "rom": "roms\\Robotron 64 (U) [!].z64",
-  "seconds": 191.1,
-  "head": "7e49b5e",
+  "seconds": 199.0,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 2655,
+  "frontier": 4275,
   "reached": "scene",
   "frames": 2610,
   "play": "stick",
-  "attempts": 2
+  "kept": "no better route found",
+  "attempts": 3
  },
  "2500267E-2A7EC3CE": {
   "name": "RR64 - Ridge Racer 64",
@@ -2625,25 +2634,25 @@
  "EBFE2397-FF74DA34": {
   "name": "Space Invaders",
   "rom": "roms\\Space Invaders (U) (!).n64",
-  "seconds": 203.5,
-  "head": "7e49b5e",
+  "seconds": 202.8,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 4005,
+  "frontier": 5445,
   "reached": "big",
   "frames": 2700,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 2
+  "attempts": 3
  },
  "DDD93C85-DAE381E8": {
   "name": "Star Soldier Vanishing Earth",
   "rom": "roms\\Star Soldier Vanishing Earth (U) [!].z64",
-  "seconds": 58.6,
-  "head": "7e49b5e",
+  "seconds": 172.2,
+  "head": "517f850",
   "stop": "",
-  "frontier": 2265,
+  "frontier": 1590,
   "reached": "ingame",
-  "frames": 2220,
+  "frames": 1545,
   "play": "stick",
   "attempts": 2
  },
@@ -2677,7 +2686,7 @@
   "stop": "",
   "frontier": 1755,
   "reached": "ingame",
-  "frames": 1710,
+  "frames": 1575,
   "play": "stick",
   "attempts": 2
  },
@@ -2723,27 +2732,26 @@
  "0684FBFB-5D3EA8A5": {
   "name": "StarCraft 64",
   "rom": "roms\\StarCraft 64 (U) [!].z64",
-  "seconds": 207.0,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 1770,
-  "reached": "big",
-  "frames": 1050,
-  "play": "stick_a",
-  "kept": "no better route found",
-  "attempts": 2
+  "seconds": 199.3,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 2535,
+  "reached": "ingame",
+  "frames": 2490,
+  "play": "stick",
+  "attempts": 3
  },
  "94EDA5B8-8673E903": {
   "name": "Starshot - Space Circus Fever",
   "rom": "roms\\Starshot - Space Circus Fever (U) [!].z64",
-  "seconds": 189.6,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 2535,
-  "reached": "scene",
-  "frames": 1995,
+  "seconds": 154.2,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 3435,
+  "reached": "ingame",
+  "frames": 3390,
   "play": "stick_z",
-  "attempts": 2
+  "attempts": 3
  },
  "916B8B5B-780B85A4": {
   "name": "Super Smash Bros.",
@@ -2759,15 +2767,15 @@
  "AA1D215A-91CBBE9A": {
   "name": "Super Bowling 64",
   "rom": "roms\\Super Bowling 64 (U) [!].z64",
-  "seconds": 202.5,
-  "head": "7e49b5e",
+  "seconds": 272.3,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3993,
+  "frontier": 5823,
   "reached": "big",
   "frames": 960,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 2
+  "attempts": 3
  },
  "C1452553-5D7B24D9": {
   "name": "Supercross 2000",
@@ -2885,15 +2893,15 @@
  "4EBFDD33-664C9D84": {
   "name": "Tigger's Honey Hunt",
   "rom": "roms\\Tigger_s Honey Hunt (U) [!].z64",
-  "seconds": 218.6,
-  "head": "7e49b5e",
+  "seconds": 263.5,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 2520,
+  "frontier": 4305,
   "reached": "big",
   "frames": 960,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 2
+  "attempts": 3
  },
  "392A0C42-B790E77D": {
   "name": "Tom Clancy's Rainbow Six",
@@ -2964,15 +2972,14 @@
  "D741CD80-ACA9B912": {
   "name": "Top Gear Overdrive",
   "rom": "roms\\Top Gear Overdrive (U) [!].z64",
-  "seconds": 197.8,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 5415,
-  "reached": "big",
-  "frames": 4335,
-  "play": "stick_a",
-  "kept": "no better route found",
-  "attempts": 3
+  "seconds": 121.6,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 5820,
+  "reached": "ingame",
+  "frames": 5775,
+  "play": "stick",
+  "attempts": 4
  },
  "62269B3D-FE11B1E8": {
   "name": "Top Gear Rally",
@@ -2989,14 +2996,14 @@
  "BE5973E0-89B0EDB8": {
   "name": "Top Gear Rally 2",
   "rom": "roms\\Top Gear Rally 2 (U) [!].z64",
-  "seconds": 216.3,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 3030,
-  "reached": "scene",
-  "frames": 2985,
+  "seconds": 344.2,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 4470,
+  "reached": "ingame",
+  "frames": 4425,
   "play": "stick_a",
-  "attempts": 2
+  "attempts": 3
  },
  "4D79D316-E8501B33": {
   "name": "Transformers - Beast Wars Transmetal",
@@ -3013,15 +3020,14 @@
  "FE4B6B43-081D29A7": {
   "name": "Triple Play 2000",
   "rom": "roms\\Triple Play 2000 (U) [!].z64",
-  "seconds": 213.3,
-  "head": "7e49b5e",
+  "seconds": 238.4,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 5280,
-  "reached": "furthest",
-  "frames": 4335,
+  "frontier": 6045,
+  "reached": "big",
+  "frames": 5280,
   "play": "stick_a",
-  "kept": "no better route found",
-  "attempts": 2
+  "attempts": 3
  },
  "89A579F1-667E97EF": {
   "name": "Turok 3 - Shadow of Oblivion",
@@ -3082,14 +3088,15 @@
  "BBC99D32-117DAA80": {
   "name": "Twisted Edge Extreme Snowboarding",
   "rom": "roms\\Twisted Edge Extreme Snowboarding (U) [!].z64",
-  "seconds": 205.3,
-  "head": "7e49b5e",
+  "seconds": 184.4,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3120,
+  "frontier": 4335,
   "reached": "scene",
   "frames": 3075,
   "play": "stick_a",
-  "attempts": 2
+  "kept": "no better route found",
+  "attempts": 3
  },
  "F7FE28F6-C3F2ACC3": {
   "name": "War Gods",
@@ -3126,15 +3133,15 @@
  "8066D58A-C3DECAC1": {
   "name": "Waialae Country Club-True Golf Classics",
   "rom": "roms\\Waialae Country Club-True Golf Classics (U) [!].z64",
-  "seconds": 192.5,
-  "head": "7e49b5e",
-  "frontier": 6405,
+  "seconds": 151.7,
+  "head": "517f850",
+  "stop": "time",
+  "frontier": 7125,
   "reached": "big",
   "frames": 4290,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 4,
-  "stop": "time"
+  "attempts": 5
  },
  "CEA8B54F-7F21D503": {
   "name": "Wetrix",
@@ -3173,14 +3180,15 @@
  "33BE8CD6-EC186912": {
   "name": "WCW Mayhem",
   "rom": "roms\\WCW Mayhem (U) [!].z64",
-  "seconds": 219.0,
-  "head": "7e49b5e",
+  "seconds": 235.2,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3840,
+  "frontier": 5145,
   "reached": "scene",
   "frames": 3705,
   "play": "stick",
-  "attempts": 2
+  "kept": "no better route found",
+  "attempts": 3
  },
  "71BE60B9-1DDBFB3C": {
   "name": "WCW vs. nWo - World Tour",
@@ -3198,15 +3206,15 @@
  "DEE596AB-AF3B7AE7": {
   "name": "WCW-nWo Revenge",
   "rom": "roms\\WCW-nWo Revenge (U) [!].z64",
-  "seconds": 210.7,
-  "head": "7e49b5e",
+  "seconds": 206.5,
+  "head": "517f850",
   "stop": "time",
-  "frontier": 3090,
+  "frontier": 4800,
   "reached": "big",
   "frames": 600,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 2
+  "attempts": 3
  },
  "ED98957E-8242DCAC": {
   "name": "WinBack - Covert Operations",
@@ -3267,8 +3275,8 @@
  "BD636D6A-5D1F54BA": {
   "name": "World Cup 98",
   "rom": "roms\\World Cup 98 (U) [!].z64",
-  "seconds": 95.6,
-  "head": "7e49b5e",
+  "seconds": 105.1,
+  "head": "517f850",
   "stop": "",
   "frontier": 825,
   "reached": "ingame",
@@ -3292,14 +3300,14 @@
  "D2BE2F14-38453788": {
   "name": "WWF Attitude",
   "rom": "roms\\WWF Attitude (U) [!].z64",
-  "seconds": 208.8,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 3975,
-  "reached": "scene",
-  "frames": 3930,
-  "play": "stick_b",
-  "attempts": 2
+  "seconds": 121.9,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 5400,
+  "reached": "ingame",
+  "frames": 5355,
+  "play": "stick_a",
+  "attempts": 3
  },
  "0553AE9D-EAD8E0C1": {
   "name": "Xena Warrior Princess - Talisman of Fate",
@@ -3339,13 +3347,13 @@
  "2337D8E8-6B8E7CEC": {
   "name": "Yoshi's Story",
   "rom": "roms\\Yoshi_s Story (U) [!].z64",
-  "seconds": 184.8,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 2670,
-  "reached": "scene",
-  "frames": 2625,
-  "play": "stick_b",
-  "attempts": 2
+  "seconds": 176.7,
+  "head": "517f850",
+  "stop": "",
+  "frontier": 3465,
+  "reached": "ingame",
+  "frames": 3420,
+  "play": "stick",
+  "attempts": 3
  }
 }

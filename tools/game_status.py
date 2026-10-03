@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Game status report: how far every ROM gets, for the compatibility page.
 
-    python tools/game_status.py [--jobs 6] [--filter text] [--list tools/test_set.txt] [--fresh]
-    python tools/game_status.py --report-only          # re-classify / rebuild pages from saved runs
+    python tools/game_status.py [--filter text] [--list tools/test_set.txt] [--publish]
 
-Interrupting (Ctrl+C) is safe: run it again and it continues where it stopped
-(a game counts as done once its run.json exists); --fresh starts over.
+The statuses come from the QA tool (tools/qa.py, see tools/QA.md): the recorded route of every game
+(tools/routes/index.json: how far it gets and how) and the last `qa.py run` (test_output/qa/results.json:
+a crash or a freeze while the route was played, the screen the OCR reader saw at its end). Nothing is played
+here, so the page can be rebuilt in seconds: run `python tools/qa.py record` (once) and `python tools/qa.py run`
+first, so that the data is current.
 
-Each ROM runs in bin/game_probe (tools/game_probe.cpp), which plays it on its
-own: it presses A / START only when the game demonstrably reacts to them (a
-save state lets it try every input from the same moment) and finally tests
-whether the stick moves the picture. From that data every game gets exactly
-one status:
+    python tools/game_status.py --probe-runs [--jobs 6] [--fresh]   # the older way: every game in bin/game_probe again
+
+With --probe-runs each ROM is played by bin/game_probe (tools/game_probe.cpp) on its own, from save states, and
+classified from its measurements. From either source every game gets exactly one status:
 
     BLACK_SCREEN  nothing (or only black) was ever shown
     INTRO_TITLE   logos, intro, title screen, attract demo: no control yet
@@ -491,10 +492,109 @@ def shot_label(s):
     if s == "first_play.png":
         return "first reaction to the stick"
     m = re.match(r"^t(\d+)\.png$", s)
+    if s.startswith("hle_"):
+        return "during play"
+    if s == "route_end.png":
+        return "end of the route"
     return f"{int(m.group(1)) / 60:.0f} s" if m else s
 
 
 PAGE_FILE = os.path.join(ROOT, "tools", "game_status_page.html")
+
+
+# ---------------------------------------------------------------------------
+# Status from the QA tool (tools/qa.py): the recorded routes and the last `qa.py run`
+
+QA_DIR = os.path.join(ROOT, "test_output", "qa")
+ROUTES_INDEX = os.path.join(ROOT, "tools", "routes", "index.json")
+# What the OCR reader (tools/screen_reader.py) saw on the last screen of the route.
+MENU_KINDS = {"menu", "options", "prompt", "pause", "dialog", "game_over", "error_dialog", "warning", "credits"}
+TITLE_KINDS = {"press_start", "press_a", "legal", "no_text", "unknown"}
+
+
+def _load_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def classify_qa(route, g, probe):
+    """(status, detail, confidence, reasons) from a game's recorded route and its last QA run.
+
+    route: tools/routes/index.json entry ({} when none), g: the game's entry in test_output/qa/results.json,
+    probe: the probe's own measurements of the recording (probe.json) or None."""
+    codes = {x["code"]: x for x in (g or {}).get("reasons", [])}
+    reached = (route or {}).get("reached", "")
+    kind = ((g or {}).get("screen") or {}).get("kind", "")
+    m = (g or {}).get("metrics", {})
+    why = []
+    if reached:
+        why.append(f"recorded route reaches '{reached}' in {route.get('frames', 0)} frames")
+    # The emulator crashed or froze while the route was played.
+    if "cpu_lost" in codes:
+        return "CRASH_ERROR", "crash", "high", why + [codes["cpu_lost"]["text"]]
+    if "stalled" in codes:
+        return "CRASH_ERROR", "freeze", "high", why + [codes["stalled"]["text"]]
+    if not reached:
+        p = probe or {}
+        if p and p.get("display_lists", 1) == 0:
+            return "BLACK_SCREEN", "no display list", "high", ["the game never sent a display list"]
+        failed = (route or {}).get("failed", "")
+        if failed == "timeout":
+            return "CRASH_ERROR", "emulator timeout", "medium", ["the probe did not get anywhere in time"]
+        return "BLACK_SCREEN", "nothing drawn", "medium", ["no route could be recorded: " + (failed or "no data")]
+    if m and m.get("lit", 1) < 0.01 and m.get("colors", 99) <= 4:
+        return "BLACK_SCREEN", "went black", "medium", why + ["the picture at the end of the route is black"]
+    verified = (g or {}).get("status") in ("ok", "warn") and "route_lost" not in codes
+    conf = "high" if verified else "medium"
+    if reached == "ingame" or kind == "gameplay":
+        return "INGAME", "playable", conf if reached == "ingame" else "low", why + ["the stick moves the picture"]
+    if reached == "scene":
+        if kind in MENU_KINDS:
+            return "MENU", "menu over a 3D scene", "medium", why
+        return "INTRO_TITLE", "scene / intro (no control confirmed)", "low", why
+    # 'big' and 'furthest': the screen decides between a menu and a title
+    if kind in MENU_KINDS:
+        return "MENU", "menu" if kind != "game_over" else "game over screen", "medium", why + [f"the screen reads as '{kind}'"]
+    if reached == "big":
+        return "MENU", "reacts to the stick", "low", why + ["the stick changes a big part of the picture"]
+    return "INTRO_TITLE", "title / intro screen" if kind in TITLE_KINDS else "intro", "low", why
+
+
+def results_from_qa(roms, review):
+    """The same result records as finish() makes, from the QA data instead of probe runs of their own."""
+    index = _load_json(ROUTES_INDEX, {})
+    qa = {x["crc"]: x for x in _load_json(os.path.join(QA_DIR, "results.json"), {}).get("games", [])}
+    results = []
+    for e in roms:
+        g = qa.get(e["crc"])
+        route = index.get(e["crc"], {})
+        if not g and not route:
+            continue
+        rec = os.path.join(QA_DIR, "record", e["crc"])
+        probe = _load_json(os.path.join(rec, "probe.json"), None)
+        st, det, conf, why = classify_qa(route, g, probe)
+        runs = os.path.join(QA_DIR, "runs", e["crc"])
+        names = ["route_end.png"] + [f"hle_{i:02d}.png" for i in (2, 5, 8)]
+        shots = [s for s in names if os.path.exists(os.path.join(runs, s))]
+        d = runs
+        if not shots:  # no QA run of this game: the probe's own pictures from the recording
+            d = rec
+            have = set((probe or {}).get("shots", []))
+            shots = [s for s in ("final.png", "boot.png", "first_play.png") if s in have]
+        r = dict(e)
+        r.update(dir=d, mode="hle", rc=0, timeout=False, wall_s=(route or {}).get("seconds", 0), probe=probe, shots=shots,
+                 modes={"hle": {"status": st, "detail": det}}, works_in=["hle"] if st == "INGAME" else [])
+        r["auto"] = {"status": st, "detail": det, "confidence": conf, "reasons": why}
+        rv = review.get(e["crc"])
+        if rv:
+            r["status"], r["detail"], r["note"], r["source"] = rv["status"], rv.get("detail", det), rv.get("note", ""), "review"
+        else:
+            r["status"], r["detail"], r["note"], r["source"] = st, det, "", "auto"
+        results.append(r)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +617,8 @@ def main():
     ap.add_argument("--hle-only", action="store_true", help="skip the LLE runs")
     ap.add_argument("--publish", action="store_true", help="write the page to site/compatibility/ (GitHub Pages) instead of test_output")
     ap.add_argument("--report-only", action="store_true", help="don't run anything, rebuild the reports")
+    ap.add_argument("--probe-runs", action="store_true", help="the old way: run every game in the probe again (default: the status "
+                    "comes from the QA tool's routes and last run, tools/qa.py)")
     args = ap.parse_args()
 
     listed = None
@@ -528,7 +630,11 @@ def main():
     review = load_review()
 
     runs = {e["crc"]: {} for e in roms}  # crc -> mode -> run
-    if not args.report_only:
+    use_qa = not args.probe_runs
+    if use_qa:
+        if not os.path.exists(ROUTES_INDEX):
+            sys.exit("no routes yet: python tools/qa.py record (or use --probe-runs)")
+    elif not args.report_only:
         if not os.path.exists(EXE):
             sys.exit(f"{EXE} is missing: make game_probe")
         t0 = time.time()
@@ -623,8 +729,11 @@ def main():
                 gdir = os.path.join(args.out, "games", e["slug"], m)
                 if os.path.exists(os.path.join(gdir, "run.json")):
                     runs[e["crc"]][m] = load_run(e, gdir)
-    results = [combine(e, runs[e["crc"]]) for e in roms if runs[e["crc"]]]
-    results = [finish(r, review) for r in results]
+    if use_qa:
+        results = results_from_qa(roms, review)
+    else:
+        results = [combine(e, runs[e["crc"]]) for e in roms if runs[e["crc"]]]
+        results = [finish(r, review) for r in results]
     results.sort(key=lambda r: r["name"].lower())
 
     slim = []

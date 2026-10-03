@@ -225,9 +225,13 @@ def record_one(e, args, improve=False, protect=None, resume=None):
     os.makedirs(ROUTES, exist_ok=True)
     os.makedirs(os.path.join(OUT, "checkpoints"), exist_ok=True)
     new_route = os.path.join(rdir, "new.route")
+    # With a frame budget the wall time is a safety net only (a game that crawls); without one it is the budget.
+    safety_s = args.max_seconds if getattr(args, "budget", 0) <= 0 else max(args.max_seconds, args.budget / 20)
     cmd = [PROBE, os.path.join(ROOT, e["rom"]), "--out", rdir, "--route", new_route,
            "--checkpoint", os.path.join(OUT, "checkpoints", e["crc"] + ".state"),
-           "--max-seconds", str(args.max_seconds)]
+           "--max-seconds", str(safety_s)]
+    if getattr(args, "budget", 0) > 0:
+        cmd += ["--budget", str(args.budget)]  # the search's size in emulated frames: the same work whatever else runs
     old = read_route_head(route_path(e)) if improve else None
     new_frontier = os.path.join(rdir, "new.frontier")
     cmd += ["--frontier", new_frontier]
@@ -254,10 +258,10 @@ def record_one(e, args, improve=False, protect=None, resume=None):
     t0 = time.time()
     if getattr(args, "advice", True):
         # reading the screen is slow next to the emulation: the time spent waiting for it is not counted by the probe
-        rc, out, err, timed_out = spawn_with_advice(cmd + ["--advice", os.path.join(rdir, "advice")], args.max_seconds * 3 + 150,
+        rc, out, err, timed_out = spawn_with_advice(cmd + ["--advice", os.path.join(rdir, "advice")], safety_s * 3 + 150,
                                                      os.path.join(rdir, "advice"))
     else:
-        rc, out, err, timed_out = spawn(cmd, args.max_seconds + 150)
+        rc, out, err, timed_out = spawn(cmd, safety_s + 150)
     entry = {"name": e["name"], "rom": e["rom"], "seconds": round(time.time() - t0, 1), "head": git_head()}
     if STOP_REQUESTED():
         return None
@@ -1028,14 +1032,17 @@ def cmd_rebase(args):
 
 def watch_snapshot(index):
     return {k: {"name": v.get("name"), "reached": v.get("reached"), "attempts": v.get("attempts", 1),
-                "stop": v.get("stop", ""), "failed": "failed" in v} for k, v in index.items()}
+                "stop": v.get("stop", ""), "failed": "failed" in v,
+                "seconds": v.get("seconds")} for k, v in index.items()}
 
 
 def watch_view(index, base):
     """What changed since the baseline: how many games were tried again, which ones got further."""
-    cand = [k for k, b in base.items() if b["reached"] != "ingame" and b["stop"] != "dead" and not b["failed"] and b["attempts"] < 4]
+    cand = [k for k, b in base.items() if b["reached"] != "ingame" and b["stop"] != "dead" and not b["failed"] and b["attempts"] < 8]
     # tried: counted again, or kept its old route (the improve run says so), or got further
-    tried = [k for k in cand if index.get(k, {}).get("attempts", 1) > base[k]["attempts"] or index.get(k, {}).get("kept")
+    # (a "kept" flag stays in the entry from earlier rounds: it counts only when the entry was written after the baseline)
+    tried = [k for k in cand if index.get(k, {}).get("attempts", 1) > base[k]["attempts"]
+             or (index.get(k, {}).get("kept") and index[k].get("seconds") != base[k].get("seconds"))
              or RANK.get(index.get(k, {}).get("reached"), 0) > RANK.get(base[k]["reached"], 0)]
     better = []
     for k in tried:
@@ -1058,6 +1065,7 @@ def cmd_watch(args):
         base = watch_snapshot(load_json(index_path, {}))
         save_json(base_path, base)
     page = os.path.join(OUT, "status.html")
+    shown = None
     try:
         while True:
             index = load_json(index_path, {})
@@ -1077,12 +1085,15 @@ def cmd_watch(args):
                          + ", ".join(f"{k} {v}" for k, v in sorted(prog["counts"].items()))
                          + (f", about {eta:.0f} min left" if rate else ""), ""] + ["  " + x for x in prog["last"]]
             text = "\n".join(lines)
-            # the Windows console does not always understand ANSI codes: `cls` there
-            if os.name == "nt":
-                os.system("cls")
-                print(time.strftime("%H:%M:%S") + "  (Ctrl+C leaves)\n" + text, flush=True)
-            else:
-                print("\033[2J\033[H" + time.strftime("%H:%M:%S") + "  (Ctrl+C leaves)\n" + text, flush=True)
+            if text != shown:  # redrawn only when something changed (the clock does not count)
+                shown = text
+                head = "changed " + time.strftime("%H:%M:%S") + "  (Ctrl+C leaves)\n"
+                # the Windows console does not always understand ANSI codes: `cls` there
+                if os.name == "nt":
+                    os.system("cls")
+                    print(head + text, flush=True)
+                else:
+                    print("\033[2J\033[H" + head + text, flush=True)
             os.makedirs(OUT, exist_ok=True)
             with open(page, "w", encoding="utf-8") as f:
                 f.write('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="5"><title>QA status</title>'
@@ -1174,7 +1185,9 @@ def main():
         p.add_argument("--list", help="a file with ROM file names (tools/test_set.txt)")
         p.add_argument("--filter", help="only ROMs whose file name contains this")
         p.add_argument("--jobs", type=int, default=4)
-        p.add_argument("--max-seconds", type=float, default=240, help="wall time of one probe (recording)")
+        p.add_argument("--max-seconds", type=float, default=240, help="wall time of one probe (recording); with --budget only a safety limit")
+        p.add_argument("--budget", type=int, default=0, help="size of a probe's search in emulated frames (0: go by --max-seconds). "
+                       "Gives the same result whatever else the machine does - e.g. 20000 is about what 240 s give with 6 probes at once")
 
     r = sub.add_parser("record", help="find a route for every game")
     common(r)

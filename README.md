@@ -12,7 +12,7 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 | Folder | What is in it |
 |---|---|
 | `src/` | The emulator: CPU + JIT (`src/jit/`), RSP/RDP, audio, save states; the desktop frontend is `src/ui/` |
-| `tools/` | Test and analysis tools (`jit_bench.sh`, `audio_report.py`, `*_check.cpp`, profiler report) |
+| `tools/` | Test and analysis tools: game QA (`qa.py`, recorded routes in `tools/routes/`), `compat_sweep.py`, `jit_bench.sh`, `audio_report.py`, `*_check.cpp`, profiler report |
 | `third_party/`, `assets/` | Dear ImGui, stb; icons and other bundled files |
 | `docs/` | Notes on the emulator's internals |
 | `site/` | The project page on GitHub Pages (https://wronk4.github.io/orbit64/, published by `.github/workflows/pages.yml` from `main` or `nightly`) |
@@ -87,26 +87,43 @@ With a big library, `python tools/test_set.py` picks a small test set out of a f
 that doesn't simply run, the slowest ones, the noisiest ones, one per microcode, CIC and save type, and a core of games
 whose fixes must not regress - into `tools/test_set.txt`; `compat_sweep.py --list tools/test_set.txt` runs just those.
 
+### Game QA
+
+`python tools/qa.py` is the main test: does every game get to its gameplay, and is it drawn right there? It needs
+`make game_probe game_qa` and is described in [`tools/QA.md`](tools/QA.md). In short:
+
+- **Routes.** `qa.py record` plays each ROM with `game_probe` and saves the inputs that got it furthest (title
+  screens, menus, prompts - the probe reads the screen text with OCR to answer them) as a small text file in
+  `tools/routes/`, 290 of them in the repository. `qa.py record --improve` goes on from where a search ended; the size
+  of a search is `--budget` emulated frames (the same work whatever else the machine does).
+- **Replay and judging.** `qa.py run` replays every route from power-on in seconds, plays the game for a while and
+  compares the high-level emulation with the low-level one (the game's own RSP microcode) picture by picture. It reports
+  crashes, freezes, routes that no longer match their recording, and differences between HLE and LLE, as an HTML report
+  (`test_output/qa/report.html`). Routes that stopped working heal themselves.
+- `qa.py watch` shows a running `record --improve` or `run` live.
+
 ### Game status page
 
-`python tools/game_status.py` answers a different question: how far does each game get. It needs `make game_probe`
-(`bin/game_probe`), which plays a ROM by itself. From the same save state it tries the game with no input, with A, with
-START and with the stick held, and compares the pictures: whatever changes is the game reacting to that input, so it
-presses A or START only where the game reacts, moves the cursor of a menu before A, and finally checks whether the stick
-moves the character or the camera. Every game ends up with one status - `INGAME`, `MENU`, `INTRO_TITLE`, `BLACK_SCREEN`
-or `CRASH_ERROR` - plus a finer detail (`freeze`, `playable`, ...).
-
-Each game runs on the high-level RSP first (`--rsp hle`); the ones that don't reach gameplay, and did start a graphics
-task, are run again on the low-level RSP and RDP (`--rsp lle-gfx`), and the better result counts. Identical dumps
-(same CRCs) run once. Interrupting with Ctrl+C is safe: run the same command again and it continues where it stopped
-(`--fresh` starts over, `--redo MENU,INTRO_TITLE` or `--redo CUT` repeat the games the probe could not get through, `--hle-only`
-skips the low-level pass). `--report-only` rebuilds the reports from the saved runs.
+`python tools/game_status.py` builds the compatibility page from the QA data - the recorded routes and the last
+`qa.py run` - without playing anything. Every game ends up with one status - `INGAME`, `MENU`, `INTRO_TITLE`,
+`BLACK_SCREEN` or `CRASH_ERROR` - plus a finer detail (`freeze`, `playable`, ...), for the default high-level mode.
 
 The verdict is automatic and can be wrong (a game that needs a choice in a menu may stay `MENU`), so it can be corrected by
 hand in `tools/game_status_review.json`, keyed by the ROM's CRCs, and such games are marked "checked" on the page.
 `--publish` writes the result page to `site/compatibility/`, which GitHub Pages publishes at
 <https://wronk4.github.io/orbit64/compatibility/>; without it the page goes to `test_output/game_status/web/`, next to
-`review/` (screenshots and verdicts, ten games per sheet) and `results.json`.
+`review/` (screenshots and verdicts, ten games per sheet) and `results.json`. `--probe-runs` is the older way: every
+game is played again by `bin/game_probe` on its own, in HLE and (where HLE does not reach gameplay) in LLE.
+
+## RDP
+
+Graphics tasks are drawn in one of two ways. The high-level renderer (`src/rdp.cpp`, `src/raster.hpp`) turns the display
+list into triangles and draws them with a float version of the RDP's pixel pipeline: colour combiner, texture unit,
+blender, an 8-sample coverage and the hardware's 18-bit depth buffer, which lives in RDRAM where the game points it
+(a game that reads or clears the depth buffer sees it). The bit-exact RDP (`src/rdp_exact.*`) reproduces the console's
+pixels exactly and is what the low-level RSP uses; *Settings › Emulation › Low-level RDP* picks Bit-exact (GPU),
+Bit-exact (CPU) or Fast (the high-level renderer). `ORBIT64_RDP=exact-gpu|exact|fast` overrides it, and
+`make rdp_check` / `make exact_gpu_check` compare the renderers frame by frame.
 
 ## RSP
 

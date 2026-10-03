@@ -81,11 +81,12 @@ contrast stretched, inverted) reads 95.2% of them and 100% of the words a decisi
 
 | | |
 |---|---|
-| `qa.py record [--list F] [--filter T] [--jobs 4]` | finds routes for the games that have none (`--force`: all again, `--retry-failed`). `--improve` goes on from the end of routes that stop short of gameplay (3 more tries per game). The route that tests use is only replaced by one that reaches a better class, but the *search* always moves on: every run saves how far it got (`test_output/qa/frontier/`) and the next `--improve` starts there, so nothing explored is explored twice |
+| `qa.py record [--list F] [--filter T] [--jobs 4]` | finds routes for the games that have none (`--force`: all again, `--retry-failed`). `--improve` goes on from the end of routes that stop short of gameplay (`--max-attempts`, default 4 tries per game in all). `--budget N` sizes a search in emulated frames instead of wall seconds (about 18000 is a few minutes with 6 probes running): the same work whatever else the machine does, so results do not depend on how many probes run at once. The route that tests use is only replaced by one that reaches a better class, but the *search* always moves on: every run saves how far it got (`test_output/qa/frontier/`) and the next `--improve` starts there, so nothing explored is explored twice |
 | `qa.py run [smoke\|render\|deep]` | replays and judges. `smoke`: route + short look, ~15 s per game. `render` (default): 300 frames, 10 pictures, HLE vs LLE. `deep`: 900 frames |
 | `qa.py seed` | rebuilds routes from the old probe runs in `test_output/game_status` (only games that run took to gameplay) and installs the ones that still work: a replay each, no search |
 | `qa.py rebase` | takes the pictures the current emulator draws along every route as the recorded ones (the inputs stay). Use it after a change that legitimately alters how games look |
 | `qa.py report` | rebuilds `test_output/qa/report.html` from the last run |
+| `qa.py watch` | live view of a running `record --improve` (games tried, which got further) or `run`; the screen is redrawn only when something changed |
 | `qa.py routes [-v]` | which games have a route, how far it gets |
 | `qa.py selftest` | checks the tools themselves: a replay must reproduce the same machine and pictures, bit for bit |
 
@@ -135,6 +136,7 @@ tools/game_qa.cpp        replays a route, plays, measures, compares with LLE    
 tools/qa.py              record / run / report / routes / selftest; judging, report
 tools/routes/            <CRC>.route (commit these) and index.json (how each was recorded)
 tools/qa_known.json      accepted findings
+tools/game_status.py     builds the compatibility page (site/compatibility) from the routes and the last run
 test_output/qa/          runs/<CRC>/ (qa.json, PNGs), checkpoints/, results.json, report.html
 ```
 
@@ -148,6 +150,9 @@ measures (brightness, colours, edges, noise) and the HLE/LLE differences per pic
   that a stick moves (`reached` says which: `ingame`, `big`, `furthest`). The tests then judge what is drawn
   there. A game whose route is stuck in a menu needs a hand-written route (a text file, see
   `probe_route.hpp`) or a better probe.
+* The route classes: `ingame` (the stick moves the picture, the best), `scene` (a 3D scene, no control confirmed),
+  `big` (the stick changed much of the picture once, then a menu), `furthest` (the furthest the search got). The
+  compatibility page maps them to a status with the OCR reader's view of the last screen (`game_status.py`).
 * LLE is a reference, not the truth: a difference shows that the two disagree. Looking at the pictures tells
   which one is right (almost always LLE: it runs the real microcode).
 * The speed in the report is the speed of a headless run with several games at once.

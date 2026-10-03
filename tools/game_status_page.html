@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Orbit64 game compatibility – Nintendo 64 games tested</title>
-<meta name="description" content="How far each Nintendo 64 game gets in the Orbit64 emulator: every game is started and played automatically, with screenshots and a status per game.">
+<meta name="description" content="How far each Nintendo 64 game gets in the Orbit64 emulator: every game is played by a recorded route and checked automatically, with screenshots and a status per game.">
 <meta name="theme-color" content="#14131f">
 <link rel="canonical" href="https://wronk4.github.io/orbit64/compatibility/">
 <link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
@@ -12,7 +12,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Orbit64">
 <meta property="og:title" content="Orbit64 game compatibility">
-<meta property="og:description" content="Every Nintendo 64 game started and played automatically in Orbit64, with screenshots and a status per game.">
+<meta property="og:description" content="Every Nintendo 64 game played by a recorded route in Orbit64, with screenshots and a status per game.">
 <meta property="og:url" content="https://wronk4.github.io/orbit64/compatibility/">
 <meta property="og:image" content="https://wronk4.github.io/orbit64/og-image.png">
 <style>
@@ -175,8 +175,8 @@
 <div class="wrap">
   <section class="intro">
     <h1>Game <span>compatibility</span></h1>
-    <p class="lead">Every game was started in Orbit64 and played automatically. The tester presses A or START only when the game
-      reacts to them, and finally checks whether the stick moves the character or the camera.</p>
+    <p class="lead">Every game is played in Orbit64 by an automatic tester that finds a route to gameplay (title screens, menus, prompts)
+      and remembers it. The route is replayed for each build and the result is judged from the pictures and the game's behaviour.</p>
   </section>
 
   <section class="overview" aria-label="Summary">
@@ -189,10 +189,9 @@
 
   <div class="facts" id="facts"></div>
   <p class="notice warn" role="note"><b>These results are not 100% certain.</b> Every game is played by an automatic tester, so it can be wrong:
-    a game shown as <i>Menu</i> or <i>Intro / title</i> may work fine and the tester just didn't find its way further, and the other way round.
-    <b>Menu</b> and <b>Intro / title</b> do not mean the game is broken: in many of those games the emulator works fine and the tester
-    simply doesn't reach gameplay (it can't pick a mode or a character, needs a specific button sequence, a save, or a longer wait).
-    The results are still being checked by hand and will be corrected; games checked by hand are marked <span class="tag ok">checked</span>.
+    a game shown as <i>Menu</i> or <i>Intro / title</i> may work fine and the tester just didn't find its way further (it can't pick a mode
+    or a character, needs a specific button sequence, a save, or a longer search), and a status can also be too good when a menu looks like gameplay.
+    <b>Menu</b> and <b>Intro / title</b> do not mean the game is broken. Statuses corrected by hand are marked <span class="tag ok">checked</span>.
     If you know a game's real state, please <a href="https://github.com/Wronk4/orbit64/issues">tell us</a>.</p>
   <p class="notice" id="notice"></p>
 
@@ -216,23 +215,21 @@
 
   <section class="how">
     <h2>How the status is decided</h2>
-    <p>The tester runs each game with save states: from the same moment it tries the game without input, with A, with START
-      and with the stick held, and compares the pictures. A game that reacts to a button gets that button; a game that doesn't react
-      is left alone (logos, cut-scenes, loading). Then it looks at the last seconds. The automatic verdict is then compared with the
-      screenshots by eye and corrected where it is wrong; this is still in progress, so many games are not checked yet.</p>
+    <p>A tool plays each game from the start and looks for the inputs that get it furthest. It tries every button from the same save state,
+      keeps what changes the picture, reads the text on the screen (OCR) to answer prompts and choose menu entries, and finally checks
+      whether the stick moves the character or the camera. The inputs that worked are saved as the game's <i>route</i>. Each build replays
+      every route in seconds, compares the high-level emulation with the low-level one (which runs the game's own microcode) and
+      judges the pictures, so a status always comes from a route that was actually played.</p>
     <ul>
-      <li><b>In-game</b> – the stick moves the character or the camera: gameplay.</li>
-      <li><b>Menu</b> – the game reacts to buttons or a cursor, but the tester didn't get into gameplay. The game may well work.</li>
+      <li><b>In-game</b> – the route reaches gameplay: the stick moves the character or the camera.</li>
+      <li><b>Menu</b> – the route ends in a menu, a scene or a screen that reacts to input, but gameplay was not confirmed. The game may well work.</li>
       <li><b>Intro / title</b> – logos, intro, title screen or demo, no control yet. The game may well work.</li>
       <li><b>Black screen</b> – nothing (or only black) is shown.</li>
-      <li><b>Crash / error</b> – the emulator crashed or timed out, the game froze, or the picture is broken.</li>
-      <li><b>HLE / LLE</b> – HLE is the default, fast emulation. LLE runs the game's own RSP microcode with a bit-exact RDP:
-        slower, more compatible. A game is tried in HLE first, in LLE only when HLE doesn't get into the game.</li>
+      <li><b>Crash / error</b> – the emulator crashed, the game froze while the route was played, or no route could be recorded.</li>
     </ul>
-    <p>"In-game" is not "perfect": glitches, missing effects and slowdowns are not measured here. The run is short (about a minute
-      of game time), so a game that needs a long intro, a choice in a menu or a specific button sequence to reach gameplay can show up as
-      Menu or Intro even though it runs fine. Only <b>Black screen</b> and <b>Crash / error</b> point to a problem in the emulator with any
-      likelihood, and even those are checked by hand before they are treated as such.</p>
+    <p>"In-game" is not "perfect": glitches, missing effects and slowdowns are not rated here. The search for a route has a limited time,
+      so a game that needs a long intro, a choice in a menu or a specific button sequence can show up as Menu or Intro even though it runs fine.
+      Only <b>Black screen</b> and <b>Crash / error</b> point to a problem in the emulator with any likelihood.</p>
   </section>
 </div>
 
@@ -318,12 +315,9 @@ $("per").onchange = e => { perPage = +e.target.value; page = 1; render(); };
 $("facts").innerHTML = [
   `<span><b>${total}</b> games tested</span>`,
   `<span><b>${counts.INGAME}</b> reach gameplay (${(100 * counts.INGAME / total).toFixed(0)}%)</span>`,
-  DATA.lle_gain ? `<span><b>${DATA.lle_gain}</b> of them only with LLE</span>` : "",
   `<span>updated <b>${DATA.generated}</b>${DATA.build ? ` · build <b>${esc(DATA.build)}</b>` : ""}</span>`
 ].join("");
-$("notice").innerHTML = DATA.lle_tried
-  ? `Results are for the default <b>HLE</b> mode. <b>${DATA.lle_tried}</b> games that did not reach gameplay were also tried in LLE so far (more will follow); the better result is shown, tagged <span class="tag">LLE</span> when it needs LLE.`
-  : `Results are for the default <b>HLE</b> mode. LLE (bit-exact RDP) results are not included yet and will be added; some games listed as failing here may work there.`;
+$("notice").innerHTML = `Results are for the default <b>HLE</b> mode, the one most people run. The low-level mode (the game's own RSP microcode) is used as a reference to judge what is drawn, not to improve a status.`;
 
 const rank = s => ORDER.indexOf(s);
 function card(g, i) {

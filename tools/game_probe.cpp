@@ -91,7 +91,9 @@ struct Options {
     int shot_every = 4;    // timeline screenshot every that many steps
     int final_len = 120;
     std::string rsp = "hle";  // hle | lle-gfx | lle
-    double max_seconds = 240;  // wall time; a slow game gets fewer steps
+    double max_seconds = 240;  // wall time; a slow game gets fewer steps (with a budget: only the safety limit)
+    long budget = 0;           // emulated frames the whole search may use (0: go by wall time). The same work whatever
+                               // else the machine is doing, so a run does not depend on how many probes run at once
     std::string route;         // write the inputs that reached the game here (see probe_route.hpp)
     std::string checkpoint;    // and a save state of the machine where the route ends
     std::string frontier;      // the whole route to where the search got, whatever class it reached (to go on from)
@@ -137,6 +139,7 @@ int main(int argc, char** argv) {
         else if (a == "--shot-every") o.shot_every = std::stoi(next());
         else if (a == "--rsp") o.rsp = next();
         else if (a == "--max-seconds") o.max_seconds = std::stod(next());
+        else if (a == "--budget") o.budget = std::stol(next());
         else if (a == "--route") o.route = next();
         else if (a == "--checkpoint") o.checkpoint = next();
         else if (a == "--frontier") o.frontier = next();
@@ -297,7 +300,11 @@ int main(int argc, char** argv) {
     };
     if (o.mash_len > 0 && mash_try()) { prev_sig = Sig{}; have_prev_sig = false; }
     while (pr.frame < o.boot + o.frames) {
-        if (elapsed() > o.max_seconds * 0.7) { out_of_time = true; break; }
+        // (with a frame budget the wall time is only a safety net)
+        if (o.budget > 0 ? (pr.emulated >= o.budget * 7 / 10 || elapsed() > o.max_seconds) : elapsed() > o.max_seconds * 0.7) {
+            out_of_time = true;
+            break;
+        }
         if (o.mash_len > 0 && mash_attempts < 5 && steps > 0 && steps % 20 == 0 && big_stick_steps == 0 && mash_try()) {
             have_prev_sig = have_prev2_sig = false;
             stuck_steps = 0;
@@ -591,7 +598,8 @@ int main(int argc, char** argv) {
     // when the game runs so slowly that they wouldn't fit in the time left).
     const double fps = pr.emulated / std::max(elapsed(), 1e-3);
     const double left = std::max(o.max_seconds - elapsed(), 10.0);
-    o.final_len = std::clamp(static_cast<int>(fps * left / 5 / kSampleEvery) * kSampleEvery, 30, o.final_len);
+    const double left_frames = o.budget > 0 ? std::max<double>(o.budget - pr.emulated, 300.0) : fps * left;
+    o.final_len = std::clamp(static_cast<int>(left_frames / 5 / kSampleEvery) * kSampleEvery, 30, o.final_len);
     const std::vector<u8> sf = pr.emu->save_state();
     Window f0 = pr.run(o.final_len, idle(), nullptr, false);
     pr.load(sf);
