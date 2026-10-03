@@ -130,7 +130,8 @@ def display_name(fname):
     if m:
         name = f"{m.group(2)} {m.group(1)}{m.group(3) or ''}"
     region = next((REGIONS[t] for t in tags if t in REGIONS), "")
-    version = next((t for t in tags if re.match(r"^V\d", t)), "")
+    # "(V1.2)" (GoodN64) or "(Rev 1)" (No-Intro): the revisions of one game are different dumps and the page lists each
+    version = next((t for t in tags if re.match(r"^V\d", t) or re.match(r"^Rev ?\w", t)), "")
     return {"name": name, "region": region, "version": version}
 
 
