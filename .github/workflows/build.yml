@@ -496,7 +496,7 @@ jobs:
             -DSDL_UNIX_CONSOLE_BUILD=ON
           cmake --build out --config Release --parallel
           mkdir -p dist/orbit64/roms
-          cp out/orbit64 README.md dist/orbit64/
+          cp out/liborbit64.so README.md dist/orbit64/
           cp roms/README.md dist/orbit64/roms/
           cd dist && tar -czf orbit64-android-${{ matrix.arch }}.tar.gz orbit64
 

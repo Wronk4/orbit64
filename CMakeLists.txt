@@ -70,7 +70,11 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
     ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
 
-add_executable(n64 ${CORE_SOURCES} ${UI_SOURCES} ${GPU_SOURCES} ${IMGUI_SOURCES})
+if(ANDROID)
+    add_library(n64 SHARED ${CORE_SOURCES} ${UI_SOURCES} ${GPU_SOURCES} ${IMGUI_SOURCES})
+else()
+    add_executable(n64 ${CORE_SOURCES} ${UI_SOURCES} ${GPU_SOURCES} ${IMGUI_SOURCES})
+endif()
 set_target_properties(n64 PROPERTIES OUTPUT_NAME "orbit64")
 target_include_directories(n64 PRIVATE src ${IMGUI_DIR} ${IMGUI_DIR}/backends third_party/stb)
 # IMGUI_ENABLE_TEST_ENGINE compiles in Dear ImGui's item hooks used by the UI
