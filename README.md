@@ -3,7 +3,14 @@
 > **Work in progress.** Orbit64 is under active development. Many games are playable, but others may have graphical
 > or audio glitches, crash or not start. Features and the save state format can change between releases.
 
-A desktop frontend built on SDL3 and Dear ImGui for the N64 emulation core in `src/`. Graphics go through SDL_GPU:
+**Website:** <https://wronk4.github.io/orbit64/> · **Downloads:** [latest release](https://github.com/Wronk4/orbit64/releases/latest) ·
+**Game compatibility:** <https://wronk4.github.io/orbit64/compatibility/>
+
+Orbit64 is a free Nintendo 64 (N64) emulator for **Windows, macOS and Linux**, with native x64 and ARM64 builds (Apple
+Silicon, Windows on ARM, Linux ARM64) and builds for FreeBSD, OpenBSD, NetBSD and Haiku. It has a dynamic recompiler (JIT)
+for x86-64 and AArch64, GPU-rendered internal resolution from 2× to 8×, a bit-exact RDP, save states and gamepad support.
+
+It is a desktop frontend built on SDL3 and Dear ImGui for the N64 emulation core in `src/`. Graphics go through SDL_GPU:
 Metal on macOS, Vulkan on Linux and Windows (Direct3D 12 on Windows machines without Vulkan).
 It runs on **Windows, macOS and Linux** from a single codebase.
 
