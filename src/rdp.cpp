@@ -2126,14 +2126,16 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                         s16 vtrans_y = static_cast<s16>((rdram[src_addr + 10] << 8) | rdram[src_addr + 11]);
                         s16 vtrans_z = static_cast<s16>((rdram[src_addr + 12] << 8) | rdram[src_addr + 13]);
 
+                        // (Madden NFL games give a z scale of 1023 and a translation of 0: that is a viewport, not a missing one)
+                        const bool z_given = vscale_z != 0 || vtrans_z != 0;
                         // X and Y have 2 fraction bits; Z has none (G_MAXZ / 2
                         // each maps the clip range onto the RDP's 0..1023).
                         vp_scale_x = vscale_x / 4.0f;
                         vp_scale_y = std::abs(vscale_y / 4.0f);
-                        vp_scale_z = (vscale_z != 0) ? static_cast<f32>(vscale_z) : 511.5f;
+                        vp_scale_z = z_given ? static_cast<f32>(vscale_z) : 511.5f;
                         vp_trans_x = vtrans_x / 4.0f;
                         vp_trans_y = vtrans_y / 4.0f;
-                        vp_trans_z = (vtrans_z != 0) ? static_cast<f32>(vtrans_z) : 511.5f;
+                        vp_trans_z = z_given ? static_cast<f32>(vtrans_z) : 511.5f;
                     }
                 } else if (is_light) {
                     if (src_addr + 16 <= rdram_size) {
