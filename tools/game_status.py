@@ -479,7 +479,12 @@ def web_report(results, outdir, args):
     with open(PAGE_FILE, encoding="utf-8") as f:
         page = f.read()
     with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
-        f.write(page.replace("/*DATA*/", text.replace("</", "<\\/")))
+        label = {"INGAME": "in-game", "MENU": "menu", "INTRO_TITLE": "intro / title", "BLACK_SCREEN": "black screen",
+                 "CRASH_ERROR": "crash / error"}
+        # for readers without JavaScript (and crawlers that do not run it): every game as plain text
+        static = "<ul>" + "".join("<li>%s%s (%s) - %s</li>" % (html.escape(g["name"]), " " + html.escape(g["version"]) if g["version"] else "",
+                                                               html.escape(g["region"]), label[g["status"]]) for g in games) + "</ul>"
+        f.write(page.replace("<!--STATIC-->", static).replace("/*DATA*/", text.replace("</", "<\\/")))
     print(f"page: {d} ({sum(os.path.getsize(os.path.join(img, x)) for x in os.listdir(img)) / 1e6:.1f} MB of images)")
 
 

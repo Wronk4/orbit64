@@ -40,7 +40,7 @@
       "alternateName": "Orbit64 N64 emulator",
       "applicationCategory": "GameApplication",
       "applicationSubCategory": "Emulator",
-      "operatingSystem": "Windows 10, Windows 11, Windows 11 on ARM, macOS 11+, Linux, Linux ARM64",
+      "operatingSystem": "Windows 10, Windows 11, Windows 11 on ARM, macOS 11+, Linux, Linux ARM64, FreeBSD, OpenBSD, NetBSD, Haiku",
       "processorRequirements": "x86-64 or ARM64 (AArch64)",
       "keywords": "N64 emulator, Nintendo 64 emulator, ARM64, AArch64, Windows on ARM, Linux ARM64, Raspberry Pi, Apple Silicon, JIT recompiler, internal resolution",
       "description": "Free Nintendo 64 emulator (work in progress) with a dynamic recompiler, GPU-rendered 2x-8x internal resolution, save states and gamepad support.",
@@ -57,6 +57,7 @@
         "Save states with nine slots per game",
         "Gamepad and keyboard input with rebinding",
         "High-level emulation of N64 audio microcodes including Factor 5 MusyX",
+        "Bit-exact RDP rendering on the CPU or the GPU",
         "Game library with box art"
       ]
     },
@@ -260,6 +261,12 @@
           with a 32-tap windowed-sinc filter so the pitch is never bent.</p>
       </div>
       <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
+        <h3>Accurate graphics</h3>
+        <p>The fast renderer models the console's RDP pixel pipeline (8-sample coverage, dithering, a depth buffer in RDRAM).
+          A bit-exact RDP, on the CPU or the GPU, reproduces the console's pixels exactly, also at a higher resolution.</p>
+      </div>
+      <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><path d="M17.3 5H6.7a4 4 0 0 0-4 3.6L2 15a3 3 0 0 0 5.2 2.1L9 15h6l1.8 2.1A3 3 0 0 0 22 15l-.7-6.4A4 4 0 0 0 17.3 5z"/></svg></div>
         <h3>Controllers and keyboard</h3>
         <p>Xbox, PlayStation, Switch Pro and other SDL3-supported gamepads work out of the box. You can rebind every
@@ -308,9 +315,9 @@
 
   <section id="compat">
     <h2>Game compatibility</h2>
-    <p class="sub" id="compat-sub">Orbit64 is tested on a library of Nintendo 64 games: every game is started and played
-      automatically, with a screenshot and a status. The results are automatic and not 100% certain, and are still
-      being checked by hand.</p>
+    <p class="sub" id="compat-sub">Orbit64 is tested on a library of Nintendo 64 games. A tool finds a route into every game
+      (title screens, menus, prompts), replays it with each build and judges what is drawn, with a screenshot and a status per
+      game. The results are automatic and not 100% certain: a game shown as a menu may well work.</p>
     <div class="compat-bar" id="compat-bar" hidden></div>
     <ul class="compat-legend" id="compat-legend" hidden></ul>
     <a class="btn" href="compatibility/">Browse all games</a>
@@ -318,8 +325,8 @@
 
   <section id="download">
     <h2>Download</h2>
-    <p class="sub">Every release is built automatically for all three platforms, for both x64 and ARM64. Each download is a single
-      self-contained program: there is no installer and nothing else to install.</p>
+    <p class="sub">Every release is built automatically for Windows, macOS and Linux (x64 and ARM64) and for several other systems. Each
+      download is a single self-contained program: there is no installer and nothing else to install.</p>
     <div class="table-scroll">
       <table>
         <tr><th>Platform</th><th>File</th><th>Requirements</th></tr>
@@ -328,6 +335,7 @@
         <tr><td>macOS</td><td><code>orbit64-macos-universal.zip</code></td><td>macOS 11 Big Sur or newer, Apple Silicon (M1 and newer) or Intel</td></tr>
         <tr><td>Linux</td><td><code>orbit64-linux-x64.tar.gz</code></td><td>x86-64 with glibc 2.35+ (e.g. Ubuntu 22.04+, Fedora 36+); Vulkan for GPU rendering</td></tr>
         <tr><td>Linux ARM64</td><td><code>orbit64-linux-arm64.tar.gz</code></td><td>AArch64 with glibc 2.35+ (e.g. Ubuntu 22.04+, Raspberry Pi OS bookworm 64-bit); Vulkan for GPU rendering</td></tr>
+        <tr><td>Other systems</td><td><code>orbit64-windows-x86.zip</code>, <code>orbit64-linux-x86.tar.gz</code>, <code>orbit64-linux-armhf.tar.gz</code>, <code>orbit64-linux-riscv64.tar.gz</code>, <code>orbit64-linux-ppc64le.tar.gz</code>, <code>orbit64-freebsd-x64.tar.gz</code>, <code>orbit64-openbsd-x64.tar.gz</code>, <code>orbit64-netbsd-x64.tar.gz</code>, <code>orbit64-haiku-x64.zip</code></td><td>32-bit Windows and Linux, ARMv7, RISC-V 64, PowerPC 64 LE, FreeBSD, OpenBSD, NetBSD and Haiku. Built by the same release, tested less than the systems above</td></tr>
       </table>
     </div>
     <p><a class="btn primary" href="https://github.com/Wronk4/orbit64/releases/latest">Get the latest release</a></p>
