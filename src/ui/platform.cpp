@@ -60,6 +60,8 @@ OS current_os() {
     return OS::Windows;
 #elif defined(__APPLE__)
     return OS::MacOS;
+#elif defined(__ANDROID__)
+    return OS::Other;
 #elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__HAIKU__)
     return OS::Linux;
 #else

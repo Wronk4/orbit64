@@ -263,6 +263,11 @@ jobs:
             proc: riscv64
             qemu: qemu-riscv64-static
             packages: gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+          - name: ppc64le
+            arch: powerpc64le-linux-gnu
+            proc: ppc64le
+            qemu: qemu-ppc64le-static
+            packages: gcc-powerpc64le-linux-gnu g++-powerpc64le-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - name: Install cross-toolchain and QEMU runner
@@ -461,8 +466,48 @@ jobs:
           path: dist/orbit64-haiku-x64.zip
           retention-days: 14
 
+  # Android NDK native builds (ARM64 and x86_64)
+  android:
+    name: android-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            abi: arm64-v8a
+          - arch: x64
+            abi: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for Android
+        run: |
+          NDK_PATH="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          if [ -z "$NDK_PATH" ] || [ ! -d "$NDK_PATH" ]; then
+            NDK_PATH="$(echo /usr/local/lib/android/sdk/ndk/* | awk '{print $NF}')"
+          fi
+          cmake -S . -B out -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-28 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DORBIT64_VENDOR_SDL3=ON \
+            -DORBIT64_SDL3_STATIC=ON \
+            -DSDL_UNIX_CONSOLE_BUILD=ON
+          cmake --build out --config Release --parallel
+          mkdir -p dist/orbit64/roms
+          cp out/orbit64 README.md dist/orbit64/
+          cp roms/README.md dist/orbit64/roms/
+          cd dist && tar -czf orbit64-android-${{ matrix.arch }}.tar.gz orbit64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit64-android-${{ matrix.arch }}
+          path: dist/orbit64-android-${{ matrix.arch }}.tar.gz
+          retention-days: 14
+
   release:
-    needs: [build, freebsd, openbsd, netbsd, haiku, linux-musl, linux-x86, linux-cross]
+    needs: [build, freebsd, openbsd, netbsd, haiku, android, linux-musl, linux-x86, linux-cross]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
@@ -516,8 +561,11 @@ jobs:
             echo "| Linux x86 32-bit (Debian/Ubuntu 32-bit) | \`orbit64-linux-x86.tar.gz\` |"
             echo "| Linux ARMv7 32-bit (Raspberry Pi OS 32-bit) | \`orbit64-linux-armhf.tar.gz\` |"
             echo "| Linux RISC-V 64 | \`orbit64-linux-riscv64.tar.gz\` |"
+            echo "| Linux PowerPC 64 LE (ppc64le) | \`orbit64-linux-ppc64le.tar.gz\` |"
             echo "| Linux x64 Musl (static, Alpine / Void / any Linux) | \`orbit64-linux-musl-x64.tar.gz\` |"
             echo "| Linux ARM64 Musl (static, Alpine / Void / any Linux) | \`orbit64-linux-musl-arm64.tar.gz\` |"
+            echo "| Android ARM64 (API 28+) | \`orbit64-android-arm64.tar.gz\` |"
+            echo "| Android x86_64 (API 28+) | \`orbit64-android-x64.tar.gz\` |"
             echo "| FreeBSD 14.3+ x64 | \`orbit64-freebsd-x64.tar.gz\` |"
             echo "| OpenBSD 7.9+ x64 | \`orbit64-openbsd-x64.tar.gz\` |"
             echo "| NetBSD 10.0+ x64 | \`orbit64-netbsd-x64.tar.gz\` |"
