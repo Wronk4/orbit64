@@ -11,6 +11,9 @@
 #include <iostream>
 #include <thread>
 #include <unordered_set>
+#if defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 extern int g_current_frame; // emulator.cpp
 
@@ -3002,16 +3005,22 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
     hle_hidden_->ensure_hidden(rdram_size);
     if (color_image_size == 2) { // 16-bit
         u16 color16 = static_cast<u16>(fill_color & 0xFFFF);
+        const u8 hi = static_cast<u8>(color16 >> 8), lo = static_cast<u8>(color16);
         for (u32 y = start_y; y < max_y; ++y) {
-            for (u32 x = start_x; x < max_x; ++x) {
-                u32 idx = color_image_addr + (y * fb_w + x) * 2;
-                if (idx + 1 < rdram_size) {
-                    rdram[idx + 0] = (color16 >> 8) & 0xFF;
-                    rdram[idx + 1] = color16 & 0xFF;
-                    hle_hidden_->force_hidden(idx >> 1, (color16 & 1) ? 3 : 0, color16); // coverage: all or nothing
-                    if (y * fb_w + x < hires_shadow_len_) hires_shadow_[y * fb_w + x] = color16;
-                }
+            const u64 row = static_cast<u64>(color_image_addr) + static_cast<u64>(y) * fb_w * 2;
+            // the pixels of this row that lie inside RDRAM
+            u32 n = max_x - start_x;
+            const u64 first = row + static_cast<u64>(start_x) * 2;
+            if (first + 1 >= rdram_size) continue;
+            n = static_cast<u32>(std::min<u64>(n, (rdram_size - first) / 2));
+            u8* p = rdram + first;
+            for (u32 i = 0; i < n; ++i) {
+                p[2 * i] = hi;
+                p[2 * i + 1] = lo;
             }
+            hle_hidden_->fill_hidden(first >> 1, n, (color16 & 1) ? 3 : 0, color16); // coverage: all or nothing
+            const size_t s0 = static_cast<size_t>(y) * fb_w + start_x;
+            for (u32 i = 0; i < n && s0 + i < hires_shadow_len_; ++i) hires_shadow_[s0 + i] = color16;
         }
         if (hr) hires_->fill_rect(hr, start_x, start_y, max_x, max_y, fb_pixel_to_argb(color16, 2));
     } else if (color_image_size == 1) { // 8-bit: byte k of the fill colour for address k mod 4
@@ -3060,7 +3069,9 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, s
     raster::PixelResult res;
     // The depth buffer: 16 bits per pixel, the same width as the colour image.
     const u32 zidx = st.zb_addr + pixel_idx * 2;
-    const bool z_ok = (st.z_compare || st.z_update) && zidx + 1 < rdram_size;
+    // (no depth image set yet: the buffer would be RDRAM from address 0 - Vigilante 8 draws with Z_UPDATE before its first
+    // G_SETDEPTHIMAGE, and the writes overwrote the game's own data and stalled it)
+    const bool z_ok = (st.z_compare || st.z_update) && st.zb_addr != 0 && zidx + 1 < rdram_size;
     if (z_ok) {
         mem.zword = static_cast<u16>((rdram[zidx] << 8) | rdram[zidx + 1]);
         mem.zhidden = hle_hidden_->hidden_at(zidx >> 1, mem.zword);
@@ -3080,7 +3091,7 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, s
         const u16 p = static_cast<u16>(((res.r >> 3) << 11) | ((res.g >> 3) << 6) | ((res.b >> 3) << 1) | (res.cvg >> 2));
         rdram[idx] = static_cast<u8>(p >> 8);
         rdram[idx + 1] = static_cast<u8>(p);
-        hle_hidden_->force_hidden(idx >> 1, res.cvg & 3, p);
+        hle_hidden_->set_hidden(idx >> 1, res.cvg & 3, p);
         if (pixel_idx < shadow_len) shadow[pixel_idx] = p;
     } else if (st.fb_size == 3) { // 32-bit RGBA, coverage in the upper 3 bits of alpha
         const u32 idx = st.fb_addr + pixel_idx * 4;
@@ -3114,14 +3125,14 @@ void RDP::write_pixel(const DrawState& st, u32 x, u32 y, u32 color, u8* rdram, s
         const u8 c = (idx & 1) ? res.g : res.r;
         rdram[idx] = c;
         const u32 h = idx & ~1u;
-        if (idx & 1) hle_hidden_->force_hidden(h >> 1, (c & 1) * 3, static_cast<u16>((rdram[h] << 8) | c));
+        if (idx & 1) hle_hidden_->set_hidden(h >> 1, (c & 1) * 3, static_cast<u16>((rdram[h] << 8) | c));
     } else {
         return;
     }
     if (res.z_write && z_ok) {
         rdram[zidx] = static_cast<u8>(res.zword >> 8);
         rdram[zidx + 1] = static_cast<u8>(res.zword);
-        hle_hidden_->force_hidden(zidx >> 1, res.zhidden, res.zword);
+        hle_hidden_->set_hidden(zidx >> 1, res.zhidden, res.zword);
     }
     stats.drawn++;
 }
@@ -3235,7 +3246,7 @@ void RDP::flush_native() {
     auto draw_band = [&](u32 band) {
         const s32 row_begin = threaded ? static_cast<s32>(band) * kBandRows : 0;
         const s32 row_end = threaded ? row_begin + kBandRows : INT_MAX;
-        PixelStats& stats = band_stats[band];
+        PixelStats stats{};  // (local: the bands' slots in band_stats share cache lines)
         for (const NativeCmd& c : native_queue_) {
             if (c.y_last < row_begin || c.y_first >= row_end) continue;
             NativeSink sink{*this, *c.st, native_rdram_, native_rdram_size_, c.shadow, c.shadow_len, stats};
@@ -3246,9 +3257,11 @@ void RDP::flush_native() {
                                  row_begin, row_end, sink);
             }
         }
+        band_stats[band] = stats;
     };
     if (threaded) raster_pool_->run(bands, draw_band);
     else draw_band(0);
+    hle_hidden_->bump_hidden_epoch();
     for (const PixelStats& b : band_stats) {
         stat_pixels.drawn += b.drawn;
         stat_pixels.z_fail += b.z_fail;
@@ -3315,8 +3328,18 @@ void RDP::rasterize_triangle(const Vertex& in0, const Vertex& in1, const Vertex&
     if (in0.w <= 0.0001f || in1.w <= 0.0001f || in2.w <= 0.0001f) return;
     // The microcode hands the RDP screen positions in quarter pixels.
     auto snap = [](Vertex v) {
+#if defined(__SSE2__) || defined(_M_X64)
+        // (round to nearest even like nearbyint, without the library call)
+        auto q = [](f32 v) {
+            const f32 x = v * 4.0f;
+            return (x > -1e9f && x < 1e9f) ? static_cast<f32>(_mm_cvtss_si32(_mm_set_ss(x))) * 0.25f : std::nearbyint(x) * 0.25f;
+        };
+        v.sx = q(v.sx);
+        v.sy = q(v.sy);
+#else
         v.sx = std::nearbyint(v.sx * 4.0f) * 0.25f;
         v.sy = std::nearbyint(v.sy * 4.0f) * 0.25f;
+#endif
         return v;
     };
     const Vertex v0 = snap(in0), v1 = snap(in1), v2 = snap(in2);

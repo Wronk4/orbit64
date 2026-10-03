@@ -114,6 +114,16 @@ public:
         }
     }
 
+    // force_hidden() for a renderer that draws on several threads: it leaves the epoch alone (a shared counter
+    // every pixel wrote to), and the caller calls bump_hidden_epoch() once when the pixels are in.
+    void set_hidden(size_t h, u8 bits, u16 word) {
+        if (h < hs_->bits.size()) {
+            hs_->bits[h] = bits;
+            hs_->word[h] = word;
+        }
+    }
+    void bump_hidden_epoch() { ++hs_->epoch; }
+
     // ---- Accelerated back end: primitives are recorded (see ExactRecord)
     // instead of drawn; everything else runs here as usual.
     void set_recorder(ExactRecorder* r) { recorder_ = r; }
@@ -171,7 +181,22 @@ public:
     // the first blender cycle reading memory) under the current modes.
     bool draw_needs_serial() const;
     // The ninth bits of RDRAM halfword `h`, which holds `word` now.
-    u8 hidden_at(size_t h, u16 word) const;
+    u8 hidden_at(size_t h, u16 word) const {
+        // What the RDP didn't write - or what was written over since - has the ninth bits a CPU write gives each
+        // byte: its least significant bit.
+        const HiddenStore& st = *hs_;
+        if (h >= st.bits.size() || (st.bits[h] & 4) || st.word[h] != word)
+            return static_cast<u8>((((word >> 8) & 1) << 1) | (word & 1));
+        return st.bits[h];
+    }
+    // force_hidden() for halfwords [h, h + n) at once (a fill rectangle).
+    void fill_hidden(size_t h, size_t n, u8 bits, u16 word) {
+        if (h >= hs_->bits.size() || n == 0) return;
+        n = std::min(n, hs_->bits.size() - h);
+        ++hs_->epoch;
+        std::fill_n(hs_->bits.begin() + static_cast<std::ptrdiff_t>(h), n, bits);
+        std::fill_n(hs_->word.begin() + static_cast<std::ptrdiff_t>(h), n, word);
+    }
     // The CPU (or a DMA) wrote [paddr, paddr + len): those bytes' ninth bits
     // are their least significant bits again.
     void cpu_wrote(u32 paddr, u32 len);

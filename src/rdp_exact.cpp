@@ -311,15 +311,6 @@ inline s32 combiner_equation(s32 a, s32 b, s32 c, s32 d) {
 
 } // namespace
 
-u8 ExactRdp::hidden_at(size_t h, u16 word) const {
-    // What the RDP didn't write - or what was written over since - has the
-    // ninth bits a CPU write gives each byte: its least significant bit.
-    const HiddenStore& st = *hs_;
-    if (h >= st.bits.size() || (st.bits[h] & 4) || st.word[h] != word)
-        return static_cast<u8>((((word >> 8) & 1) << 1) | (word & 1));
-    return st.bits[h];
-}
-
 void ExactRdp::cpu_wrote(u32 paddr, u32 len) {
     HiddenStore& st = *hs_;
     if (len == 0 || st.watched.empty()) return;
