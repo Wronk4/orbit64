@@ -97,6 +97,7 @@ struct Settings {
     bool vsync = true;
     int scanlines = 0;   // 0..100 intensity
     bool show_fps_overlay = false;
+    bool hle_raytracing = false; // Ray tracing lighting replacement for N64 HLE microcodes
     int fullscreen_mode = 0; // 0 = borderless desktop, 1 = exclusive
     // 0 = GPU (SDL_GPU: Metal / Vulkan / Direct3D 12; high resolutions render
     // on the graphics card), 1 = compatibility (any SDL renderer, CPU only).

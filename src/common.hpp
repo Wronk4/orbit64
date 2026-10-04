@@ -11,6 +11,43 @@
 #include <algorithm>
 #include <memory>
 #include <cmath>
+#include <bit>
+#include <limits>
+#include <type_traits>
+
+#if defined(_MSC_VER) && !defined(__clang__)
+inline int __builtin_clz(unsigned int x) { return std::countl_zero(x); }
+inline int __builtin_ctz(unsigned int x) { return std::countr_zero(x); }
+inline int __builtin_popcount(unsigned int x) { return std::popcount(x); }
+
+template <typename T>
+inline bool __builtin_add_overflow(T a, T b, T* res) {
+    if constexpr (std::is_signed_v<T>) {
+        using UT = std::make_unsigned_t<T>;
+        *res = static_cast<T>(static_cast<UT>(a) + static_cast<UT>(b));
+        if (b > 0 && a > std::numeric_limits<T>::max() - b) return true;
+        if (b < 0 && a < std::numeric_limits<T>::min() - b) return true;
+        return false;
+    } else {
+        *res = a + b;
+        return *res < a;
+    }
+}
+
+template <typename T>
+inline bool __builtin_sub_overflow(T a, T b, T* res) {
+    if constexpr (std::is_signed_v<T>) {
+        using UT = std::make_unsigned_t<T>;
+        *res = static_cast<T>(static_cast<UT>(a) - static_cast<UT>(b));
+        if (b < 0 && a > std::numeric_limits<T>::max() + b) return true;
+        if (b > 0 && a < std::numeric_limits<T>::min() + b) return true;
+        return false;
+    } else {
+        *res = a - b;
+        return a < b;
+    }
+}
+#endif
 
 using u8  = std::uint8_t;
 using u16 = std::uint16_t;

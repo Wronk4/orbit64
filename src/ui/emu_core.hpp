@@ -153,6 +153,7 @@ public:
     // size, 2..8 = that many times larger. Applied at the next frame.
     void set_internal_scale(int scale) { internal_scale_ = scale; }
     void set_autosave_backup(bool on) { autosave_backup_ = on; } // write saves ~3 s after a change, not only on exit
+    void set_raytracing(bool on) { raytracing_ = on; }
     // Who renders internal resolutions above 1 (the GPU renderer), or
     // nullptr for the CPU. Applied at the next frame; the high-resolution
     // buffers start over.
@@ -251,6 +252,7 @@ private:
     std::atomic<int> internal_scale_{1};
     std::atomic<bool> autosave_backup_{true};
     std::chrono::steady_clock::time_point last_backup_{}; // emulation thread only
+    std::atomic<bool> raytracing_{false};
     std::mutex factory_mutex_;
     HiResFactory hires_factory_;
     bool factory_dirty_ = false; // guarded by factory_mutex_
