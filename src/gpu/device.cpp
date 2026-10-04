@@ -1,4 +1,5 @@
 #include "device.hpp"
+#include "shaders_ext_gen.hpp"
 #include "shaders_gen.hpp"
 
 #include <SDL3/SDL.h>
@@ -130,6 +131,30 @@ static SDL_GPUComputePipeline* make_pipeline(SDL_GPUDevice* dev, const shaders::
     return p;
 }
 
+SDL_GPUComputePipeline* make_spirv_pipeline(SDL_GPUDevice* dev, const shaders::SpirvBlob& blob,
+                                            const ShaderResources& r, const char* name) {
+    if (!dev || !(SDL_GetGPUShaderFormats(dev) & SDL_GPU_SHADERFORMAT_SPIRV)) return nullptr;
+    SDL_GPUComputePipelineCreateInfo ci{};
+    ci.num_readonly_storage_textures = r.ro_textures;
+    ci.num_readonly_storage_buffers = r.ro_buffers;
+    ci.num_readwrite_storage_textures = r.rw_textures;
+    ci.num_readwrite_storage_buffers = r.rw_buffers;
+    ci.num_uniform_buffers = r.uniforms;
+    ci.threadcount_x = r.tx;
+    ci.threadcount_y = r.ty;
+    ci.threadcount_z = 1;
+    ci.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    ci.code = blob.spirv;
+    ci.code_size = blob.size;
+    ci.entrypoint = "main";
+    ci.props = SDL_CreateProperties();
+    SDL_SetStringProperty(ci.props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, name);
+    SDL_GPUComputePipeline* p = SDL_CreateGPUComputePipeline(dev, &ci);
+    SDL_DestroyProperties(ci.props);
+    if (!p) SDL_Log("%s unavailable: %s", name, SDL_GetError());
+    return p;
+}
+
 Device::Device(SDL_GPUDevice* device) : device_(device) {
     if (!device_) {
         error_ = "no GPU device";
@@ -179,6 +204,14 @@ Device::Device(SDL_GPUDevice* device) : device_(device) {
     if (exact_memory_) exact_apply_ = make_pipeline(device_, shaders::exact_apply, up, "orbit64 exact apply", exact_error);
     if (exact_apply_) exact_init_ = make_pipeline(device_, shaders::exact_init, up, "orbit64 exact init", exact_error);
     if (!exact_ok()) SDL_Log("GPU bit-exact RDP unavailable: %s", exact_error.c_str());
+    ShaderResources trace;
+    trace.ro_buffers = 2;
+    trace.rw_buffers = 1;
+    ShaderResources apply;
+    apply.ro_buffers = 1;
+    apply.rw_buffers = 1;
+    rt_trace_ = make_spirv_pipeline(device_, shaders::rt_trace, trace, "orbit64 rt trace");
+    rt_apply_ = make_spirv_pipeline(device_, shaders::rt_apply, apply, "orbit64 rt apply");
 }
 
 Device::~Device() {
@@ -191,6 +224,8 @@ Device::~Device() {
     if (exact_memory_) SDL_ReleaseGPUComputePipeline(device_, exact_memory_);
     if (exact_apply_) SDL_ReleaseGPUComputePipeline(device_, exact_apply_);
     if (exact_init_) SDL_ReleaseGPUComputePipeline(device_, exact_init_);
+    if (rt_trace_) SDL_ReleaseGPUComputePipeline(device_, rt_trace_);
+    if (rt_apply_) SDL_ReleaseGPUComputePipeline(device_, rt_apply_);
 }
 
 } // namespace gpu

@@ -9,6 +9,20 @@
 
 namespace gpu {
 
+namespace shaders {
+struct SpirvBlob;
+}
+
+// What a compute shader binds (SDL_GPUComputePipelineCreateInfo).
+struct ShaderResources {
+    Uint32 ro_textures = 0, ro_buffers = 0, rw_textures = 0, rw_buffers = 0, uniforms = 1;
+    Uint32 tx = 8, ty = 8;
+};
+// A compute pipeline from a SPIR-V-only shader (shaders_ext_gen.hpp), or
+// nullptr on a driver that doesn't take SPIR-V (Metal, Direct3D 12).
+SDL_GPUComputePipeline* make_spirv_pipeline(SDL_GPUDevice* dev, const shaders::SpirvBlob& blob,
+                                            const ShaderResources& r, const char* name);
+
 // A device for the current platform, preferring the drivers the renderer's
 // shaders are verified on. ORBIT64_GPU_DRIVER (vulkan, metal, direct3d12)
 // picks one; ORBIT64_GPU_DEBUG turns on the driver's validation.
@@ -49,6 +63,10 @@ public:
     SDL_GPUComputePipeline* exact_apply() const { return exact_apply_; }
     SDL_GPUComputePipeline* exact_init() const { return exact_init_; }
     SDL_GPUComputePipeline* exact_memory() const { return exact_memory_; }
+    // Per-pixel ray tracing (shaders/ext/rt_*.comp), Vulkan only.
+    bool rt_ok() const { return rt_trace_ && rt_apply_; }
+    SDL_GPUComputePipeline* rt_trace() const { return rt_trace_; }
+    SDL_GPUComputePipeline* rt_apply() const { return rt_apply_; }
 
 private:
     SDL_GPUDevice* device_;
@@ -60,6 +78,8 @@ private:
     SDL_GPUComputePipeline* exact_memory_ = nullptr;
     SDL_GPUComputePipeline* exact_apply_ = nullptr;
     SDL_GPUComputePipeline* exact_init_ = nullptr;
+    SDL_GPUComputePipeline* rt_trace_ = nullptr;
+    SDL_GPUComputePipeline* rt_apply_ = nullptr;
     std::string error_;
 };
 

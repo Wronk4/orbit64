@@ -98,6 +98,22 @@ void scan_changes(HiResTarget& t, const u8* rdram, size_t rdram_size, std::vecto
 } // namespace hires
 
 // What the RDP records into; see the top of this file.
+// Per-pixel ray tracing of a finished 3D scene (RDP::rt_pixel_flush): the
+// scene's BVH (RayTracingScene::serialize) and how to get from a pixel of the
+// target and its depth back into the space the BVH is in.
+struct RtPass {
+    std::vector<u32> bvh;      // nodes (8 words each), then triangles (12 words each)
+    u32 tri_offset = 0;        // word offset of the triangles in bvh
+    f32 proj[16] = {};         // modelview space -> clip (row vectors: clip = v * proj)
+    f32 inv_proj[16] = {};     // clip -> modelview space
+    f32 vp[6] = {};            // viewport scale x, y, z and translation x, y, z (RDP::compute_screen_coords)
+    f32 sun[3] = {0, 1, 0};    // toward the main light
+    f32 eye[3] = {};           // the camera
+    f32 scene_scale = 1.0f;    // RayTracingScene::scale()
+    f32 shadow_strength = 0.55f, ao_strength = 1.0f;
+    u32 frame = 0;
+};
+
 class HiResRenderer {
 public:
     static constexpr u32 kMaxScale = 8;
@@ -134,6 +150,10 @@ public:
     virtual void blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h,
                       const u32* colors) = 0;
     virtual void clear_depth() = 0;
+    // Ray traces shadows and ambient occlusion into what was drawn into `t`
+    // so far (renderers that can; the RDP lights vertices itself otherwise).
+    virtual bool supports_ray_tracing() const { return false; }
+    virtual void ray_trace(HiResTarget* t, const RtPass& pass) { (void)t; (void)pass; }
     // Starts drawing everything recorded so far.
     virtual void flush() = 0;
 

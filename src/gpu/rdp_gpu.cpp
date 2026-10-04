@@ -33,6 +33,14 @@ struct FillParams {
 struct DecodeParams {
     u32 jobs, job_count, blocks, groups_x;
 };
+// shaders/ext/rt_common.glsl
+struct RtParams {
+    f32 ip[16];
+    f32 vp[4], vpz[4], sun[4], eye[4];
+    u32 dims[4], misc[4];
+    f32 strength[4];
+};
+static_assert(sizeof(RtParams) == 44 * 4);
 
 } // namespace
 
@@ -132,6 +140,7 @@ RdpRenderer::~RdpRenderer() {
     for (auto& d : depths_) SDL_ReleaseGPUBuffer(gpu_, d->buffer);
     if (no_depth_) SDL_ReleaseGPUBuffer(gpu_, no_depth_);
     if (texels_) SDL_ReleaseGPUBuffer(gpu_, texels_);
+    if (occ_) SDL_ReleaseGPUBuffer(gpu_, occ_);
     if (data_buf_) SDL_ReleaseGPUBuffer(gpu_, data_buf_);
     if (upload_) SDL_ReleaseGPUTransferBuffer(gpu_, upload_);
 }
@@ -153,6 +162,7 @@ void RdpRenderer::reset_batch() {
     prims_.clear();
     info_.clear();
     fills_.clear();
+    rt_jobs_.clear();
     rec_state_ = kNone;
     rec_serial_ = rec_tmem_gen_ = ~0ull;
     tmem_copy_ = kNone;
@@ -368,6 +378,7 @@ u32* RdpRenderer::add_prim(u32 type, Target* t, Depth* d, u32 state, s32 x0, s32
     y1 = std::min(y1, h - 1);
     if (x0 > x1 || y0 > y1) return nullptr;
     info_.push_back({t, d, static_cast<u16>(x0), static_cast<u16>(x1), static_cast<u16>(y0), static_cast<u16>(y1)});
+    if (type == GPU_PRIM_TRI && d) t->last_depth = d;
     const size_t at = prims_.size();
     prims_.resize(at + GPU_PRIM_WORDS, 0);
     u32* q = prims_.data() + at;
@@ -563,6 +574,49 @@ bool RdpRenderer::present(const VIScanout& so, const u8* rdram, size_t rdram_siz
     return true;
 }
 
+// Recorded like a buffer fill: it cuts the run of primitives, and runs
+// after what was drawn before it and before what comes after.
+void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
+    Target* t = static_cast<Target*>(ht);
+    static const bool debug = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
+    if (debug && pass.frame % 60 == 1)
+        std::fprintf(stderr, "[rt] gpu: ok %d target %p depth %p words %zu\n", dev_->rt_ok(), (void*)t,
+                     t ? (void*)t->last_depth : nullptr, pass.bvh.size());
+    if (!dev_->rt_ok() || !t || !t->last_depth || pass.bvh.empty()) return;
+    bool known = false;
+    for (const auto& d : depths_) known |= d.get() == t->last_depth;
+    if (!known) return;
+    RtParams p{};
+    std::memcpy(p.ip, pass.inv_proj, sizeof p.ip);
+    p.vp[0] = pass.vp[0]; p.vp[1] = pass.vp[1]; p.vp[2] = pass.vp[3]; p.vp[3] = pass.vp[4];
+    p.vpz[0] = pass.vp[2]; p.vpz[1] = pass.vp[5];
+    p.vpz[2] = 1.0f / static_cast<f32>(scale_);
+    p.vpz[3] = pass.scene_scale;
+    const f32 sl = std::sqrt(pass.sun[0] * pass.sun[0] + pass.sun[1] * pass.sun[1] + pass.sun[2] * pass.sun[2]);
+    for (int i = 0; i < 3; ++i) p.sun[i] = sl > 0.0f ? pass.sun[i] / sl : (i == 1 ? 1.0f : 0.0f);
+    p.sun[3] = 0.06f; // shadow cone: soft edges
+    for (int i = 0; i < 3; ++i) p.eye[i] = pass.eye[i];
+    p.eye[3] = pass.scene_scale * 3.0f; // ambient occlusion radius
+    const u32 bvh = static_cast<u32>(data_.size());
+    data_.insert(data_.end(), pass.bvh.begin(), pass.bvh.end());
+    p.dims[0] = t->width * scale_;
+    p.dims[1] = kFbLines * scale_;
+    p.dims[2] = bvh;
+    p.dims[3] = bvh + pass.tri_offset;
+    p.misc[0] = pass.frame;
+    p.misc[1] = 6; // ambient occlusion rays
+    p.misc[2] = 3; // shadow rays
+    p.misc[3] = std::max<u32>(1, scale_ / 2);
+    p.strength[0] = pass.shadow_strength;
+    p.strength[1] = pass.ao_strength;
+    RtJob job{t, t->last_depth, {}};
+    std::memcpy(job.params, &p, sizeof p);
+    BufferFill ev{prims_.size() / GPU_PRIM_WORDS, nullptr, 0, 0};
+    ev.rt = static_cast<int>(rt_jobs_.size());
+    rt_jobs_.push_back(job);
+    fills_.push_back(ev);
+}
+
 void RdpRenderer::end_frame() {
     if (!prims_.empty() || !fills_.empty()) submit(nullptr);
     // Colour images and depth buffers the game hasn't drawn to or shown for
@@ -706,7 +760,41 @@ void RdpRenderer::submit(const Compose* c) {
         SDL_EndGPUCopyPass(copy);
     }
 
+    auto run_rt = [&](const RtJob& j) {
+        const u32 w = j.target->width * S, h = kFbLines * S;
+        if (w * h * 2 > occ_words_) {
+            if (occ_) SDL_ReleaseGPUBuffer(gpu_, occ_);
+            occ_words_ = w * h * 2;
+            occ_ = make_buffer(occ_words_, "orbit64 rt occlusion");
+        }
+        if (!occ_) return;
+        {
+            SDL_GPUStorageBufferReadWriteBinding rw{};
+            rw.buffer = occ_;
+            SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &rw, 1);
+            SDL_BindGPUComputePipeline(cp, dev_->rt_trace());
+            SDL_GPUBuffer* ro[2] = {data_buf_, j.depth->buffer};
+            SDL_BindGPUComputeStorageBuffers(cp, 0, ro, 2);
+            SDL_PushGPUComputeUniformData(cmd, 0, j.params, sizeof j.params);
+            SDL_DispatchGPUCompute(cp, (w + 7) / 8, (h + 7) / 8, 1);
+            SDL_EndGPUComputePass(cp);
+        }
+        {
+            SDL_GPUStorageBufferReadWriteBinding rw{};
+            rw.buffer = j.target->buffer;
+            SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &rw, 1);
+            SDL_BindGPUComputePipeline(cp, dev_->rt_apply());
+            SDL_BindGPUComputeStorageBuffers(cp, 0, &occ_, 1);
+            SDL_PushGPUComputeUniformData(cmd, 0, j.params, sizeof j.params);
+            SDL_DispatchGPUCompute(cp, (w + 7) / 8, (h + 7) / 8, 1);
+            SDL_EndGPUComputePass(cp);
+        }
+    };
     auto run_fill = [&](const BufferFill& f) {
+        if (f.rt >= 0) {
+            run_rt(rt_jobs_[f.rt]);
+            return;
+        }
         SDL_GPUStorageBufferReadWriteBinding rw{};
         rw.buffer = f.buffer;
         SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &rw, 1);

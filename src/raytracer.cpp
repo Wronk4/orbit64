@@ -170,6 +170,26 @@ void RayTracingScene::build(u32 node, u32 first, u32 count, int depth) {
     nodes_[node].count = 0;
 }
 
+u32 RayTracingScene::serialize(std::vector<u32>& out) const {
+    out.clear();
+    if (!ready()) return 0;
+    auto f = [&](f32 v) { out.push_back(std::bit_cast<u32>(v)); };
+    out.reserve(nodes_.size() * 8 + tris_.size() * 12);
+    for (const BVHNode& n : nodes_) {
+        f(n.bounds.min.x); f(n.bounds.min.y); f(n.bounds.min.z);
+        f(n.bounds.max.x); f(n.bounds.max.y); f(n.bounds.max.z);
+        out.push_back(n.first);
+        out.push_back(n.count);
+    }
+    const u32 tri_offset = static_cast<u32>(out.size());
+    for (const RTTriangle& t : tris_) {
+        for (const RTVector3* v : {&t.v0, &t.e1, &t.e2, &t.normal}) {
+            f(v->x); f(v->y); f(v->z);
+        }
+    }
+    return tri_offset;
+}
+
 bool RayTracingScene::intersect_any(const RTRay& ray) const {
     if (!ready()) return false;
     u32 stack[64];
