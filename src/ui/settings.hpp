@@ -102,6 +102,8 @@ struct Settings {
     int rt_ao = 100;            // 0..100: how dark full ambient occlusion makes one
     bool rt_pixel_lighting = true; // lit objects lit per pixel (smooth across triangles)
     int rt_specular = 35;          // 0..100: their highlights
+    bool rt_reflections = true;    // ray-traced reflections on water and metal
+    int rt_gi = 60;                // 0..100: global illumination (path-traced bounced light)
     // Post-processing of the shown frame (src/gpu/postfx.hpp; Vulkan).
     bool postfx = true;
     int pfx_bloom = 60;      // 0..100

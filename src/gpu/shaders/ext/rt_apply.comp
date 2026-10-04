@@ -26,17 +26,24 @@ void main() {
     float dist = uintBitsToFloat(occ[ob + 1u]);
     if (!(dist > 0.0)) return;
 
+    // The traced pixels around: the grid's, 5 x 5 of them.
     int step = int(P.misc.w);
+    ivec2 base = (ivec2(px) / step) * step;
     float sum_w = 0.0, lit = 0.0, ao = 0.0;
+    vec3 bounce = vec3(0.0);
     for (int dy = -2; dy <= 2; ++dy)
         for (int dx = -2; dx <= 2; ++dx) {
-            ivec2 q = ivec2(px) + ivec2(dx, dy) * step;
+            ivec2 q = base + ivec2(dx, dy) * step;
             if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
             uint j = uint(q.y) * W + uint(q.x);
+            if (occ[j * OCC_WORDS + 9u] == 0u) continue;
             float qd = uintBitsToFloat(occ[j * OCC_WORDS + 1u]);
             if (!(qd > 0.0)) continue;
-            float w = exp(-abs(qd - dist) / (0.01 * dist)) * exp(-float(dx * dx + dy * dy) * 0.18);
+            vec2 off = vec2(q - ivec2(px)) / float(step);
+            float w = exp(-abs(qd - dist) / (0.01 * dist)) * exp(-dot(off, off) * 0.18);
             uint v = occ[j * OCC_WORDS];
+            uint bc = occ[j * OCC_WORDS + 8u];
+            bounce += w * vec3(float(bc & 0xFFu), float((bc >> 8) & 0xFFu), float((bc >> 16) & 0xFFu));
             lit += w * float(v & 0xFFFFu);
             ao += w * float(v >> 16);
             sum_w += w;
@@ -44,6 +51,7 @@ void main() {
     if (sum_w <= 0.0) return;
     lit /= sum_w * 65535.0;
     ao /= sum_w * 65535.0;
+    bounce /= sum_w * 255.0;
 
     float shadow = 1.0 - P.strength.x * (1.0 - lit);
     float occlusion = 1.0 - P.strength.y * (1.0 - ao);
@@ -60,7 +68,14 @@ void main() {
         k = clamp(light / max(shade, vec3(1.0 / 64.0)), 0.0, 3.0);
     }
     uint c = color_buf[idx];
-    vec3 rgb = vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu)) * k;
+    vec3 own = vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu));
+    // Light bounced off the surroundings, coloured by them, onto this
+    // surface (its colour standing in for how much it reflects).
+    vec3 rgb = own * k + own * bounce * (P.gi.x * 1.6);
+    // Reflections (water, metal) over the lit colour.
+    uint rf = occ[ob + 7u];
+    float ra = float(rf >> 24) / 255.0;
+    if (ra > 0.0) rgb = mix(rgb, vec3(float(rf & 0xFFu), float((rf >> 8) & 0xFFu), float((rf >> 16) & 0xFFu)), ra);
     uvec3 o = uvec3(clamp(rgb + 0.5, 0.0, 255.0));
     color_buf[idx] = (c & 0xFF000000u) | (o.r << 16) | (o.g << 8) | o.b;
 }

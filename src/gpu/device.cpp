@@ -205,7 +205,7 @@ Device::Device(SDL_GPUDevice* device) : device_(device) {
     if (exact_apply_) exact_init_ = make_pipeline(device_, shaders::exact_init, up, "orbit64 exact init", exact_error);
     if (!exact_ok()) SDL_Log("GPU bit-exact RDP unavailable: %s", exact_error.c_str());
     ShaderResources trace;
-    trace.ro_buffers = 2;
+    trace.ro_buffers = 4;
     trace.rw_buffers = 1;
     ShaderResources apply;
     apply.ro_buffers = 1;

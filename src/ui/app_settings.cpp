@@ -369,6 +369,18 @@ void App::settings_graphics() {
         if (toggle("rtpxl", &settings_.rt_pixel_lighting))
             core_.set_rt_pixel_lighting(settings_.rt_pixel_lighting, settings_.rt_specular);
         row_end();
+        row_begin("Global illumination",
+                  "Path-traced bounced light: surfaces pick up the colour of what is around them, and creases "
+                  "and corners darken (ambient occlusion).",
+                  cw);
+        if (slider_int("rtgi", &settings_.rt_gi, 0, 100, "%d%%", cw)) core_.set_rt_gi(settings_.rt_gi);
+        row_end();
+        row_begin("Reflections",
+                  "Ray-traced reflections on water and on metal (what the game environment-maps): the scene "
+                  "mirrored where it is on screen, the sky beyond.",
+                  cw);
+        if (toggle("rtrefl", &settings_.rt_reflections)) core_.set_rt_reflections(settings_.rt_reflections);
+        row_end();
         if (settings_.rt_pixel_lighting) {
             row_begin("Highlights", "Strength of the specular highlights of per-pixel lighting.", cw);
             if (slider_int("rtspec", &settings_.rt_specular, 0, 100, "%d%%", cw))

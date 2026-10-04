@@ -613,6 +613,8 @@ void App::update_input() {
     core_.set_raytracing(settings_.hle_raytracing);
     core_.set_rt_strength(settings_.rt_shadow, settings_.rt_ao);
     core_.set_rt_pixel_lighting(settings_.rt_pixel_lighting, settings_.rt_specular);
+    core_.set_rt_reflections(settings_.rt_reflections);
+    core_.set_rt_gi(settings_.rt_gi);
     core_.set_expansion_pak(settings_.expansion_pak);
 }
 

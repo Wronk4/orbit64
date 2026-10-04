@@ -40,8 +40,11 @@ struct RtParams {
     u32 dims[4], misc[4];
     f32 strength[4];
     u32 ofs[4];
+    f32 pr[16];
+    f32 refl[4];
+    f32 gi[4];
 };
-static_assert(sizeof(RtParams) == 48 * 4);
+static_assert(sizeof(RtParams) == 72 * 4);
 
 } // namespace
 
@@ -166,6 +169,7 @@ void RdpRenderer::reset_batch() {
     info_.clear();
     fills_.clear();
     rt_jobs_.clear();
+    ++batch_;
     rec_state_ = kNone;
     rec_serial_ = rec_tmem_gen_ = ~0ull;
     tmem_copy_ = kNone;
@@ -577,6 +581,13 @@ bool RdpRenderer::present(const VIScanout& so, const u8* rdram, size_t rdram_siz
     return true;
 }
 
+u32 RdpRenderer::rt_texture_state(const DrawState& st, u64 serial, u64 tmem_gen) {
+    if (!st.texture_enabled) return ~0u;
+    const u32 state = recorded_state(st, serial, tmem_gen, true);
+    attach_table(state, st, st.active_tile, tmem_gen);
+    return state;
+}
+
 // Recorded like a buffer fill: it cuts the run of primitives, and runs
 // after what was drawn before it and before what comes after.
 void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
@@ -607,14 +618,22 @@ void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
     p.dims[2] = bvh;
     p.dims[3] = bvh + pass.tri_offset;
     p.misc[0] = pass.frame;
-    p.misc[1] = 6; // ambient occlusion rays
+    p.misc[1] = 6; // hemisphere rays: ambient occlusion and bounced light
     p.misc[2] = 3; // shadow rays
-    p.misc[3] = std::max<u32>(1, scale_ / 2);
+    p.misc[3] = scale_; // shadow and hemisphere rays once per native pixel
+    if (const char* e = std::getenv("ORBIT64_RT_GRID")) p.misc[3] = std::max(1, std::atoi(e)); // debugging
     p.strength[0] = pass.shadow_strength;
     p.strength[1] = pass.ao_strength;
     p.strength[2] = pass.specular;
     p.strength[3] = pass.pixel_lighting ? 1.0f : 0.0f;
     p.ofs[0] = bvh + pass.lights_offset;
+    std::memcpy(p.pr, pass.proj, sizeof p.pr);
+    p.refl[0] = pass.water_reflect;
+    p.refl[1] = pass.metal_reflect;
+    p.refl[2] = 1.0f;                                       // ripples
+    p.refl[3] = static_cast<f32>(pass.frame % 100000) * 0.05f; // time
+    p.gi[0] = pass.gi;
+    p.gi[1] = pass.scene_scale * 8.0f; // how far bounced light comes from
     RtJob job{t, t->last_depth, {}};
     std::memcpy(job.params, &p, sizeof p);
     BufferFill ev{prims_.size() / GPU_PRIM_WORDS, nullptr, 0, 0};
@@ -768,9 +787,9 @@ void RdpRenderer::submit(const Compose* c) {
 
     auto run_rt = [&](const RtJob& j) {
         const u32 w = j.target->width * S, h = kFbLines * S;
-        if (w * h * 8 > occ_words_) {
+        if (w * h * 10 > occ_words_) {
             if (occ_) SDL_ReleaseGPUBuffer(gpu_, occ_);
-            occ_words_ = w * h * 8;
+            occ_words_ = w * h * 10;
             occ_ = make_buffer(occ_words_, "orbit64 rt occlusion");
         }
         if (!occ_) return;
@@ -779,10 +798,28 @@ void RdpRenderer::submit(const Compose* c) {
             rw.buffer = occ_;
             SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &rw, 1);
             SDL_BindGPUComputePipeline(cp, dev_->rt_trace());
-            SDL_GPUBuffer* ro[2] = {data_buf_, j.depth->buffer};
-            SDL_BindGPUComputeStorageBuffers(cp, 0, ro, 2);
-            SDL_PushGPUComputeUniformData(cmd, 0, j.params, sizeof j.params);
-            SDL_DispatchGPUCompute(cp, (w + 7) / 8, (h + 7) / 8, 1);
+            SDL_GPUBuffer* ro[4] = {data_buf_, j.depth->buffer, j.target->buffer, texels_ ? texels_ : data_buf_};
+            SDL_BindGPUComputeStorageBuffers(cp, 0, ro, 4);
+            // Every pixel, then the grid's pixels' shadow and hemisphere rays
+            // (RtParams::ofs[1], misc[3]: the grid).
+            u32 params[72];
+            std::memcpy(params, j.params, sizeof params);
+            for (u32 pass = 0; pass < 2; ++pass) {
+                const u32 grid = pass ? std::max<u32>(params[39], 1) : 1;
+                params[45] = pass;
+                SDL_PushGPUComputeUniformData(cmd, 0, params, sizeof params);
+                const u32 gw = (w + grid - 1) / grid, gh = (h + grid - 1) / grid;
+                SDL_DispatchGPUCompute(cp, (gw + 7) / 8, (gh + 7) / 8, 1);
+                if (pass == 0) {
+                    // The second reads what the first wrote: a pass of its own.
+                    SDL_EndGPUComputePass(cp);
+                    SDL_GPUStorageBufferReadWriteBinding rw2{};
+                    rw2.buffer = occ_;
+                    cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &rw2, 1);
+                    SDL_BindGPUComputePipeline(cp, dev_->rt_trace());
+                    SDL_BindGPUComputeStorageBuffers(cp, 0, ro, 4);
+                }
+            }
             SDL_EndGPUComputePass(cp);
         }
         {

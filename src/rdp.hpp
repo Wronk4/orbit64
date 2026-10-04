@@ -138,6 +138,10 @@ public:
         rt_pixel_lighting_ = on;
         rt_specular_ = specular;
     }
+    // Ray-traced reflections on water and metal.
+    void set_rt_reflections(bool on) { rt_reflections_ = on; }
+    // Global illumination (one-bounce path tracing), 0..1.
+    void set_rt_gi(f32 strength) { rt_gi_ = strength; }
 
     // Frontend status queries (read-only).
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
@@ -482,6 +486,7 @@ private:
     // the lights they were lit with.
     std::array<orbit64::rt::RTVector3, 80> rt_nrm_{};
     std::array<bool, 80> rt_lit_{};
+    std::array<bool, 80> rt_metal_{}; // environment-mapped (G_TEXTURE_GEN)
     std::array<orbit64::rt::RTLightSet, 80> rt_lset_{};
     // The light unlit geometry is shadowed from: the strongest directional
     // light of the frame before.
@@ -512,6 +517,9 @@ private:
     u32 rt_px_frame_ = 0;
     f32 rt_shadow_strength_ = 0.55f, rt_ao_strength_ = 1.0f;
     bool rt_pixel_lighting_ = true; // per-pixel lighting of lit objects
+    bool rt_reflections_ = true;    // on water and metal
+    f32 rt_gi_ = 0.6f;              // global illumination strength
+    u32 rt_dbg_water_ = 0;
     f32 rt_specular_ = 0.35f;
     // Before drawing into `hr`: the 3D scene drawn so far gets its pass when
     // what follows isn't more of it.

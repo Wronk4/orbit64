@@ -19,10 +19,15 @@ It runs on **Windows, macOS and Linux** from a single codebase.
 Settings > Graphics, also in the game screen's right-click menu:
 
 - **Ray tracing** (HLE graphics): every frame's opaque 3D triangles go into a
-  BVH (`src/raytracer.cpp`). With the GPU renderer on Vulkan, each pixel
-  traces soft shadows from the main light and ambient occlusion and lit objects
-  are lit per pixel from smoothed normals (`src/gpu/shaders/ext/rt_*.comp`),
-  before the HUD is drawn. Other renderers don't ray trace.
+  BVH (`src/raytracer.cpp`), cut-out textures (foliage, fences, billboards)
+  with their texture so rays pass where it is transparent. With the GPU
+  renderer on Vulkan, each pixel gets soft shadows from the main light,
+  one-bounce path-traced global illumination (bounced colour and ambient
+  occlusion), per-pixel lighting of lit objects from smoothed normals and
+  reflections on water and environment-mapped metal
+  (`src/gpu/shaders/ext/rt_*.comp`), before the HUD is drawn. Shadow and
+  bounce rays are traced once per native pixel and filtered. Other renderers
+  don't ray trace.
 - **Modern post-processing** (Vulkan): bloom, FXAA, contrast-adaptive
   sharpening, filmic highlights, vibrance, contrast and a vignette
   (`src/gpu/postfx.cpp`).

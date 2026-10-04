@@ -4,24 +4,41 @@
 // invocation per pixel of the target finds the surface it shows by tracing a
 // ray from the eye through the BVH of the scene's triangles, checks it
 // against the depth buffer, then traces soft shadow rays toward the main light
-// and ambient occlusion rays over the hemisphere. rt_apply.comp filters the
-// result and darkens the colour buffer with it.
+// and ambient occlusion rays over the hemisphere, and for water and metal a
+// reflection ray, whose colour comes from the frame itself where what it hits
+// is on screen. rt_apply.comp filters the result and applies it to the
+// colour buffer.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #define NUM_UNIFORM 1
-#define NUM_RO_BUF 2
+#define NUM_RO_BUF 4
 #define NUM_RW_TEX 0
 #include "../common.glsl"
 #include "rt_common.glsl"
 
 layout(std430, RO_BUFFER(0)) readonly buffer FrameData { uint D[]; }; // the BVH at P.dims.z
 layout(std430, RO_BUFFER(1)) readonly buffer DepthBuffer { float depth_buf[]; };
+layout(std430, RO_BUFFER(2)) readonly buffer ColorBuffer { uint color_buf[]; }; // the frame so far
+layout(std430, RO_BUFFER(3)) readonly buffer Texels { uint T[]; };                // decoded textures
 layout(std430, RW_BUFFER(0)) buffer Occlusion { uint occ[]; }; // OCC_WORDS per pixel (rt_common.glsl)
 
 RT_PARAMS
 
 float fw(uint i) { return uintBitsToFloat(D[i]); }
+
+#include "../layout.h"
+#include "rt_texture.glsl"
+
+// A cut-out triangle is solid where its texture is (alpha of at least half).
+bool cutout_solid(uint tw, vec2 uv) {
+    uint sb = D[tw + 26u];
+    if (sb == 0xFFFFFFFFu) return false;
+    vec3 b = vec3(1.0 - uv.x - uv.y, uv.x, uv.y);
+    float s = dot(b, vec3(fw(tw + 27u), fw(tw + 29u), fw(tw + 31u)));
+    float t = dot(b, vec3(fw(tw + 28u), fw(tw + 30u), fw(tw + 32u)));
+    return rt_texel_alpha(sb, s, t) >= 128u;
+}
 vec3 v3(uint i) { return vec3(fw(i), fw(i + 1u), fw(i + 2u)); }
 
 // Slab test: entry distance, or -1 on a miss.
@@ -52,9 +69,9 @@ bool tri_hit(uint t, vec3 o, vec3 d, float tmax, out float hit, out vec2 uv) {
 }
 
 // Closest hit (any_hit: the first one) along o + t d, t < tmax. Returns the
-// triangle's word offset or ~0.
-#define TRI_WORDS 28u // RayTracingScene::kTriWords
-uint trace(vec3 o, vec3 d, inout float tmax, bool any_hit, out vec2 best_uv) {
+// triangle's word offset or ~0. Water is only seen by the eye's rays: it
+// casts no shadow and reflects nothing of itself.
+uint trace(vec3 o, vec3 d, inout float tmax, bool any_hit, out vec2 best_uv, bool skip_water) {
     const uint nodes = P.dims.z, tris = P.dims.w;
     vec3 inv_d = 1.0 / mix(d, vec3(1e-12), lessThan(abs(d), vec3(1e-12)));
     uint stack[48];
@@ -72,7 +89,10 @@ uint trace(vec3 o, vec3 d, inout float tmax, bool any_hit, out vec2 best_uv) {
                 float t;
                 vec2 uv;
                 uint tw = tris + i * TRI_WORDS;
+                uint fl = D[tw + 25u];
+                if (skip_water && (fl & TRI_WATER) != 0u) continue;
                 if (tri_hit(tw, o, d, tmax, t, uv)) {
+                    if ((fl & TRI_CUTOUT) != 0u && !cutout_solid(tw, uv)) continue;
                     tmax = t;
                     best = tw;
                     best_uv = uv;
@@ -103,15 +123,90 @@ void basis(vec3 n, out vec3 t, out vec3 b) {
 
 float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 
+vec3 load_color(uint i) {
+    uint c = color_buf[i];
+    return vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu)) / 255.0;
+}
+
+// Where a point is on the target (pixels), and whether it is in front of the eye.
+bool project(vec3 h, out vec2 pix, out vec3 ndc) {
+    vec4 c = h.x * P.pr0 + h.y * P.pr1 + h.z * P.pr2 + P.pr3;
+    if (c.w <= 1e-6) return false;
+    ndc = c.xyz / c.w;
+    pix = vec2(P.vp.z + ndc.x * P.vp.x, P.vp.w - ndc.y * P.vp.y) / P.vpz.z;
+    return true;
+}
+
+// The modelview-space point the depth buffer holds at a pixel (false: none).
+bool depth_point(ivec2 q, out vec3 pos) {
+    float zb = depth_buf[uint(q.y) * P.dims.x + uint(q.x)];
+    if (!(zb < 1e29)) return false;
+    int z = z_decompress(int(zb) >> 4);
+    if (z >= 0x3FFF0) return false;
+    float inv_s = P.vpz.z;
+    float xn = ((float(q.x) + 0.5) * inv_s - P.vp.z) / P.vp.x;
+    float yn = -((float(q.y) + 0.5) * inv_s - P.vp.w) / P.vp.y;
+    float zn = ((float(z) / 256.0) - P.vpz.y) / P.vpz.x;
+    vec4 c = xn * P.ip0 + yn * P.ip1 + zn * P.ip2 + P.ip3;
+    pos = c.xyz / c.w;
+    return true;
+}
+
+// What a mirror at `o` sees along `r`: the colour (from the frame) and how
+// much to trust it (1: the very point the ray hit is on screen; less where
+// it is hidden or off screen, and for the sky).
+vec4 reflection(vec3 o, vec3 r) {
+    float scale = P.vpz.w;
+    float tm = 1e30;
+    vec2 ignored;
+    uint hit = trace(o, r, tm, false, ignored, true);
+    ivec2 size = ivec2(P.dims.xy);
+    vec2 pix;
+    vec3 ndc;
+    if (hit != 0xFFFFFFFFu) {
+        vec3 h = o + r * tm;
+        if (!project(h, pix, ndc)) return vec4(0.0);
+        ivec2 q = ivec2(floor(pix));
+        // Fade toward the edges of the screen, where the colour runs out.
+        vec2 e = min(pix, vec2(size) - pix) / (0.08 * vec2(size));
+        float edge = clamp(min(e.x, e.y), 0.0, 1.0);
+        q = clamp(q, ivec2(0), size - 1);
+        vec3 col = load_color(uint(q.y) * P.dims.x + uint(q.x));
+        vec3 seen;
+        bool visible = depth_point(q, seen) && distance(seen, h) < 0.04 * distance(h, P.eye.xyz) + scale;
+        return vec4(col, (visible ? 1.0 : 0.35) * mix(0.3, 1.0, edge));
+    }
+    // The sky: where the direction meets the far distance, if that is sky.
+    if (!project(o + r * (scale * 1e4), pix, ndc)) return vec4(0.0);
+    ivec2 q = clamp(ivec2(floor(pix)), ivec2(0), size - 1);
+    vec3 unused;
+    bool sky = !depth_point(q, unused);
+    return vec4(load_color(uint(q.y) * P.dims.x + uint(q.x)), sky ? 0.9 : 0.4);
+}
+
+uint pack_reflection(vec3 c, float a) {
+    uvec4 v = uvec4(clamp(vec4(c, a), 0.0, 1.0) * 255.0 + 0.5);
+    return v.r | (v.g << 8) | (v.b << 16) | (v.a << 24);
+}
+
 void main() {
-    uvec2 px = gl_GlobalInvocationID.xy;
+    // Two dispatches: every pixel, then (once that is done) one thread per
+    // grid pixel for the expensive rays, so that whole warps trace them.
+    bool second = P.ofs.y == 1u;
+    uint grid = P.misc.w;
+    uvec2 px = second ? gl_GlobalInvocationID.xy * grid : gl_GlobalInvocationID.xy;
     uint W = P.dims.x, H = P.dims.y;
     if (px.x >= W || px.y >= H) return;
     uint idx = px.y * W + px.x;
     uint ob = idx * OCC_WORDS;
-    occ[ob] = 0xFFFFFFFFu;
-    occ[ob + 1u] = floatBitsToUint(-1.0);
-    occ[ob + 6u] = 0u;
+    if (!second) {
+        occ[ob] = 0xFFFFFFFFu;
+        occ[ob + 1u] = floatBitsToUint(-1.0);
+        occ[ob + 6u] = 0u;
+        occ[ob + 7u] = 0u;
+        occ[ob + 8u] = 0u;
+        occ[ob + 9u] = 0u;
+    }
 
     float zb = depth_buf[idx];
     if (!(zb < 1e29)) return; // nothing 3D drawn here
@@ -136,11 +231,36 @@ void main() {
     d /= len;
     float t = len;
     vec2 uv;
-    uint hit = trace(a, d, t, false, uv);
+    uint hit = trace(a, d, t, false, uv, false);
     if (hit == 0xFFFFFFFFu) return;
     vec3 p = a + d * t;
     float scale = P.vpz.w;
     float dist = distance(p, P.eye.xyz);
+    uint flags = D[hit + 25u];
+
+    // Water in front of what the depth buffer holds: a reflection of the
+    // scene, by the Fresnel term (little straight down, a mirror at grazing
+    // angles), on gently rippling water.
+    if ((flags & TRI_WATER) != 0u) {
+        if (second || P.refl.x <= 0.0 || dot(pz - a, d) < t - scale) return;
+        vec3 wn = v3(hit + 9u);
+        if (dot(wn, d) > 0.0) wn = -wn;
+        vec3 t1, b1;
+        basis(wn, t1, b1);
+        float f = 6.2831853 / (scale * 3.0), time = P.refl.w;
+        float u = dot(p, t1) * f, v = dot(p, b1) * f;
+        vec2 slope = vec2(cos(u + time * 1.3) + 0.5 * cos(1.7 * u - 0.9 * v + time),
+                          cos(v - time * 1.1) + 0.5 * cos(1.3 * v + 0.8 * u - time * 0.7)) * (0.035 * P.refl.z);
+        vec3 rn = normalize(wn + t1 * slope.x + b1 * slope.y);
+        vec3 r = reflect(d, rn);
+        if (dot(r, wn) < 0.02) r = normalize(r + wn * (0.02 - dot(r, wn)));
+        vec4 rc = reflection(p + wn * max(scale * 0.02, length(p) * 1e-4), r);
+        float cosv = max(dot(-d, rn), 0.0);
+        float fres = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
+        occ[ob + 1u] = floatBitsToUint(dist);
+        occ[ob + 7u] = pack_reflection(rc.rgb, P.refl.x * mix(0.2, 1.0, fres) * rc.a);
+        return;
+    }
     // Something the BVH doesn't hold (a billboard, a cut-out texture) in
     // front: leave the pixel alone.
     if (distance(p, pz) > 0.03 * dist + 0.5 * scale) return;
@@ -148,11 +268,12 @@ void main() {
     if (dot(n, d) > 0.0) n = -n;
     // A lit triangle: its own lights, and its corners' normals blended
     // across it (smooth, unlike the colours lit at the corners).
-    bool relight = P.strength.w > 0.5 && D[hit + 25u] != 0u;
+    bool relight = P.strength.w > 0.5 && (flags & TRI_LIT) != 0u;
+    bool metal = P.refl.y > 0.0 && (flags & TRI_METAL) != 0u;
     uint ls = P.ofs.x + D[hit + 24u] * 16u;
     vec3 sn = n;
     vec3 bw = vec3(1.0 - uv.x - uv.y, uv.x, uv.y);
-    if (relight) {
+    if (relight || metal) {
         sn = normalize(v3(hit + 12u) * bw.x + v3(hit + 15u) * bw.y + v3(hit + 18u) * bw.z);
         if (dot(sn, n) < 0.0) sn = -sn; // the side the camera sees, as the face normal
     }
@@ -163,12 +284,15 @@ void main() {
     float noise = ign(vec2(px));
     vec3 t1, b1;
 
+    // Shadow and hemisphere rays on one pixel per grid block only.
+    bool traced = second;
+
     // Soft shadow from the main light.
     float lit = 1.0;
     vec3 l = P.sun.xyz;
     if (relight && D[ls + 3u] != 0u) l = normalize(v3(ls + 4u));
     float ndl = dot(relight ? sn : n, l);
-    if (ndl > 0.0 && dot(n, l) > -0.2) {
+    if (traced && ndl > 0.0 && dot(n, l) > -0.2) {
         basis(l, t1, b1);
         uint ns = P.misc.z;
         float open = 0.0;
@@ -178,7 +302,7 @@ void main() {
             vec3 dir = normalize(l + t1 * (r * cos(ang)) + b1 * (r * sin(ang)));
             float tm = 1e30;
             vec2 ignored;
-            if (trace(o + l * bias, dir, tm, true, ignored) == 0xFFFFFFFFu) open += 1.0;
+            if (trace(o + l * bias, dir, tm, true, ignored, true) == 0xFFFFFFFFu) open += 1.0;
         }
         lit = open / float(ns);
         // Surfaces whose colours the game lit (baked into the vertices) get
@@ -187,25 +311,60 @@ void main() {
         if (!relight) lit = mix(1.0, lit, smoothstep(0.0, 0.4, ndl));
     }
 
-    // Ambient occlusion, cosine weighted.
+    // Diffuse path tracing, one bounce, cosine weighted over the hemisphere:
+    // near hits occlude (ambient occlusion), and every hit sends back the
+    // colour its surface shows in the frame (light bounced off it), fading
+    // with distance.
     basis(n, t1, b1);
-    uint na = P.misc.y;
-    float radius = P.eye.w, occl = 0.0;
+    uint na = traced ? P.misc.y : 0u;
+    float radius = P.eye.w, reach = P.gi.y, occl = 0.0;
+    vec3 bounce = vec3(0.0);
+    ivec2 size = ivec2(P.dims.xy);
     for (uint i = 0u; i < na; ++i) {
         float u = fract(noise + 0.754878 * float(i + 1u)), v = fract(noise * 3.17 + 0.569840 * float(i + 1u));
         float r = sqrt(u), ang = 6.2831853 * v;
         vec3 dir = normalize(t1 * (r * cos(ang)) + b1 * (r * sin(ang)) + n * sqrt(max(0.0, 1.0 - u)));
-        float tm = radius;
+        float tm = max(radius, P.gi.x > 0.0 ? reach : 0.0);
         vec2 ignored;
-        if (trace(o, dir, tm, false, ignored) != 0xFFFFFFFFu) {
+        if (trace(o, dir, tm, false, ignored, true) == 0xFFFFFFFFu) continue;
+        if (tm < radius) {
             float k = 1.0 - tm / radius;
             occl += 0.35 + 0.65 * k * k;
         }
+        if (P.gi.x > 0.0) {
+            vec3 h = o + dir * tm;
+            vec2 hp;
+            vec3 hn, seen;
+            if (project(h, hp, hn) && all(greaterThanEqual(hp, vec2(0.0))) && all(lessThan(hp, vec2(size)))) {
+                ivec2 q = ivec2(hp);
+                if (depth_point(q, seen) && distance(seen, h) < 0.05 * distance(h, P.eye.xyz) + scale) {
+                    float fall = 1.0 - tm / reach;
+                    bounce += load_color(uint(q.y) * P.dims.x + uint(q.x)) * fall * fall;
+                }
+            }
+        }
     }
-    float ao = clamp(1.0 - occl / float(na), 0.0, 1.0);
-
-    occ[ob] = uint(clamp(lit, 0.0, 1.0) * 65535.0) | (uint(ao * 65535.0) << 16);
+    float ao = na > 0u ? clamp(1.0 - occl / float(na), 0.0, 1.0) : 1.0;
+    if (na > 0u) bounce /= float(na);
+    if (second) {
+        occ[ob] = uint(clamp(lit, 0.0, 1.0) * 65535.0) | (uint(ao * 65535.0) << 16);
+        occ[ob + 8u] = pack_reflection(bounce, 0.0);
+        occ[ob + 9u] = 1u;
+        return;
+    }
     occ[ob + 1u] = floatBitsToUint(dist);
+
+    if (metal) {
+        // Metal (what the game environment-maps): a mirror of the scene,
+        // tinted by the metal's own colour, stronger at grazing angles.
+        vec3 r = reflect(d, sn);
+        if (dot(r, n) < 0.02) r = normalize(r + n * (0.02 - dot(r, n)));
+        vec4 rc = reflection(o, r);
+        vec3 own = load_color(idx);
+        vec3 tint = mix(vec3(1.0), own / max(max(own.r, max(own.g, own.b)), 0.2), 0.6);
+        float fres = 0.55 + 0.45 * pow(1.0 - max(dot(-d, sn), 0.0), 5.0);
+        occ[ob + 7u] = pack_reflection(rc.rgb * tint, P.refl.y * fres * rc.a);
+    }
 
     if (relight) {
         // The game's lighting, per pixel: ambient plus each light by the

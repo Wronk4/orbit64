@@ -1272,10 +1272,10 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
                                  fx * rt_mv.m[0][2] + fy * rt_mv.m[1][2] + fz * rt_mv.m[2][2] + rt_mv.m[3][2]};
             rt_state_[dest_idx] = 1;
             rt_lit_[dest_idx] = (geometry_mode & 0x00020000) && !cbfd_ && !(geometry_mode & 0x00040000);
-            if (rt_lit_[dest_idx]) {
+            rt_metal_[dest_idx] = (geometry_mode & 0x00040000) && !cbfd_;
+            if (rt_lit_[dest_idx] || rt_metal_[dest_idx])
                 rt_nrm_[dest_idx] = orbit64::rt::RTVector3(tnx, tny, tnz).normalized();
-                rt_lset_[dest_idx] = rt_ls;
-            }
+            if (rt_lit_[dest_idx]) rt_lset_[dest_idx] = rt_ls;
         }
         // G_FOG: the shade alpha is the fog factor, z/w scaled and offset as
         // gSPFogPosition set it up (0 behind the eye), for the blender's A_SHADE.
@@ -1445,8 +1445,22 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
     // textures (alpha compare, coverage times alpha: foliage, fences,
     // billboards), whose quads would.
     auto& building = rt_.building();
-    if ((other_mode_l & 0x20) && !(other_mode_l & 0x3) && !(other_mode_l & 0x1000) &&
-        building.triangle_count() < 200000) {
+    const bool opaque = (other_mode_l & 0x20) && !(other_mode_l & 0x3) && !(other_mode_l & 0x1000);
+    // Cut-outs (alpha compare, coverage times alpha: foliage, fences,
+    // billboards): in the scene with their texture, solid where it is.
+    const bool cutout = (other_mode_l & 0x20) && ((other_mode_l & 0x3) || (other_mode_l & 0x1000));
+    // Water: translucent (depth compared, not updated, Z mode XLU) and not
+    // environment-mapped. In the BVH for the eye's rays only.
+    const bool water = !(other_mode_l & 0x20) && (other_mode_l & 0x10) && (other_mode_l & 0xC00) == 0x800 &&
+                       !(rt_metal_[a] && rt_metal_[b] && rt_metal_[c]);
+    static const bool rt_dbg = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
+    if (rt_dbg && !opaque) {
+        static std::unordered_map<u32, u32> seen;
+        if (seen[other_mode_l]++ == 0)
+            std::fprintf(stderr, "[rt] translucent 3D: other_mode_l %08x geometry %08x water %d\n", other_mode_l,
+                         geometry_mode, water);
+    }
+    if ((opaque || water || cutout) && building.triangle_count() < 200000) {
         if (rt_scene_done_) {
             rt_.end_frame();
             rt_scene_done_ = false;
@@ -1454,7 +1468,23 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
         }
         orbit64::rt::RTTriangleAttr attr;
         auto& scene_b = rt_.building();
-        attr.lit = rt_lit_[a] && rt_lit_[b] && rt_lit_[c];
+        attr.water = water;
+        if (cutout) {
+            const DrawState& st = draw_state();
+            attr.tex_state = hires_->rt_texture_state(st, draw_state_serial_, tmem_gen_);
+            attr.cutout = attr.tex_state != ~0u;
+            attr.tex_batch = hires_->rt_batch();
+            const u32 corners[3] = {a, b, c};
+            for (int k = 0; k < 3; ++k) {
+                attr.st[k * 2] = vertex_cache[corners[k]].u;
+                attr.st[k * 2 + 1] = vertex_cache[corners[k]].v;
+            }
+        }
+        if (cutout && !attr.cutout) return; // untextured: nothing to cut it out by
+        attr.lit = opaque && rt_lit_[a] && rt_lit_[b] && rt_lit_[c];
+        attr.metal = opaque && rt_metal_[a] && rt_metal_[b] && rt_metal_[c];
+        if (attr.metal)
+            for (int k = 0; k < 3; ++k) attr.n[k] = rt_nrm_[k == 0 ? a : k == 1 ? b : c];
         if (attr.lit) {
             const u32 corners[3] = {a, b, c};
             for (int k = 0; k < 3; ++k) {
@@ -1465,7 +1495,8 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
             attr.light_set = scene_b.add_light_set(rt_lset_[a]);
         }
         scene_b.add_triangle(pa, pb, pc, attr);
-        rt_cur_casts_ = true;
+        rt_cur_casts_ |= opaque || cutout;
+        if (water) ++rt_dbg_water_;
     }
 }
 
@@ -1518,9 +1549,13 @@ void RDP::rt_pixel_flush() {
     scene.build_bvh();
     rt_scene_done_ = true;
     RtPass p;
-    p.tri_offset = scene.serialize(p.bvh, &p.lights_offset);
+    p.tex_batch = hires_->rt_batch();
+    p.tri_offset = scene.serialize(p.bvh, &p.lights_offset, p.tex_batch);
+    p.gi = rt_gi_;
     p.pixel_lighting = rt_pixel_lighting_;
     p.specular = rt_specular_;
+    p.water_reflect = rt_reflections_ ? 0.75f : 0.0f;
+    p.metal_reflect = rt_reflections_ ? 0.7f : 0.0f;
     if (p.bvh.empty()) return;
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c) p.proj[r * 4 + c] = rt_px_proj_.m[r][c];
@@ -1536,7 +1571,11 @@ void RDP::rt_pixel_flush() {
     if (const char* e = std::getenv("ORBIT64_RT_SHADOW")) p.shadow_strength = static_cast<f32>(std::atof(e));
     if (const char* e = std::getenv("ORBIT64_RT_AO")) p.ao_strength = static_cast<f32>(std::atof(e));
     if (const char* e = std::getenv("ORBIT64_RT_RELIGHT")) p.pixel_lighting = std::atoi(e) != 0;
+    if (const char* e = std::getenv("ORBIT64_RT_GI")) p.gi = static_cast<f32>(std::atof(e));
     static const bool debug = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
+    if (debug && p.frame % 60 == 1)
+        std::fprintf(stderr, "[rt] water triangles in this pass: %u\n", rt_dbg_water_);
+    rt_dbg_water_ = 0;
     if (debug && p.frame % 60 == 1)
         std::fprintf(stderr, "[rt] pass %u: %zu triangles, scale %.2f, sun %.2f %.2f %.2f, eye %.1f %.1f %.1f\n", p.frame,
                      scene.triangle_count(), p.scene_scale, p.sun[0], p.sun[1], p.sun[2], p.eye[0], p.eye[1], p.eye[2]);
