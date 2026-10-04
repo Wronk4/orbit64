@@ -169,3 +169,17 @@ target_link_libraries(test_rdp PRIVATE Threads::Threads)
 # HLE ray tracer unit tests (tools/test_raytracing.cpp), not built by default.
 add_executable(test_raytracing EXCLUDE_FROM_ALL tools/test_raytracing.cpp src/raytracer.cpp)
 target_include_directories(test_raytracing PRIVATE src)
+
+# NVIDIA DLSS (src/gpu/dlss.cpp), Windows only: built when the DLSS SDK is in
+# third_party/dlss (python tools/fetch_dlss.py) or ORBIT64_DLSS_SDK points at
+# one. nvngx_dlss.dll goes next to the executable.
+set(ORBIT64_DLSS_SDK "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlss" CACHE PATH "NVIDIA DLSS SDK (github.com/NVIDIA/DLSS)")
+if(WIN32 AND EXISTS "${ORBIT64_DLSS_SDK}/include/nvsdk_ngx.h")
+    message(STATUS "Orbit64: DLSS SDK found in ${ORBIT64_DLSS_SDK}")
+    target_compile_definitions(n64 PRIVATE ORBIT64_DLSS=1)
+    target_include_directories(n64 PRIVATE "${ORBIT64_DLSS_SDK}/include")
+    target_link_libraries(n64 PRIVATE
+        "${ORBIT64_DLSS_SDK}/lib/Windows_x86_64/x64/nvsdk_ngx_d$<$<CONFIG:Debug>:_dbg>.lib" d3d12 dxgi)
+    add_custom_command(TARGET n64 POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${ORBIT64_DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll" "$<TARGET_FILE_DIR:n64>")
+endif()

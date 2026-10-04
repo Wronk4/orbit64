@@ -226,6 +226,8 @@ void App::destroy_renderer() {
     if (postfx_tex_) SDL_DestroyTexture(postfx_tex_);
     postfx_tex_ = nullptr;
     postfx_gpu_tex_ = nullptr;
+    if (dlss_tex_) SDL_DestroyTexture(dlss_tex_);
+    dlss_tex_ = nullptr;
     postfx_.reset();
     if (stream_tex_) SDL_DestroyTexture(stream_tex_);
     stream_tex_ = nullptr;
@@ -646,7 +648,23 @@ void App::update_game_texture() {
         SDL_UpdateTexture(stream_tex_, nullptr, px->data(), w * static_cast<int>(sizeof(std::uint32_t)));
         tex = stream_tex_;
     }
-    if (SDL_Texture* fx = postprocess(w, h)) tex = fx;
+    int ow = 0, oh = 0;
+    if (run_dlss(w, h, ow, oh)) {
+        if (!dlss_tex_ || dlss_w_ != ow || dlss_h_ != oh) {
+            if (dlss_tex_) SDL_DestroyTexture(dlss_tex_);
+            dlss_tex_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, ow, oh);
+            dlss_w_ = ow;
+            dlss_h_ = oh;
+        }
+        SDL_Texture* fx = postprocess(dlss_out_.data(), ow, oh);
+        if (!fx && dlss_tex_) {
+            SDL_UpdateTexture(dlss_tex_, nullptr, dlss_out_.data(), ow * 4);
+            fx = dlss_tex_;
+        }
+        if (fx) tex = fx;
+    } else if (SDL_Texture* fx = postprocess(nullptr, w, h)) {
+        tex = fx;
+    }
     if (tex != game_tex_) game_tex_filter_ = -1;
     game_tex_ = tex;
     game_tex_w_ = w;
@@ -659,7 +677,39 @@ void App::update_game_texture() {
     has_frame_ = true;
 }
 
-SDL_Texture* App::postprocess(int w, int h) {
+bool App::run_dlss(int w, int h, int& ow, int& oh) {
+    if (settings_.dlss_mode <= 0) return false;
+    if (!dlss_.init()) {
+        static bool logged = false;
+        if (!logged) SDL_Log("DLSS unavailable: %s", dlss_.error().c_str());
+        logged = true;
+        return false;
+    }
+    std::vector<std::uint32_t> read;
+    const std::vector<std::uint32_t>* px = &frame_.pixels;
+    if (frame_.gpu) {
+        frame_.gpu->read(read);
+        px = &read;
+    }
+    if (px->size() != static_cast<size_t>(w) * h) return false;
+    const bool ok = dlss_.evaluate(px->data(), w, h, settings_.dlss_mode, settings_.dlss_temporal, dlss_out_, ow, oh);
+    // Log each change of what DLSS does.
+    static std::string last;
+    char what[160];
+    if (ok)
+        std::snprintf(what, sizeof what, "DLSS %s on %s: %dx%d -> %dx%d", gpu::Dlss::mode_name(settings_.dlss_mode),
+                      dlss_.adapter().c_str(), w, h, ow, oh);
+    else
+        std::snprintf(what, sizeof what, "DLSS %s failed: %s", gpu::Dlss::mode_name(settings_.dlss_mode),
+                      dlss_.error().c_str());
+    if (last != what) {
+        last = what;
+        SDL_Log("%s", what);
+    }
+    return ok;
+}
+
+SDL_Texture* App::postprocess(const std::uint32_t* px, int w, int h) {
     if (!settings_.postfx || !postfx_ || !postfx_->ok()) return nullptr;
     gpu::PostFx::Params p;
     p.bloom = settings_.pfx_bloom / 100.0f;
@@ -670,12 +720,16 @@ SDL_Texture* App::postprocess(int w, int h) {
     p.fxaa = settings_.pfx_fxaa;
     p.tonemap = settings_.pfx_tonemap;
     SDL_GPUTexture* out = nullptr;
-    if (frame_.gpu)
+    if (px)
+        out = postfx_->run(px, w, h, p);
+    else if (frame_.gpu)
         out = postfx_->run(static_cast<SDL_GPUTexture*>(frame_.gpu->texture()), w, h, p);
     else if (frame_.pixels.size() == static_cast<size_t>(w) * h)
         out = postfx_->run(frame_.pixels.data(), w, h, p);
     if (!out) return nullptr;
-    if (out != postfx_gpu_tex_ || !postfx_tex_) {
+    if (out != postfx_gpu_tex_ || !postfx_tex_ || w != postfx_w_ || h != postfx_h_) {
+        postfx_w_ = w;
+        postfx_h_ = h;
         if (postfx_tex_) SDL_DestroyTexture(postfx_tex_);
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, out);

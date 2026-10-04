@@ -11,6 +11,7 @@
 #include "widgets.hpp"
 #include "../gpu/device.hpp"
 #include "../gpu/postfx.hpp"
+#include "../gpu/dlss.hpp"
 
 #include <SDL3/SDL.h>
 #include <array>
@@ -221,8 +222,16 @@ private:
     std::unique_ptr<gpu::PostFx> postfx_;  // post-processing of the shown frame
     SDL_Texture* postfx_tex_ = nullptr;    // wraps postfx_gpu_tex_
     SDL_GPUTexture* postfx_gpu_tex_ = nullptr;
-    // The frame through post-processing, or nullptr (off, or unavailable).
-    SDL_Texture* postprocess(int w, int h);
+    int postfx_w_ = 0, postfx_h_ = 0;
+    // The frame (or `px`, ARGB8888 w x h) through post-processing, or
+    // nullptr (off, or unavailable).
+    SDL_Texture* postprocess(const std::uint32_t* px, int w, int h);
+    gpu::Dlss dlss_;                     // NVIDIA DLSS, set up on first use
+    std::vector<std::uint32_t> dlss_out_;
+    SDL_Texture* dlss_tex_ = nullptr;    // its output without post-processing
+    int dlss_w_ = 0, dlss_h_ = 0;
+    // The frame through DLSS into dlss_out_ (false when off or unavailable).
+    bool run_dlss(int w, int h, int& ow, int& oh);
     std::uint64_t frame_serial_ = 0;
     bool has_frame_ = false;
     std::string renderer_name_;

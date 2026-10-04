@@ -34,3 +34,6 @@ reference/
 
 # Python bytecode of the tools
 __pycache__/
+
+# NVIDIA DLSS SDK (tools/fetch_dlss.py; NVIDIA RTX SDK license, not redistributed here)
+third_party/dlss/

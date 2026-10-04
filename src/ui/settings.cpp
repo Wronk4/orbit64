@@ -113,6 +113,7 @@ void Settings::reset_graphics() {
     hle_raytracing = d.hle_raytracing; rt_shadow = d.rt_shadow; rt_ao = d.rt_ao;
     postfx = d.postfx; pfx_bloom = d.pfx_bloom; pfx_sharpen = d.pfx_sharpen; pfx_vibrance = d.pfx_vibrance;
     pfx_contrast = d.pfx_contrast; pfx_vignette = d.pfx_vignette; pfx_fxaa = d.pfx_fxaa; pfx_tonemap = d.pfx_tonemap;
+    dlss_mode = d.dlss_mode; dlss_temporal = d.dlss_temporal;
 }
 void Settings::reset_audio() {
     Settings d;
@@ -310,6 +311,7 @@ bool Settings::save(const std::string& path) const {
     w.kv("postfx", postfx); w.kv("pfx_bloom", pfx_bloom); w.kv("pfx_sharpen", pfx_sharpen);
     w.kv("pfx_vibrance", pfx_vibrance); w.kv("pfx_contrast", pfx_contrast); w.kv("pfx_vignette", pfx_vignette);
     w.kv("pfx_fxaa", pfx_fxaa); w.kv("pfx_tonemap", pfx_tonemap);
+    w.kv("dlss_mode", dlss_mode); w.kv("dlss_temporal", dlss_temporal);
 
     w.section("audio");
     w.kv("enabled", audio_enabled); w.kv("volume", volume); w.kv("mute_ff", mute_on_fast_forward);
@@ -376,6 +378,8 @@ bool Settings::load(const std::string& path) {
     r.get("postfx", postfx); r.get("pfx_bloom", pfx_bloom); r.get("pfx_sharpen", pfx_sharpen);
     r.get("pfx_vibrance", pfx_vibrance); r.get("pfx_contrast", pfx_contrast); r.get("pfx_vignette", pfx_vignette);
     r.get("pfx_fxaa", pfx_fxaa); r.get("pfx_tonemap", pfx_tonemap);
+    r.get("dlss_mode", dlss_mode); r.get("dlss_temporal", dlss_temporal);
+    dlss_mode = std::clamp(dlss_mode, 0, 5);
 
     r.sec = "audio";
     r.get("enabled", audio_enabled); r.get("volume", volume); r.get("mute_ff", mute_on_fast_forward);

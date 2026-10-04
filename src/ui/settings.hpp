@@ -109,6 +109,10 @@ struct Settings {
     int pfx_vignette = 15;   // 0..100
     bool pfx_fxaa = true;
     bool pfx_tonemap = true;
+    // NVIDIA DLSS on the shown frame (src/gpu/dlss.hpp): 0 off, 1 DLAA,
+    // 2 Quality, 3 Balanced, 4 Performance, 5 Ultra Performance.
+    int dlss_mode = 2;
+    bool dlss_temporal = false; // keep DLSS's history (no motion vectors: ghosting)
     int fullscreen_mode = 0; // 0 = borderless desktop, 1 = exclusive
     // 0 = GPU (SDL_GPU: Metal / Vulkan / Direct3D 12; high resolutions render
     // on the graphics card), 1 = compatibility (any SDL renderer, CPU only).
