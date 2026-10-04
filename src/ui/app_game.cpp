@@ -129,7 +129,8 @@ void App::draw_game_view(ImVec2 pos, ImVec2 size) {
                 ImGui::EndMenu();
             }
             ImGui::MenuItem("Show FPS Overlay", nullptr, &settings_.show_fps_overlay);
-            ImGui::MenuItem("Ray Tracing (HLE)", nullptr, &settings_.hle_raytracing);
+            ImGui::MenuItem("Ray Tracing", nullptr, &settings_.hle_raytracing);
+            ImGui::MenuItem("Modern Post-processing", nullptr, &settings_.postfx);
             ImGui::Separator();
             if (ImGui::BeginMenu("Debug")) {
                 draw_debug_menu(false);

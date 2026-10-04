@@ -110,7 +110,9 @@ void Settings::reset_graphics() {
     aspect = d.aspect; integer_scale = d.integer_scale; filter = d.filter; vsync = d.vsync;
     video_backend = d.video_backend;
     scanlines = d.scanlines; show_fps_overlay = d.show_fps_overlay; fullscreen_mode = d.fullscreen_mode;
-    hle_raytracing = d.hle_raytracing;
+    hle_raytracing = d.hle_raytracing; rt_shadow = d.rt_shadow; rt_ao = d.rt_ao;
+    postfx = d.postfx; pfx_bloom = d.pfx_bloom; pfx_sharpen = d.pfx_sharpen; pfx_vibrance = d.pfx_vibrance;
+    pfx_contrast = d.pfx_contrast; pfx_vignette = d.pfx_vignette; pfx_fxaa = d.pfx_fxaa; pfx_tonemap = d.pfx_tonemap;
 }
 void Settings::reset_audio() {
     Settings d;
@@ -304,7 +306,10 @@ bool Settings::save(const std::string& path) const {
     w.kv("aspect", aspect); w.kv("integer_scale", integer_scale); w.kv("filter", filter); w.kv("vsync", vsync);
     w.kv("video_backend", video_backend);
     w.kv("scanlines", scanlines); w.kv("fps_overlay", show_fps_overlay); w.kv("fullscreen_mode", fullscreen_mode);
-    w.kv("hle_raytracing", hle_raytracing);
+    w.kv("hle_raytracing", hle_raytracing); w.kv("rt_shadow", rt_shadow); w.kv("rt_ao", rt_ao);
+    w.kv("postfx", postfx); w.kv("pfx_bloom", pfx_bloom); w.kv("pfx_sharpen", pfx_sharpen);
+    w.kv("pfx_vibrance", pfx_vibrance); w.kv("pfx_contrast", pfx_contrast); w.kv("pfx_vignette", pfx_vignette);
+    w.kv("pfx_fxaa", pfx_fxaa); w.kv("pfx_tonemap", pfx_tonemap);
 
     w.section("audio");
     w.kv("enabled", audio_enabled); w.kv("volume", volume); w.kv("mute_ff", mute_on_fast_forward);
@@ -367,7 +372,10 @@ bool Settings::load(const std::string& path) {
     r.get("video_backend", video_backend);
     video_backend = video_backend == 1 ? 1 : 0;
     r.get("scanlines", scanlines); r.get("fps_overlay", show_fps_overlay); r.get("fullscreen_mode", fullscreen_mode);
-    r.get("hle_raytracing", hle_raytracing);
+    r.get("hle_raytracing", hle_raytracing); r.get("rt_shadow", rt_shadow); r.get("rt_ao", rt_ao);
+    r.get("postfx", postfx); r.get("pfx_bloom", pfx_bloom); r.get("pfx_sharpen", pfx_sharpen);
+    r.get("pfx_vibrance", pfx_vibrance); r.get("pfx_contrast", pfx_contrast); r.get("pfx_vignette", pfx_vignette);
+    r.get("pfx_fxaa", pfx_fxaa); r.get("pfx_tonemap", pfx_tonemap);
 
     r.sec = "audio";
     r.get("enabled", audio_enabled); r.get("volume", volume); r.get("mute_ff", mute_on_fast_forward);

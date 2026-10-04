@@ -10,6 +10,7 @@
 #include "settings.hpp"
 #include "widgets.hpp"
 #include "../gpu/device.hpp"
+#include "../gpu/postfx.hpp"
 
 #include <SDL3/SDL.h>
 #include <array>
@@ -217,6 +218,11 @@ private:
     };
     std::vector<WrappedImage> wrapped_;
     std::shared_ptr<gpu::Device> gpu_dev_; // the GPU renderer's pipelines
+    std::unique_ptr<gpu::PostFx> postfx_;  // post-processing of the shown frame
+    SDL_Texture* postfx_tex_ = nullptr;    // wraps postfx_gpu_tex_
+    SDL_GPUTexture* postfx_gpu_tex_ = nullptr;
+    // The frame through post-processing, or nullptr (off, or unavailable).
+    SDL_Texture* postprocess(int w, int h);
     std::uint64_t frame_serial_ = 0;
     bool has_frame_ = false;
     std::string renderer_name_;

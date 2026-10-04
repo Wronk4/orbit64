@@ -204,6 +204,7 @@ bool App::create_renderer() {
     if (gpu_) {
         renderer_name_ += std::string(" (") + SDL_GetGPUDeviceDriver(gpu_) + ")";
         gpu_dev_ = std::make_shared<gpu::Device>(gpu_);
+        postfx_ = std::make_unique<gpu::PostFx>(gpu_);
     }
     apply_hires_renderer();
     return true;
@@ -222,6 +223,10 @@ void App::destroy_renderer() {
     core_.set_hires_factory(nullptr);
     core_.set_exact_accel_factory(nullptr);
     release_gpu_frames();
+    if (postfx_tex_) SDL_DestroyTexture(postfx_tex_);
+    postfx_tex_ = nullptr;
+    postfx_gpu_tex_ = nullptr;
+    postfx_.reset();
     if (stream_tex_) SDL_DestroyTexture(stream_tex_);
     stream_tex_ = nullptr;
     game_tex_ = nullptr;
@@ -604,6 +609,7 @@ void App::update_input() {
     core_.set_fps_limit(settings_.fps_limit);
     core_.set_internal_scale(settings_.internal_scale);
     core_.set_raytracing(settings_.hle_raytracing);
+    core_.set_rt_strength(settings_.rt_shadow, settings_.rt_ao);
     core_.set_expansion_pak(settings_.expansion_pak);
 }
 
@@ -640,6 +646,7 @@ void App::update_game_texture() {
         SDL_UpdateTexture(stream_tex_, nullptr, px->data(), w * static_cast<int>(sizeof(std::uint32_t)));
         tex = stream_tex_;
     }
+    if (SDL_Texture* fx = postprocess(w, h)) tex = fx;
     if (tex != game_tex_) game_tex_filter_ = -1;
     game_tex_ = tex;
     game_tex_w_ = w;
@@ -650,6 +657,39 @@ void App::update_game_texture() {
         game_tex_filter_ = settings_.filter;
     }
     has_frame_ = true;
+}
+
+SDL_Texture* App::postprocess(int w, int h) {
+    if (!settings_.postfx || !postfx_ || !postfx_->ok()) return nullptr;
+    gpu::PostFx::Params p;
+    p.bloom = settings_.pfx_bloom / 100.0f;
+    p.sharpen = settings_.pfx_sharpen / 100.0f;
+    p.vibrance = settings_.pfx_vibrance / 100.0f;
+    p.contrast = 1.0f + settings_.pfx_contrast / 400.0f;
+    p.vignette = settings_.pfx_vignette / 100.0f;
+    p.fxaa = settings_.pfx_fxaa;
+    p.tonemap = settings_.pfx_tonemap;
+    SDL_GPUTexture* out = nullptr;
+    if (frame_.gpu)
+        out = postfx_->run(static_cast<SDL_GPUTexture*>(frame_.gpu->texture()), w, h, p);
+    else if (frame_.pixels.size() == static_cast<size_t>(w) * h)
+        out = postfx_->run(frame_.pixels.data(), w, h, p);
+    if (!out) return nullptr;
+    if (out != postfx_gpu_tex_ || !postfx_tex_) {
+        if (postfx_tex_) SDL_DestroyTexture(postfx_tex_);
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, out);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_ABGR8888);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, w);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, h);
+        postfx_tex_ = SDL_CreateTextureWithProperties(renderer_, props);
+        SDL_DestroyProperties(props);
+        postfx_gpu_tex_ = postfx_tex_ ? out : nullptr;
+        if (postfx_tex_) SDL_SetTextureBlendMode(postfx_tex_, SDL_BLENDMODE_NONE);
+        game_tex_filter_ = -1;
+    }
+    return postfx_tex_;
 }
 
 SDL_Texture* App::gpu_frame_texture(const std::shared_ptr<GpuImage>& image) {

@@ -517,6 +517,7 @@ void EmuCore::run_one_frame(FrameClock& fc) {
     emu_->get_rdp().set_exact_gpu(rdp_exact_gpu_.load());
     emu_->get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale_.load(), 1, 8)));
     emu_->get_rdp().set_raytracing(raytracing_.load());
+    emu_->get_rdp().set_rt_strength(rt_shadow_.load() / 100.0f, rt_ao_.load() / 100.0f);
     std::string gb_rom[4];
     {
         std::lock_guard<std::mutex> lk(input_mutex_);

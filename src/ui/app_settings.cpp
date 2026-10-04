@@ -347,13 +347,55 @@ void App::settings_graphics() {
     toggle("fpsov", &settings_.show_fps_overlay);
     row_end();
 
-    row_begin("Ray Tracing (HLE)",
-              "Replaces Nintendo 64 Gouraud lighting with ray tracing: cast shadows, soft penumbras, ambient occlusion and specular highlights across microcodes.",
+    row_begin("Ray tracing",
+              "Traces every frame's 3D scene: soft cast shadows and ambient occlusion. Per pixel on the GPU at internal "
+              "resolutions of 2x and up (Vulkan); per vertex otherwise. HLE graphics only.",
               cw);
     if (toggle("raytracing", &settings_.hle_raytracing)) {
         core_.set_raytracing(settings_.hle_raytracing);
     }
     row_end();
+    if (settings_.hle_raytracing) {
+        row_begin("Shadow strength", "How dark a surface in full shadow gets.", cw);
+        if (slider_int("rtshadow", &settings_.rt_shadow, 0, 100, "%d%%", cw)) core_.set_rt_strength(settings_.rt_shadow, settings_.rt_ao);
+        row_end();
+        row_begin("Ambient occlusion", "How dark creases, corners and contact points get.", cw);
+        if (slider_int("rtao", &settings_.rt_ao, 0, 100, "%d%%", cw)) core_.set_rt_strength(settings_.rt_shadow, settings_.rt_ao);
+        row_end();
+    }
+
+    {
+        const bool fx_ok = postfx_ && postfx_->ok();
+        row_begin("Modern post-processing",
+                  fx_ok ? "Bloom, anti-aliasing, sharpening, a filmic tone curve, vibrance and a vignette on the shown frame."
+                        : "Bloom, anti-aliasing, sharpening and colour grading. Needs the GPU video backend on Vulkan.",
+                  cw);
+        toggle("postfx", &settings_.postfx);
+        row_end();
+        if (settings_.postfx && fx_ok) {
+            row_begin("Bloom", "Glow around bright highlights.", cw);
+            slider_int("pfxbloom", &settings_.pfx_bloom, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Sharpening", "Contrast-adaptive sharpening of texture detail.", cw);
+            slider_int("pfxsharp", &settings_.pfx_sharpen, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Vibrance", "Richer colour, more for the dull ones.", cw);
+            slider_int("pfxvib", &settings_.pfx_vibrance, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Contrast", "A filmic S-curve: deeper shadows, brighter mid-tones.", cw);
+            slider_int("pfxcon", &settings_.pfx_contrast, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Vignette", "Darkens the corners of the picture.", cw);
+            slider_int("pfxvig", &settings_.pfx_vignette, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Anti-aliasing", "Smooths jagged polygon edges (FXAA).", cw);
+            toggle("pfxaa", &settings_.pfx_fxaa);
+            row_end();
+            row_begin("Filmic highlights", "Bright areas roll off softly instead of clipping.", cw);
+            toggle("pfxtm", &settings_.pfx_tonemap);
+            row_end();
+        }
+    }
 
     row_begin("Video backend",
               "GPU uses Metal, Vulkan or Direct3D 12 and renders high internal resolutions on the graphics card. "

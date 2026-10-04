@@ -3,6 +3,7 @@
 #include "profiler.hpp"
 #include "gpu/device.hpp"
 #include "gpu/rdp_gpu.hpp"
+#include "gpu/postfx.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <iostream>
@@ -97,6 +98,7 @@ int main(int argc, char* argv[]) {
     std::string wav_path;
     bool raytracing = false;
     bool gpu_hires = false;
+    bool postfx = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -133,6 +135,8 @@ int main(int argc, char* argv[]) {
             profile_path = argv[++i]; // sampling profile of the run, see src/profiler.hpp
         } else if (arg == "--raytracing") {
             raytracing = true;
+        } else if (arg == "--postfx") {
+            postfx = true; // screenshots through the frontend's post-processing (needs --gpu)
         } else if (arg == "--gpu") {
             gpu_hires = true; // internal resolutions on the GPU renderer, as the frontend does
         } else if (arg == "--mash" && i + 1 < argc) {
@@ -304,6 +308,14 @@ int main(int argc, char* argv[]) {
 
         emu.render_frame(frame_pixels, frame_w, frame_h);
 
+        if (!screenshot_path.empty() && postfx && gpu_dev) {
+            gpu::PostFx fx(gpu_dev->get());
+            std::vector<u32> out;
+            if (fx.ok() && fx.run(frame_pixels.data(), frame_w, frame_h, gpu::PostFx::Params{}) && fx.read(out))
+                frame_pixels.swap(out);
+            else
+                std::cerr << "[Main] Post-processing unavailable\n";
+        }
         if (!screenshot_path.empty()) {
             if (save_bmp(screenshot_path, frame_pixels.data(), frame_w, frame_h)) {
                 std::cout << "[Main] Screenshot saved to: " << screenshot_path << "\n";
