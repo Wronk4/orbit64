@@ -9,14 +9,24 @@
 //   eye       the camera, ambient occlusion radius
 //   dims      width, height (pixels at scale S), word offsets of the BVH's nodes and triangles
 //   misc      frame number, AO rays, shadow rays, filter step (pixels)
-//   strength  how dark full shadow and full occlusion make a pixel
+//   strength  how dark full shadow and full occlusion make a pixel, specular
+//             highlight strength, per-pixel lighting on
+//   ofs       word offset of the light sets (RTLightSet, 16 words each)
 #define RT_PARAMS                                                                                    \
     layout(std140, UNIFORM(0)) uniform Params {                                                      \
         vec4 ip0, ip1, ip2, ip3;                                                                     \
         vec4 vp, vpz, sun, eye;                                                                      \
         uvec4 dims, misc;                                                                            \
         vec4 strength;                                                                               \
+        uvec4 ofs;                                                                                   \
     } P;
+
+// Per pixel in the occlusion buffer (8 words): shadow | ao << 16, distance,
+// then for per-pixel lighting halves of the light without the main light,
+// the main light's, and the colour the game lit the corners with (all
+// 0..1): (base r, g), (base b, main r), (main g, b), (shade r, g),
+// (shade b, 1 when there is lighting), -.
+#define OCC_WORDS 8u
 
 // The RDP's compressed depth (raster.comp).
 int z_decompress(int z) {

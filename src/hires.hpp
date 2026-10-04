@@ -111,6 +111,9 @@ struct RtPass {
     f32 eye[3] = {};           // the camera
     f32 scene_scale = 1.0f;    // RayTracingScene::scale()
     f32 shadow_strength = 0.55f, ao_strength = 1.0f;
+    f32 specular = 0.35f;      // per-pixel highlights
+    bool pixel_lighting = true; // relight lit triangles per pixel (RtPass::bvh's light sets)
+    u32 lights_offset = 0;     // word offset of the light sets in bvh
     u32 frame = 0;
 };
 

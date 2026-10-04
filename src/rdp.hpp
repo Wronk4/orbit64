@@ -93,7 +93,10 @@ public:
     void force_hires(u32 scale) { hires_.reset(); hires_ = make_hires(scale); }
     // Who draws the high-resolution pass (the GPU renderer, src/gpu/); the
     // CPU renderer without one. Takes effect with the next renderer made.
-    void set_hires_factory(HiResFactory f) { hires_factory_ = std::move(f); }
+    void set_hires_factory(HiResFactory f) {
+        hires_factory_ = std::move(f);
+        rt_native_unsupported_ = false;
+    }
     // Starts the high-resolution pass over (after a factory change).
     void recreate_hires();
 
@@ -107,15 +110,15 @@ public:
 
     // Ray-traced vertex lighting (src/raytracer.hpp): shadows, ambient
     // occlusion and highlights from the geometry of the frame before.
-    void set_raytracing(bool on) {
-        if (on != raytracing_enabled_) rt_.clear();
-        raytracing_enabled_ = on;
-    }
+    // With a GPU renderer that traces rays, ray tracing also turns on the
+    // high-resolution path at scale 1 (per-pixel tracing needs it).
+    void set_raytracing(bool on);
     bool raytracing() const { return raytracing_enabled_; }
     // A video frame is over: what it drew becomes the scene rays are traced in.
     void rt_end_frame() {
         if (raytracing_enabled_) rt_.end_frame();
         rt_scene_done_ = false;
+        rt_new_frame();
     }
     size_t rt_triangles() const { return rt_.active().triangle_count(); }
     // Before the frame is shown: ray traces the 3D scene drawn last, if no
@@ -127,6 +130,12 @@ public:
     void set_rt_strength(f32 shadow, f32 ao) {
         rt_shadow_strength_ = shadow;
         rt_ao_strength_ = ao;
+    }
+    // Per-pixel lighting (smooth across each triangle, with highlights of
+    // `specular` strength) instead of the colours lit at the vertices.
+    void set_rt_pixel_lighting(bool on, f32 specular) {
+        rt_pixel_lighting_ = on;
+        rt_specular_ = specular;
     }
 
     // Frontend status queries (read-only).
@@ -469,9 +478,35 @@ private:
     // traced with the face's normal) or 2 done.
     std::array<orbit64::rt::RTVector3, 80> rt_pos_{};
     std::array<u8, 80> rt_state_{};
+    // Lit vertices, for per-pixel lighting: the normal (modelview space) and
+    // the lights they were lit with.
+    std::array<orbit64::rt::RTVector3, 80> rt_nrm_{};
+    std::array<bool, 80> rt_lit_{};
+    std::array<orbit64::rt::RTLightSet, 80> rt_lset_{};
     // The light unlit geometry is shadowed from: the strongest directional
     // light the game used last.
     orbit64::rt::RTVector3 rt_sun_{0.35f, 0.85f, 0.4f};
+    // The strongest light of the frame being drawn, which rt_sun_ moves
+    // toward when it ends (rt_new_frame): one light per frame, no jumps
+    // between the lights of different objects.
+    orbit64::rt::RTVector3 rt_sun_next_{};
+    f32 rt_sun_best_ = 0.0f;
+    // Per vertex (its address in RDRAM and how many times it was used this
+    // frame, for instanced meshes): its traced values smoothed over frames, so
+    // a few rays a vertex don't flicker.
+    struct RtHistory {
+        f32 v[3];
+        u32 frame;
+    };
+    std::unordered_map<u64, RtHistory> rt_hist_;
+    std::unordered_map<u32, u16> rt_uses_;
+    u32 rt_frame_no_ = 0;
+    u32 hires_req_scale_ = 1; // what set_hires_scale() asked for
+    bool rt_native_unsupported_ = false; // the factory's renderer can't trace rays
+    void rt_new_frame();
+    void update_hires(u32 scale);
+    // Smooths traced values (count of them) of the vertex in `slot`.
+    void rt_smooth(u32 slot, f32* vals, int count);
     orbit64::rt::RTVector3 rt_eye_{}; // the camera, in modelview space
     bool rt_frame_view(); // false when the projection isn't a perspective one
     void rt_light_vertex(u32 slot, Vertex& v, const orbit64::rt::RTVector3& n, u32 seed);
@@ -489,6 +524,8 @@ private:
     orbit64::rt::RTVector3 rt_px_eye_{};
     u32 rt_px_frame_ = 0;
     f32 rt_shadow_strength_ = 0.55f, rt_ao_strength_ = 1.0f;
+    bool rt_pixel_lighting_ = true; // per-pixel lighting of lit objects
+    f32 rt_specular_ = 0.35f;
     // Before drawing into `hr`: the 3D scene drawn so far gets its pass when
     // what follows isn't more of it.
     void rt_pixel_before_draw(HiResTarget* hr, bool scene_3d);

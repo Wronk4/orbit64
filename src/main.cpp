@@ -256,6 +256,7 @@ int main(int argc, char* argv[]) {
             }
 
             emu.step_frame();
+            emu.get_rdp().rt_end_frame(); // as the frontend's frames do (Emulator::render_frame)
 
             for (const auto& ss : scheduled_screenshots) {
                 if (frame == ss.first) {

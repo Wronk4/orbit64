@@ -76,7 +76,7 @@ private:
     struct RtJob {
         Target* target;
         Depth* depth;
-        u32 params[44]; // RtParams
+        u32 params[48]; // RtParams
     };
     std::vector<RtJob> rt_jobs_;
     SDL_GPUBuffer* occ_ = nullptr; // rt_trace.comp's output

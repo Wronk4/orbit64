@@ -39,8 +39,9 @@ struct RtParams {
     f32 vp[4], vpz[4], sun[4], eye[4];
     u32 dims[4], misc[4];
     f32 strength[4];
+    u32 ofs[4];
 };
-static_assert(sizeof(RtParams) == 44 * 4);
+static_assert(sizeof(RtParams) == 48 * 4);
 
 } // namespace
 
@@ -611,6 +612,9 @@ void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
     p.misc[3] = std::max<u32>(1, scale_ / 2);
     p.strength[0] = pass.shadow_strength;
     p.strength[1] = pass.ao_strength;
+    p.strength[2] = pass.specular;
+    p.strength[3] = pass.pixel_lighting ? 1.0f : 0.0f;
+    p.ofs[0] = bvh + pass.lights_offset;
     RtJob job{t, t->last_depth, {}};
     std::memcpy(job.params, &p, sizeof p);
     BufferFill ev{prims_.size() / GPU_PRIM_WORDS, nullptr, 0, 0};
@@ -764,9 +768,9 @@ void RdpRenderer::submit(const Compose* c) {
 
     auto run_rt = [&](const RtJob& j) {
         const u32 w = j.target->width * S, h = kFbLines * S;
-        if (w * h * 2 > occ_words_) {
+        if (w * h * 8 > occ_words_) {
             if (occ_) SDL_ReleaseGPUBuffer(gpu_, occ_);
-            occ_words_ = w * h * 2;
+            occ_words_ = w * h * 8;
             occ_ = make_buffer(occ_words_, "orbit64 rt occlusion");
         }
         if (!occ_) return;

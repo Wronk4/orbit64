@@ -373,13 +373,62 @@ void RDP::set_exact_gpu(bool on) {
 }
 
 void RDP::set_hires_scale(u32 scale) {
-    flush_native();
     scale = std::clamp<u32>(scale, 1, HiResRenderer::kMaxScale);
-    if (scale != exact_.scale()) exact_.set_scale(scale);
-    if (scale == hires_scale()) return;
+    if (scale != exact_.scale()) {
+        flush_native();
+        exact_.set_scale(scale);
+    }
+    hires_req_scale_ = scale;
+    update_hires(scale);
+}
+
+void RDP::update_hires(u32 scale) {
+    // Scale 1 draws natively, unless ray tracing wants a renderer that can.
+    const bool rt_native = scale == 1 && raytracing_enabled_ && hires_factory_ && !rt_native_unsupported_;
+    const bool want = scale > 1 || rt_native;
+    if (want == (hires_ != nullptr) && (!hires_ || hires_->scale() == scale)) return;
+    flush_native();
     hires_shadow_ = nullptr;
     hires_.reset();
-    if (scale > 1) hires_ = make_hires(scale);
+    if (!want) return;
+    auto r = make_hires(scale);
+    if (rt_native && !r->supports_ray_tracing()) {
+        rt_native_unsupported_ = true; // don't make one every frame
+        return;
+    }
+    hires_ = std::move(r);
+}
+
+void RDP::set_raytracing(bool on) {
+    if (on == raytracing_enabled_) return;
+    rt_.clear();
+    rt_hist_.clear();
+    raytracing_enabled_ = on;
+    update_hires(hires_req_scale_);
+}
+
+void RDP::rt_new_frame() {
+    if (rt_sun_best_ > 0.0f) {
+        // Ease toward the frame's light (a light that turns does so smoothly).
+        rt_sun_ = (rt_sun_ * 0.75f + rt_sun_next_ * 0.25f).normalized();
+        if (rt_frame_no_ < 2) rt_sun_ = rt_sun_next_;
+    }
+    rt_sun_best_ = 0.0f;
+    rt_uses_.clear();
+    ++rt_frame_no_;
+    if (rt_hist_.size() > 200000) rt_hist_.clear();
+}
+
+void RDP::rt_smooth(u32 slot, f32* vals, int count) {
+    const u32 addr = raw_vertex[slot].src;
+    const u64 key = (static_cast<u64>(rt_uses_[addr]++) << 32) | addr;
+    auto it = rt_hist_.find(key);
+    if (it != rt_hist_.end() && rt_frame_no_ - it->second.frame <= 2) {
+        for (int i = 0; i < count; ++i) vals[i] = it->second.v[i] * 0.7f + vals[i] * 0.3f;
+    }
+    RtHistory& h = rt_hist_[key];
+    for (int i = 0; i < count; ++i) h.v[i] = vals[i];
+    h.frame = rt_frame_no_;
 }
 
 HiResTarget* RDP::hires_target(u8* rdram, size_t rdram_size) {
@@ -1068,14 +1117,39 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
     const bool rt_on = raytracing_enabled_ && rt_frame_view();
     const Matrix4x4& rt_mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
     if (rt_on && (geometry_mode & 0x00020000) && !cbfd_) {
-        // The strongest directional light also lights the unlit scenery.
-        f32 best = 0.0f;
+        // The frame's strongest directional light also lights the unlit
+        // scenery (from the next frame on).
         for (const auto& l : dir_lights) {
             const f32 k = static_cast<f32>(l.r) + l.g + l.b;
-            if (k > best && (l.dx != 0.0f || l.dy != 0.0f || l.dz != 0.0f)) {
-                best = k;
-                rt_sun_ = orbit64::rt::RTVector3(l.dx, l.dy, l.dz).normalized();
+            if (k > rt_sun_best_ && (l.dx != 0.0f || l.dy != 0.0f || l.dz != 0.0f)) {
+                rt_sun_best_ = k;
+                rt_sun_next_ = orbit64::rt::RTVector3(l.dx, l.dy, l.dz).normalized();
             }
+        }
+    }
+
+    orbit64::rt::RTLightSet rt_ls;
+    if (rt_on && (geometry_mode & 0x00020000) && !cbfd_) {
+        rt_ls.ambient[0] = ambient_light.r; rt_ls.ambient[1] = ambient_light.g; rt_ls.ambient[2] = ambient_light.b;
+        // The two strongest lights, the strongest first (it casts the shadow).
+        std::array<int, 2> pick = {-1, -1};
+        for (int k = 0; k < static_cast<int>(dir_lights.size()); ++k) {
+            const auto& l = dir_lights[k];
+            const int w = l.r + l.g + l.b;
+            auto sum = [&](int j) { return dir_lights[j].r + dir_lights[j].g + dir_lights[j].b; };
+            if (pick[0] < 0 || w > sum(pick[0])) {
+                pick[1] = pick[0];
+                pick[0] = k;
+            } else if (pick[1] < 0 || w > sum(pick[1])) {
+                pick[1] = k;
+            }
+        }
+        for (int k : pick) {
+            if (k < 0) continue;
+            const auto& l = dir_lights[k];
+            const u32 c = rt_ls.count++;
+            rt_ls.dir[c][0] = l.dx; rt_ls.dir[c][1] = l.dy; rt_ls.dir[c][2] = l.dz;
+            rt_ls.col[c][0] = l.r; rt_ls.col[c][1] = l.g; rt_ls.col[c][2] = l.b;
         }
     }
 
@@ -1212,6 +1286,11 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
                                  fx * rt_mv.m[0][1] + fy * rt_mv.m[1][1] + fz * rt_mv.m[2][1] + rt_mv.m[3][1],
                                  fx * rt_mv.m[0][2] + fy * rt_mv.m[1][2] + fz * rt_mv.m[2][2] + rt_mv.m[3][2]};
             rt_state_[dest_idx] = 1;
+            rt_lit_[dest_idx] = (geometry_mode & 0x00020000) && !cbfd_ && !(geometry_mode & 0x00040000);
+            if (rt_lit_[dest_idx]) {
+                rt_nrm_[dest_idx] = orbit64::rt::RTVector3(tnx, tny, tnz).normalized();
+                rt_lset_[dest_idx] = rt_ls;
+            }
             if ((geometry_mode & 0x00020000) && !cbfd_ && rt_.active().ready() && !rt_pixel_mode())
                 rt_light_vertex(dest_idx, v, {tnx, tny, tnz}, cur_vtx * 2654435761u);
         }
@@ -1376,33 +1455,26 @@ void RDP::rt_light_vertex(u32 slot, Vertex& v, const orbit64::rt::RTVector3& nor
     const auto& scene = rt_.active();
     const RTVector3 p = rt_pos_[slot];
     const RTVector3 n = normal.normalized();
-    const f32 ao = scene.compute_ao(p, n, scene.scale() * 3.0f, 8, seed);
-    f32 r = ambient_light.r * ao, g = ambient_light.g * ao, b = ambient_light.b * ao;
-    const RTVector3 view = (rt_eye_ - p).normalized();
-    int traced = 0;
-    for (const auto& l : dir_lights) {
+    // Ambient occlusion and the shadows of the first two lights, smoothed
+    // over frames.
+    f32 vals[3] = {scene.compute_ao(p, n, scene.scale() * 1.5f, 8, seed), 1.0f, 1.0f};
+    for (size_t i = 0; i < dir_lights.size() && i < 2; ++i) {
+        const auto& l = dir_lights[i];
         const RTVector3 ld(l.dx, l.dy, l.dz);
-        const f32 ndl = n.dot(ld);
+        if (n.dot(ld) > 0.0f && (l.r | l.g | l.b) != 0)
+            vals[1 + i] = scene.compute_shadow(p, n, ld, 1e30f, 6, 0.05f, seed + static_cast<u32>(i));
+    }
+    rt_smooth(slot, vals, 3);
+    const f32 ao = 1.0f - rt_ao_strength_ * 0.35f * (1.0f - vals[0]);
+    f32 r = ambient_light.r * ao, g = ambient_light.g * ao, b = ambient_light.b * ao;
+    for (size_t i = 0; i < dir_lights.size(); ++i) {
+        const auto& l = dir_lights[i];
+        const f32 ndl = n.dot(RTVector3(l.dx, l.dy, l.dz));
         if (ndl <= 0.0f) continue;
-        f32 shadow = 1.0f;
-        if (traced < 2 && (l.r | l.g | l.b) != 0) {
-            shadow = scene.compute_shadow(p, n, ld, 1e30f, 4, 0.05f, seed + traced);
-            ++traced;
-        }
-        if (shadow <= 0.0f) continue;
+        const f32 shadow = i < 2 ? 1.0f - rt_shadow_strength_ * (1.0f - vals[1 + i]) : 1.0f;
         r += l.r * ndl * shadow;
         g += l.g * ndl * shadow;
         b += l.b * ndl * shadow;
-        if (traced == 1) {
-            // Blinn-Phong with Schlick's Fresnel.
-            const RTVector3 h = (ld + view).normalized();
-            const f32 ndh = std::max(0.0f, n.dot(h));
-            const f32 fres = 0.04f + 0.96f * std::pow(1.0f - std::max(0.0f, view.dot(h)), 5.0f);
-            const f32 spec = std::pow(ndh, 48.0f) * (0.35f + fres) * shadow;
-            r += l.r * spec;
-            g += l.g * spec;
-            b += l.b * spec;
-        }
     }
     v.r = static_cast<u8>(std::clamp(r, 0.0f, 255.0f));
     v.g = static_cast<u8>(std::clamp(g, 0.0f, 255.0f));
@@ -1432,8 +1504,21 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
         if (rt_scene_done_) {
             rt_.end_frame();
             rt_scene_done_ = false;
+            rt_new_frame();
         }
-        rt_.building().add_triangle(pa, pb, pc);
+        orbit64::rt::RTTriangleAttr attr;
+        auto& scene_b = rt_.building();
+        attr.lit = rt_lit_[a] && rt_lit_[b] && rt_lit_[c];
+        if (attr.lit) {
+            const u32 corners[3] = {a, b, c};
+            for (int k = 0; k < 3; ++k) {
+                const Vertex& v = vertex_cache[corners[k]];
+                attr.n[k] = rt_nrm_[corners[k]];
+                attr.shade[k] = u32(v.r) | (u32(v.g) << 8) | (u32(v.b) << 16);
+            }
+            attr.light_set = scene_b.add_light_set(rt_lset_[a]);
+        }
+        scene_b.add_triangle(pa, pb, pc, attr);
         rt_cur_casts_ = true;
     }
 
@@ -1447,16 +1532,17 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
     n = n.normalized();
     // The side the camera sees (the triangle is being drawn).
     if (n.dot(rt_eye_ - pa) < 0.0f) n = -n;
-    const f32 radius = scene.scale() * 3.0f;
+    const f32 radius = scene.scale() * 1.5f;
     for (u32 s : {a, b, c}) {
         if (rt_state_[s] != 1) continue;
         rt_state_[s] = 2;
         const RTVector3 p = rt_pos_[s];
-        const u32 seed = vertex_cache[s].r * 31u + s * 2654435761u + static_cast<u32>(p.x * 7.0f);
-        const f32 ao = scene.compute_ao(p, n, radius, 8, seed);
-        f32 lit = 1.0f;
-        if (n.dot(rt_sun_) > 0.05f) lit = scene.compute_shadow(p, n, rt_sun_, 1e30f, 4, 0.06f, seed);
-        const f32 k = ao * (0.5f + 0.5f * lit);
+        // Seeded by the vertex's address: the same rays every frame.
+        const u32 seed = raw_vertex[s].src * 2654435761u;
+        f32 vals[2] = {scene.compute_ao(p, n, radius, 8, seed), 1.0f};
+        if (n.dot(rt_sun_) > 0.05f) vals[1] = scene.compute_shadow(p, n, rt_sun_, 1e30f, 6, 0.06f, seed);
+        rt_smooth(s, vals, 2);
+        const f32 k = (1.0f - rt_ao_strength_ * 0.35f * (1.0f - vals[0])) * (1.0f - rt_shadow_strength_ * (1.0f - vals[1]));
         Vertex& v = vertex_cache[s];
         v.r = static_cast<u8>(v.r * k);
         v.g = static_cast<u8>(v.g * k);
@@ -1513,7 +1599,9 @@ void RDP::rt_pixel_flush() {
     scene.build_bvh();
     rt_scene_done_ = true;
     RtPass p;
-    p.tri_offset = scene.serialize(p.bvh);
+    p.tri_offset = scene.serialize(p.bvh, &p.lights_offset);
+    p.pixel_lighting = rt_pixel_lighting_;
+    p.specular = rt_specular_;
     if (p.bvh.empty()) return;
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c) p.proj[r * 4 + c] = rt_px_proj_.m[r][c];
@@ -1525,6 +1613,10 @@ void RDP::rt_pixel_flush() {
     p.shadow_strength = rt_shadow_strength_;
     p.ao_strength = rt_ao_strength_;
     p.frame = ++rt_px_frame_;
+    // Debugging: ORBIT64_RT_SHADOW / _AO (0..1) and ORBIT64_RT_RELIGHT=0 override.
+    if (const char* e = std::getenv("ORBIT64_RT_SHADOW")) p.shadow_strength = static_cast<f32>(std::atof(e));
+    if (const char* e = std::getenv("ORBIT64_RT_AO")) p.ao_strength = static_cast<f32>(std::atof(e));
+    if (const char* e = std::getenv("ORBIT64_RT_RELIGHT")) p.pixel_lighting = std::atoi(e) != 0;
     static const bool debug = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
     if (debug && p.frame % 60 == 1)
         std::fprintf(stderr, "[rt] pass %u: %zu triangles, scale %.2f, sun %.2f %.2f %.2f, eye %.1f %.1f %.1f\n", p.frame,

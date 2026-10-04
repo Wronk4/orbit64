@@ -157,6 +157,11 @@ public:
         rt_shadow_ = shadow;
         rt_ao_ = ao;
     }
+    // Per-pixel lighting of lit objects, highlights 0..100.
+    void set_rt_pixel_lighting(bool on, int specular) {
+        rt_pixel_lighting_ = on;
+        rt_specular_ = specular;
+    }
     // Who renders internal resolutions above 1 (the GPU renderer), or
     // nullptr for the CPU. Applied at the next frame; the high-resolution
     // buffers start over.
@@ -255,6 +260,8 @@ private:
     std::atomic<int> internal_scale_{1};
     std::atomic<bool> raytracing_{false};
     std::atomic<int> rt_shadow_{55}, rt_ao_{100};
+    std::atomic<bool> rt_pixel_lighting_{true};
+    std::atomic<int> rt_specular_{35};
     std::mutex factory_mutex_;
     HiResFactory hires_factory_;
     bool factory_dirty_ = false; // guarded by factory_mutex_

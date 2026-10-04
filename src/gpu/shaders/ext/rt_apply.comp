@@ -22,7 +22,8 @@ void main() {
     uint W = P.dims.x, H = P.dims.y;
     if (px.x >= W || px.y >= H) return;
     uint idx = px.y * W + px.x;
-    float dist = uintBitsToFloat(occ[idx * 2u + 1u]);
+    uint ob = idx * OCC_WORDS;
+    float dist = uintBitsToFloat(occ[ob + 1u]);
     if (!(dist > 0.0)) return;
 
     int step = int(P.misc.w);
@@ -32,10 +33,10 @@ void main() {
             ivec2 q = ivec2(px) + ivec2(dx, dy) * step;
             if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
             uint j = uint(q.y) * W + uint(q.x);
-            float qd = uintBitsToFloat(occ[j * 2u + 1u]);
+            float qd = uintBitsToFloat(occ[j * OCC_WORDS + 1u]);
             if (!(qd > 0.0)) continue;
             float w = exp(-abs(qd - dist) / (0.01 * dist)) * exp(-float(dx * dx + dy * dy) * 0.18);
-            uint v = occ[j * 2u];
+            uint v = occ[j * OCC_WORDS];
             lit += w * float(v & 0xFFFFu);
             ao += w * float(v >> 16);
             sum_w += w;
@@ -44,7 +45,20 @@ void main() {
     lit /= sum_w * 65535.0;
     ao /= sum_w * 65535.0;
 
-    float k = (1.0 - P.strength.x * (1.0 - lit)) * (1.0 - P.strength.y * (1.0 - ao));
+    float shadow = 1.0 - P.strength.x * (1.0 - lit);
+    float occlusion = 1.0 - P.strength.y * (1.0 - ao);
+    vec3 k = vec3(shadow * occlusion);
+    vec2 w6 = unpackHalf2x16(occ[ob + 6u]);
+    if (w6.y > 0.5) {
+        // Per-pixel lighting: the colour scaled from the shade the game
+        // interpolated to the light this pixel gets (clamped as the RSP does).
+        vec2 a = unpackHalf2x16(occ[ob + 2u]), b = unpackHalf2x16(occ[ob + 3u]), c2 = unpackHalf2x16(occ[ob + 4u]);
+        vec2 s = unpackHalf2x16(occ[ob + 5u]);
+        vec3 base = vec3(a, b.x), mainl = vec3(b.y, c2);
+        vec3 shade = vec3(s, w6.x);
+        vec3 light = min(base * occlusion + mainl * shadow, vec3(1.0));
+        k = clamp(light / max(shade, vec3(1.0 / 64.0)), 0.0, 3.0);
+    }
     uint c = color_buf[idx];
     vec3 rgb = vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu)) * k;
     uvec3 o = uvec3(clamp(rgb + 0.5, 0.0, 255.0));

@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 
 namespace orbit64::rt {
 
@@ -111,6 +112,27 @@ struct RTTriangle {
     }
 };
 
+// The game's lights for a lit object: ambient and up to two directional
+// lights (0..255 per channel, directions toward the light), as the vertices
+// were lit with.
+struct RTLightSet {
+    f32 ambient[3] = {};
+    f32 dir[2][3] = {};
+    f32 col[2][3] = {};
+    u32 count = 0;
+    bool operator==(const RTLightSet& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
+};
+
+// What per-pixel lighting needs of a triangle: smooth normals and the shade
+// the game gave its corners (RGBA8, r in the low byte), so the pixel's own
+// lighting can replace the colour interpolated across it.
+struct RTTriangleAttr {
+    RTVector3 n[3];
+    u32 shade[3] = {};
+    u32 light_set = 0;
+    bool lit = false;
+};
+
 struct BVHNode {
     RTAABB bounds;
     u32 first{0}; // leaf: first triangle; inner: index of the right child (the left one follows the node)
@@ -120,7 +142,10 @@ struct BVHNode {
 class RayTracingScene {
 public:
     void clear();
-    void add_triangle(const RTVector3& v0, const RTVector3& v1, const RTVector3& v2);
+    void add_triangle(const RTVector3& v0, const RTVector3& v1, const RTVector3& v2,
+                      const RTTriangleAttr& attr = {});
+    // Index of `ls` in the scene's light sets (the last one again if equal).
+    u32 add_light_set(const RTLightSet& ls);
     void build_bvh();
 
     bool empty() const { return tris_.empty(); }
@@ -132,8 +157,12 @@ public:
 
     // The BVH as 32-bit words for the GPU: nodes (min xyz, max xyz, first,
     // count; an inner node's left child follows it, `first` is the right
-    // one), then triangles (v0, e1, e2, normal). Returns the triangles' offset.
-    u32 serialize(std::vector<u32>& out) const;
+    // one), then triangles (kTriWords each: v0, e1, e2, face normal, the
+    // corners' normals, their shades, light set, lit), then the light sets
+    // (kLightSetWords each: ambient, count, then per light direction and
+    // colour). Returns the triangles' offset; *lights_offset the sets'.
+    static constexpr u32 kTriWords = 28, kLightSetWords = 16;
+    u32 serialize(std::vector<u32>& out, u32* lights_offset = nullptr) const;
 
     bool intersect_any(const RTRay& ray) const;
     bool intersect_closest(const RTRay& ray, f32& hit_t, RTVector3& hit_normal) const;
@@ -149,6 +178,8 @@ public:
 
 private:
     std::vector<RTTriangle> tris_;
+    std::vector<RTTriangleAttr> attrs_;
+    std::vector<RTLightSet> light_sets_;
     std::vector<RTAABB> tri_bounds_;
     std::vector<RTVector3> centers_;
     std::vector<u32> order_;
