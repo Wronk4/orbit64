@@ -14,6 +14,29 @@ It is a desktop frontend built on SDL3 and Dear ImGui for the N64 emulation core
 Metal on macOS, Vulkan on Linux and Windows (Direct3D 12 on Windows machines without Vulkan).
 It runs on **Windows, macOS and Linux** from a single codebase.
 
+## Enhancements (experimental branch)
+
+Settings > Graphics, also in the game screen's right-click menu:
+
+- **Ray tracing** (HLE graphics): every frame's opaque 3D triangles go into a
+  BVH (`src/raytracer.cpp`). With the GPU renderer on Vulkan and an internal
+  resolution of 2x or more, each pixel traces soft shadows from the main light
+  and ambient occlusion (`src/gpu/shaders/ext/rt_*.comp`), before the HUD is
+  drawn; otherwise vertices are lit by the same rays.
+- **Modern post-processing** (Vulkan): bloom, FXAA, contrast-adaptive
+  sharpening, filmic highlights, vibrance, contrast and a vignette
+  (`src/gpu/postfx.cpp`).
+- **NVIDIA DLSS** (Windows, RTX cards): DLAA / Quality / Balanced /
+  Performance / Ultra Performance on the shown frame (`src/gpu/dlss.cpp`).
+  Needs the DLSS SDK, which isn't in this repository: `python tools/fetch_dlss.py`
+  puts it in `third_party/dlss`, and the next CMake configure builds with it
+  and copies `nvngx_dlss.dll` next to the executable. DLSS runs on a Direct3D 12
+  device of its own with frames copied through memory, and gets no motion
+  vectors, so by default each frame is upscaled on its own.
+
+The SPIR-V of the new shaders is generated with `python tools/gen_ext_shaders.py`
+(needs `glslc`). Headless: `--gpu --raytracing --dlss quality --postfx`.
+
 ## Folders
 
 | Folder | What is in it |

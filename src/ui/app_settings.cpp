@@ -365,6 +365,27 @@ void App::settings_graphics() {
     }
 
     {
+        std::string desc = "NVIDIA DLSS Super Resolution on the shown frame: AI upscaling and anti-aliasing. "
+                           "Upscales what the internal resolution renders (DLAA keeps the size).";
+        if (settings_.dlss_mode > 0) {
+            if (dlss_.available()) desc += " Running on " + dlss_.adapter() + ".";
+            else if (!dlss_.error().empty()) desc += " Unavailable: " + dlss_.error() + ".";
+        }
+        row_begin("NVIDIA DLSS", desc.c_str(), cw);
+        const char* modes[] = {"Off", "DLAA", "Quality", "Balanced", "Perf", "Ultra"};
+        segmented("dlss", modes, 6, &settings_.dlss_mode, cw);
+        row_end();
+        if (settings_.dlss_mode > 0) {
+            row_begin("DLSS frame history",
+                      "Lets DLSS accumulate detail over frames. The emulator has no motion vectors to give it, so "
+                      "moving scenes smear; off, every frame stands alone.",
+                      cw);
+            toggle("dlsstemp", &settings_.dlss_temporal);
+            row_end();
+        }
+    }
+
+    {
         const bool fx_ok = postfx_ && postfx_->ok();
         row_begin("Modern post-processing",
                   fx_ok ? "Bloom, anti-aliasing, sharpening, a filmic tone curve, vibrance and a vignette on the shown frame."

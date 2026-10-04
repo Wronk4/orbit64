@@ -4,6 +4,7 @@
 #include "gpu/device.hpp"
 #include "gpu/rdp_gpu.hpp"
 #include "gpu/postfx.hpp"
+#include "gpu/dlss.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <iostream>
@@ -102,6 +103,7 @@ int main(int argc, char* argv[]) {
     bool raytracing = false;
     bool gpu_hires = false;
     bool postfx = false;
+    int dlss_mode = 0;
 
     // A number on the command line; anything else ends the program with a message, not an uncaught exception.
     auto number = [](const std::string& text, const char* option) {
@@ -150,6 +152,12 @@ int main(int argc, char* argv[]) {
             profile_path = argv[++i]; // sampling profile of the run, see src/profiler.hpp
         } else if (arg == "--raytracing") {
             raytracing = true;
+        } else if (arg == "--dlss" && i + 1 < argc) {
+            // Screenshots upscaled by DLSS: dlaa, quality, balanced, performance, ultra
+            const std::string m = argv[++i];
+            dlss_mode = m == "dlaa" ? gpu::Dlss::DLAA : m == "quality" ? gpu::Dlss::Quality
+                      : m == "balanced" ? gpu::Dlss::Balanced : m == "performance" ? gpu::Dlss::Performance
+                      : m == "ultra" ? gpu::Dlss::UltraPerformance : 0;
         } else if (arg == "--postfx") {
             postfx = true; // screenshots through the frontend's post-processing (needs --gpu)
         } else if (arg == "--gpu") {
@@ -323,6 +331,27 @@ int main(int argc, char* argv[]) {
 
         emu.render_frame(frame_pixels, frame_w, frame_h);
 
+        if (!screenshot_path.empty() && dlss_mode) {
+            gpu::Dlss dlss;
+            std::vector<u32> out;
+            int ow = 0, oh = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            if (dlss.init() && dlss.evaluate(frame_pixels.data(), frame_w, frame_h, dlss_mode, false, out, ow, oh)) {
+                const auto t1 = std::chrono::steady_clock::now();
+                // A second frame: the time of one once everything is set up.
+                dlss.evaluate(frame_pixels.data(), frame_w, frame_h, dlss_mode, false, out, ow, oh);
+                const auto t2 = std::chrono::steady_clock::now();
+                std::cout << "[Main] DLSS " << gpu::Dlss::mode_name(dlss_mode) << " on " << dlss.adapter() << ": "
+                          << frame_w << "x" << frame_h << " -> " << ow << "x" << oh << " (setup "
+                          << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms, frame "
+                          << std::chrono::duration<double, std::milli>(t2 - t1).count() << " ms)\n";
+                frame_pixels.swap(out);
+                frame_w = ow;
+                frame_h = oh;
+            } else {
+                std::cerr << "[Main] DLSS failed: " << dlss.error() << "\n";
+            }
+        }
         if (!screenshot_path.empty() && postfx && gpu_dev) {
             gpu::PostFx fx(gpu_dev->get());
             std::vector<u32> out;
