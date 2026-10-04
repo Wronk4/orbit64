@@ -105,8 +105,18 @@ public:
     }
     MicrocodeType get_ucode_type() const { return ucode_type; }
 
-    void set_raytracing(bool on) { raytracing_enabled_ = on; }
+    // Ray-traced vertex lighting (src/raytracer.hpp): shadows, ambient
+    // occlusion and highlights from the geometry of the frame before.
+    void set_raytracing(bool on) {
+        if (on != raytracing_enabled_) rt_.clear();
+        raytracing_enabled_ = on;
+    }
     bool raytracing() const { return raytracing_enabled_; }
+    // A video frame is over: what it drew becomes the scene rays are traced in.
+    void rt_end_frame() {
+        if (raytracing_enabled_) rt_.end_frame();
+    }
+    size_t rt_triangles() const { return rt_.active().triangle_count(); }
 
     // Frontend status queries (read-only).
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
@@ -442,7 +452,19 @@ private:
     u32 cbfd_num_lights_{0};
     f32 cbfd_ldir_[13][3]{}; // their directions in model space (execute_vtx)
     bool raytracing_enabled_{false};
-    orbit64::rt::RayTracingScene rt_scene_;
+    orbit64::rt::FrameScenes rt_;
+    // Per vertex slot: the position in modelview space, and whether it is
+    // 0 untraced (2D, billboards), 1 waiting for its first triangle (unlit:
+    // traced with the face's normal) or 2 done.
+    std::array<orbit64::rt::RTVector3, 80> rt_pos_{};
+    std::array<u8, 80> rt_state_{};
+    // The light unlit geometry is shadowed from: the strongest directional
+    // light the game used last.
+    orbit64::rt::RTVector3 rt_sun_{0.35f, 0.85f, 0.4f};
+    orbit64::rt::RTVector3 rt_eye_{}; // the camera, in modelview space
+    bool rt_frame_view(); // false when the projection isn't a perspective one
+    void rt_light_vertex(u32 slot, Vertex& v, const orbit64::rt::RTVector3& n, u32 seed);
+    void rt_triangle(u32 a, u32 b, u32 c);
     bool execute_cbfd_command(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size);
 
     // The single 2D transform matrix (no stack, no push/pop) used by

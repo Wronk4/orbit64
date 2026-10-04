@@ -162,6 +162,10 @@ add_executable(audio_check EXCLUDE_FROM_ALL tools/audio_check.cpp src/audio_stre
 target_include_directories(audio_check PRIVATE src)
 
 # Optional RDP unit test (unchanged from the core project).
-add_executable(test_rdp EXCLUDE_FROM_ALL src/test_rdp.cpp src/rdp.cpp src/hires.cpp src/mi.cpp)
+add_executable(test_rdp EXCLUDE_FROM_ALL src/test_rdp.cpp src/rdp.cpp src/hires.cpp src/mi.cpp src/raytracer.cpp)
 target_include_directories(test_rdp PRIVATE src)
 target_link_libraries(test_rdp PRIVATE Threads::Threads)
+
+# HLE ray tracer unit tests (tools/test_raytracing.cpp), not built by default.
+add_executable(test_raytracing EXCLUDE_FROM_ALL tools/test_raytracing.cpp src/raytracer.cpp)
+target_include_directories(test_raytracing PRIVATE src)

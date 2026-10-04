@@ -286,6 +286,7 @@ void Emulator::render_frame(VideoFrame& out) {
         out.scale = 1;
     }
     if (hr) hr->end_frame();
+    rdp.rt_end_frame();
     // Display lists run whole between two frames; the RDP's command buffer
     // may be halfway through one, which clears its depth buffer itself.
     if (!rdp.drawing_rdp_commands()) rdp.clear_zbuffer();
