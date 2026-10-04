@@ -1,0 +1,35 @@
+#version 450
+// Post-processing, step 1 (src/gpu/postfx.cpp): the bright parts of the frame
+// at a quarter of its size, the start of the bloom. A 4x4 box of source pixels
+// per output pixel, each through a soft threshold in linear light.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform readonly image2D src;
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D dst;
+layout(std140, set = 2, binding = 0) uniform Params {
+    ivec4 size;  // source w, h, destination w, h
+    vec4 knee;   // threshold, soft knee, swap red and blue, -
+} P;
+
+vec3 fetch(ivec2 p) {
+    vec3 c = imageLoad(src, clamp(p, ivec2(0), P.size.xy - 1)).rgb;
+    return P.knee.z > 0.5 ? c.bgr : c;
+}
+
+void main() {
+    ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    if (o.x >= P.size.z || o.y >= P.size.w) return;
+    ivec2 base = o * P.size.xy / P.size.zw;
+    vec3 acc = vec3(0.0);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            vec3 lin = pow(fetch(base + ivec2(x, y)), vec3(2.2));
+            float l = max(lin.r, max(lin.g, lin.b));
+            float soft = clamp(l - P.knee.x + P.knee.y, 0.0, 2.0 * P.knee.y);
+            soft = soft * soft / (4.0 * P.knee.y + 1e-5);
+            float w = max(soft, l - P.knee.x) / max(l, 1e-5);
+            acc += lin * w;
+        }
+    imageStore(dst, o, vec4(acc / 16.0, 1.0));
+}

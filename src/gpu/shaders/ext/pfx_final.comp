@@ -1,0 +1,95 @@
+#version 450
+// Post-processing, step 3: anti-aliasing (FXAA-style, along the local edge),
+// contrast-adaptive sharpening, the bloom, a filmic tone curve, vibrance and a
+// vignette, into the texture the frontend shows.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform readonly image2D src;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D bloom;
+layout(set = 1, binding = 0, rgba8) uniform writeonly image2D dst;
+layout(std140, set = 2, binding = 0) uniform Params {
+    ivec4 size;   // w, h, bloom w, bloom h
+    vec4 a;       // bloom strength, sharpening, vibrance, vignette
+    vec4 b;       // exposure, tone mapping on, FXAA on, swap red and blue
+    vec4 c;       // contrast, frame (dither), -, -
+} P;
+
+vec3 fetch(ivec2 p) {
+    vec3 c = imageLoad(src, clamp(p, ivec2(0), P.size.xy - 1)).rgb;
+    return P.b.w > 0.5 ? c.bgr : c;
+}
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+// Bilinear read of the source at a fractional pixel position.
+vec3 sample_src(vec2 p) {
+    p -= 0.5;
+    ivec2 i = ivec2(floor(p));
+    vec2 f = p - vec2(i);
+    return mix(mix(fetch(i), fetch(i + ivec2(1, 0)), f.x), mix(fetch(i + ivec2(0, 1)), fetch(i + ivec2(1, 1)), f.x), f.y);
+}
+vec3 sample_bloom(vec2 uv) {
+    vec2 p = uv * vec2(P.size.zw) - 0.5;
+    ivec2 i = ivec2(floor(p));
+    vec2 f = p - vec2(i);
+    ivec2 m = P.size.zw - 1;
+    vec3 a = imageLoad(bloom, clamp(i, ivec2(0), m)).rgb, b = imageLoad(bloom, clamp(i + ivec2(1, 0), ivec2(0), m)).rgb;
+    vec3 c = imageLoad(bloom, clamp(i + ivec2(0, 1), ivec2(0), m)).rgb, d = imageLoad(bloom, clamp(i + ivec2(1, 1), ivec2(0), m)).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+    ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    if (o.x >= P.size.x || o.y >= P.size.y) return;
+    vec3 c = fetch(o);
+    vec3 n = fetch(o + ivec2(0, -1)), s = fetch(o + ivec2(0, 1)), e = fetch(o + ivec2(1, 0)), w = fetch(o + ivec2(-1, 0));
+    float lc = luma(c), ln = luma(n), ls = luma(s), le = luma(e), lw = luma(w);
+    float lmin = min(lc, min(min(ln, ls), min(le, lw))), lmax = max(lc, max(max(ln, ls), max(le, lw)));
+
+    // Anti-aliasing: blend across the edge, along its direction.
+    if (P.b.z > 0.5 && lmax - lmin > max(0.06, lmax * 0.2)) {
+        float lnw = luma(fetch(o + ivec2(-1, -1))), lne = luma(fetch(o + ivec2(1, -1)));
+        float lsw = luma(fetch(o + ivec2(-1, 1))), lse = luma(fetch(o + ivec2(1, 1)));
+        vec2 dir = vec2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
+        float reduce = max((lnw + lne + lsw + lse) * 0.03125, 1.0 / 128.0);
+        dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), vec2(-8.0), vec2(8.0));
+        vec2 p = vec2(o) + 0.5;
+        vec3 a2 = 0.5 * (sample_src(p - dir / 6.0) + sample_src(p + dir / 6.0));
+        vec3 b4 = a2 * 0.5 + 0.25 * (sample_src(p - dir * 0.5) + sample_src(p + dir * 0.5));
+        float lb = luma(b4);
+        c = (lb < lmin || lb > lmax) ? a2 : b4;
+    } else if (P.a.y > 0.0) {
+        // Contrast-adaptive sharpening: stronger where the neighbourhood is flat.
+        float amp = sqrt(clamp(min(lmin, 1.0 - lmax) / max(lmax, 1e-4), 0.0, 1.0));
+        float k = -amp * mix(0.125, 0.2, P.a.y);
+        c = clamp((c + (n + s + e + w) * k) / (1.0 + 4.0 * k), 0.0, 1.0);
+    }
+
+    vec3 lin = pow(c, vec3(2.2)) * P.b.x;
+    vec2 uv = (vec2(o) + 0.5) / vec2(P.size.xy);
+    lin += sample_bloom(uv) * P.a.x;
+    // Filmic shoulder: highlights (and the bloom on them) roll off instead of
+    // clipping, keeping their hue; the rest stays as the game made it.
+    if (P.b.y > 0.5) {
+        float m = max(lin.r, max(lin.g, lin.b));
+        if (m > 0.75) {
+            float e = m - 0.75;
+            lin *= (0.75 + e / (1.0 + e / 0.25)) / m;
+        }
+    }
+    vec3 g = pow(max(lin, 0.0), vec3(1.0 / 2.2));
+
+    // An S-curve (deeper shadows, brighter mids), then vibrance (more for
+    // duller colours).
+    vec3 sc = g * g * (3.0 - 2.0 * g);
+    g = clamp(mix(g, sc, clamp((P.c.x - 1.0) * 4.0, 0.0, 1.0)), 0.0, 1.0);
+    float l = luma(g);
+    float sat = max(g.r, max(g.g, g.b)) - min(g.r, min(g.g, g.b));
+    g = mix(vec3(l), g, 1.0 + P.a.z * (1.0 - sat));
+
+    vec2 v = uv - 0.5;
+    g *= 1.0 - P.a.w * smoothstep(0.25, 0.85, dot(v, v) * 2.0);
+
+    float dither = (fract(52.9829189 * fract(dot(vec2(o) + P.c.y, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
+    imageStore(dst, o, vec4(clamp(g + dither, 0.0, 1.0), 1.0));
+}

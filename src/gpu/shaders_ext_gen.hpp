@@ -11,6 +11,9 @@ struct SpirvBlob {
     std::size_t size;
 };
 
+extern const SpirvBlob pfx_blur;   // post-processing: bloom blur
+extern const SpirvBlob pfx_bright; // post-processing: bloom bright pass
+extern const SpirvBlob pfx_final;  // post-processing: everything else
 extern const SpirvBlob rt_apply; // per-pixel ray tracing: filter and apply
 extern const SpirvBlob rt_trace; // per-pixel ray tracing: the rays
 

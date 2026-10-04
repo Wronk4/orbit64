@@ -97,7 +97,18 @@ struct Settings {
     bool vsync = true;
     int scanlines = 0;   // 0..100 intensity
     bool show_fps_overlay = false;
-    bool hle_raytracing = false; // Ray tracing lighting replacement for N64 HLE microcodes
+    bool hle_raytracing = true; // ray-traced shadows and ambient occlusion (HLE graphics)
+    int rt_shadow = 55;         // 0..100: how dark full shadow makes a surface
+    int rt_ao = 100;            // 0..100: how dark full ambient occlusion makes one
+    // Post-processing of the shown frame (src/gpu/postfx.hpp; Vulkan).
+    bool postfx = true;
+    int pfx_bloom = 60;      // 0..100
+    int pfx_sharpen = 50;    // 0..100
+    int pfx_vibrance = 35;   // 0..100
+    int pfx_contrast = 40;   // 0..100
+    int pfx_vignette = 15;   // 0..100
+    bool pfx_fxaa = true;
+    bool pfx_tonemap = true;
     int fullscreen_mode = 0; // 0 = borderless desktop, 1 = exclusive
     // 0 = GPU (SDL_GPU: Metal / Vulkan / Direct3D 12; high resolutions render
     // on the graphics card), 1 = compatibility (any SDL renderer, CPU only).
