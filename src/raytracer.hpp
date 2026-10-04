@@ -130,6 +130,11 @@ public:
     // and occlusion radii, whatever units the game works in.
     f32 scale() const { return scale_; }
 
+    // The BVH as 32-bit words for the GPU: nodes (min xyz, max xyz, first,
+    // count; an inner node's left child follows it, `first` is the right
+    // one), then triangles (v0, e1, e2, normal). Returns the triangles' offset.
+    u32 serialize(std::vector<u32>& out) const;
+
     bool intersect_any(const RTRay& ray) const;
     bool intersect_closest(const RTRay& ray, f32& hit_t, RTVector3& hit_normal) const;
 
@@ -166,7 +171,7 @@ public:
     void end_frame() {
         RayTracingScene& b = scenes_[cur_ ^ 1];
         if (b.empty()) return;
-        b.build_bvh();
+        if (!b.ready()) b.build_bvh();
         cur_ ^= 1;
         scenes_[cur_ ^ 1].clear();
     }

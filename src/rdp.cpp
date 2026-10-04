@@ -1212,7 +1212,7 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
                                  fx * rt_mv.m[0][1] + fy * rt_mv.m[1][1] + fz * rt_mv.m[2][1] + rt_mv.m[3][1],
                                  fx * rt_mv.m[0][2] + fy * rt_mv.m[1][2] + fz * rt_mv.m[2][2] + rt_mv.m[3][2]};
             rt_state_[dest_idx] = 1;
-            if ((geometry_mode & 0x00020000) && !cbfd_ && rt_.active().ready())
+            if ((geometry_mode & 0x00020000) && !cbfd_ && rt_.active().ready() && !rt_pixel_mode())
                 rt_light_vertex(dest_idx, v, {tnx, tny, tnz}, cur_vtx * 2654435761u);
         }
         // G_FOG: the shade alpha is the fog factor, z/w scaled and offset as
@@ -1421,15 +1421,26 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
     c %= n_slots;
     if (!rt_state_[a] || !rt_state_[b] || !rt_state_[c]) return;
     const RTVector3 pa = rt_pos_[a], pb = rt_pos_[b], pc = rt_pos_[c];
+    rt_cur_3d_ = true;
     // Opaque surfaces only: what doesn't update the depth buffer (skies,
-    // decals, translucent water and glass) casts no shadow.
+    // decals, translucent water and glass) casts no shadow, nor do cut-out
+    // textures (alpha compare, coverage times alpha: foliage, fences,
+    // billboards), whose quads would.
     auto& building = rt_.building();
-    if ((other_mode_l & 0x20) && building.triangle_count() < 200000) building.add_triangle(pa, pb, pc);
+    if ((other_mode_l & 0x20) && !(other_mode_l & 0x3) && !(other_mode_l & 0x1000) &&
+        building.triangle_count() < 200000) {
+        if (rt_scene_done_) {
+            rt_.end_frame();
+            rt_scene_done_ = false;
+        }
+        rt_.building().add_triangle(pa, pb, pc);
+        rt_cur_casts_ = true;
+    }
 
     if (rt_state_[a] != 1 && rt_state_[b] != 1 && rt_state_[c] != 1) return;
     const auto& scene = rt_.active();
     RTVector3 n = (pb - pa).cross(pc - pa);
-    if (!scene.ready() || n.length_squared() <= 0.0f) {
+    if (!scene.ready() || n.length_squared() <= 0.0f || rt_pixel_mode()) {
         rt_state_[a] = rt_state_[b] = rt_state_[c] = 2;
         return;
     }
@@ -1453,7 +1464,76 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
     }
 }
 
+void RDP::rt_pixel_before_draw(HiResTarget* hr, bool scene_3d) {
+    if (!raytracing_enabled_ || !rt_pixel_mode()) return;
+    if (rt_px_pending_ && (!scene_3d || hr != rt_px_target_)) rt_pixel_flush();
+    if (scene_3d && rt_cur_casts_ && hr) {
+        rt_px_pending_ = true;
+        rt_px_target_ = hr;
+        rt_px_proj_ = projection_matrix;
+        rt_px_vp_[0] = vp_scale_x; rt_px_vp_[1] = vp_scale_y; rt_px_vp_[2] = vp_scale_z;
+        rt_px_vp_[3] = vp_trans_x; rt_px_vp_[4] = vp_trans_y; rt_px_vp_[5] = vp_trans_z;
+        rt_px_eye_ = rt_eye_;
+    }
+}
+
+namespace {
+// Inverse of a 4x4 matrix (row-major floats); false if singular.
+bool invert4(const f32 m[16], f32 out[16]) {
+    f32 inv[16];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    const f32 det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (!(std::abs(det) > 1e-20f)) return false;
+    for (int i = 0; i < 16; ++i) out[i] = inv[i] / det;
+    return true;
+}
+} // namespace
+
+// The 3D scene drawn into rt_px_target_ so far, ray traced on the GPU in
+// the BVH of the triangles it consists of.
+void RDP::rt_pixel_flush() {
+    rt_px_pending_ = false;
+    auto& scene = rt_.building();
+    if (scene.empty() || !rt_px_target_) return;
+    scene.build_bvh();
+    rt_scene_done_ = true;
+    RtPass p;
+    p.tri_offset = scene.serialize(p.bvh);
+    if (p.bvh.empty()) return;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) p.proj[r * 4 + c] = rt_px_proj_.m[r][c];
+    if (!invert4(p.proj, p.inv_proj)) return;
+    for (int i = 0; i < 6; ++i) p.vp[i] = rt_px_vp_[i];
+    p.sun[0] = rt_sun_.x; p.sun[1] = rt_sun_.y; p.sun[2] = rt_sun_.z;
+    p.eye[0] = rt_px_eye_.x; p.eye[1] = rt_px_eye_.y; p.eye[2] = rt_px_eye_.z;
+    p.scene_scale = scene.scale();
+    p.shadow_strength = rt_shadow_strength_;
+    p.ao_strength = rt_ao_strength_;
+    p.frame = ++rt_px_frame_;
+    static const bool debug = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
+    if (debug && p.frame % 60 == 1)
+        std::fprintf(stderr, "[rt] pass %u: %zu triangles, scale %.2f, sun %.2f %.2f %.2f, eye %.1f %.1f %.1f\n", p.frame,
+                     scene.triangle_count(), p.scene_scale, p.sun[0], p.sun[1], p.sun[2], p.eye[0], p.eye[1], p.eye[2]);
+    hires_->ray_trace(rt_px_target_, p);
+}
+
 void RDP::emit_triangle(u32 a, u32 b, u32 c, u8* rdram, size_t rdram_size) {
+    rt_cur_3d_ = rt_cur_casts_ = false;
     if (raytracing_enabled_) rt_triangle(a, b, c);
 
     if (capture_enabled && capture_tris < 400000) {
@@ -1533,6 +1613,7 @@ void RDP::emit_triangle(u32 a, u32 b, u32 c, u8* rdram, size_t rdram_size) {
     }
     if (pick_frame_ == -2 || (pick_frame_ >= 0 && g_current_frame == pick_frame_)) debug_pick(a, b, c);
     clip_and_rasterize_triangle(vertex_cache[a], vertex_cache[b], vertex_cache[c], rdram, rdram_size);
+    rt_cur_3d_ = rt_cur_casts_ = false;
 }
 
 // ORBIT64_PICK=x,y,frame: every triangle of that frame that covers pixel
@@ -1709,6 +1790,7 @@ void RDP::clip_and_rasterize_line(Vertex v0, Vertex v1, u8* rdram, size_t rdram_
         if (e2 < dx) { err += dx; y0 += sy; }
         step++;
     }
+    if (hr) rt_pixel_before_draw(hr, false);
     if (hr) hires_->pixels(hr, st, draw_state_serial_, hires_line_px_);
 }
 
@@ -3190,6 +3272,7 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
             const size_t s0 = static_cast<size_t>(y) * fb_w + start_x;
             for (u32 i = 0; i < n && s0 + i < hires_shadow_len_; ++i) hires_shadow_[s0 + i] = color16;
         }
+        if (hr) rt_pixel_before_draw(hr, false);
         if (hr) hires_->fill_rect(hr, start_x, start_y, max_x, max_y, fb_pixel_to_argb(color16, 2));
     } else if (color_image_size == 1) { // 8-bit: byte k of the fill colour for address k mod 4
         for (u32 y = start_y; y < max_y; ++y) {
@@ -3211,6 +3294,7 @@ void RDP::rasterize_fill_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u8* rdram, siz
                 }
             }
         }
+        if (hr) rt_pixel_before_draw(hr, false);
         if (hr) hires_->fill_rect(hr, start_x, start_y, max_x, max_y, fb_pixel_to_argb(fill_color, 4));
     }
 }
@@ -3485,6 +3569,7 @@ void RDP::rasterize_tex_rect(u32 ulx, u32 uly, u32 lrx, u32 lry, u32 tile_idx, f
     cmd.ulx = ulx; cmd.uly = uly; cmd.lrx = lrx; cmd.lry = lry; cmd.tile = tile_idx;
     cmd.s = s; cmd.t = t; cmd.dsdx = dsdx; cmd.dtdy = dtdy; cmd.flip = flip;
     if (cmd.y_first <= cmd.y_last) queue_native(cmd, rdram, rdram_size);
+    if (hr) rt_pixel_before_draw(hr, false);
     if (hr) hires_->tex_rect(hr, live, draw_state_serial_, tmem_gen_, ulx, uly, lrx, lry, tile_idx, s, t, dsdx, dtdy, flip);
 }
 
@@ -3557,6 +3642,7 @@ void RDP::draw_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, f3
     cmd.v[2] = v2;
     cmd.area = area;
     queue_native(cmd, rdram, rdram_size);
+    if (hr) rt_pixel_before_draw(hr, rt_cur_3d_);
     if (hr) hires_->triangle(hr, live, draw_state_serial_, tmem_gen_, v0, v1, v2, area);
 }
 
@@ -4014,6 +4100,7 @@ void RDP::s2dex_draw_bg(u32 bg_addr, bool scaled, u8* rdram, size_t rdram_size) 
         }
     }
     // The high-resolution pass draws each background pixel as a block.
+    if (hr) rt_pixel_before_draw(hr, false);
     if (hr) hires_->blit(hr, st, draw_state_serial_, screen_x0, screen_y0, out_w, out_h, hires_bg_px_.data());
 }
 

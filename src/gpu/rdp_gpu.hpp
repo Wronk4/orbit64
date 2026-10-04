@@ -43,13 +43,17 @@ public:
     void pixels(HiResTarget* t, const DrawState& st, u64 serial, const std::vector<Pixel>& px) override;
     void blit(HiResTarget* t, const DrawState& st, u64 serial, u32 x0, u32 y0, u32 w, u32 h, const u32* colors) override;
     void clear_depth() override;
+    bool supports_ray_tracing() const override { return dev_->rt_ok(); }
+    void ray_trace(HiResTarget* t, const RtPass& pass) override;
     void flush() override;
     bool present(const VIScanout& so, const u8* rdram, size_t rdram_size, VideoFrame& out) override;
     void end_frame() override;
 
 private:
+    struct Depth;
     struct Target : HiResTarget {
         SDL_GPUBuffer* buffer = nullptr; // (width * S) x (240 * S) ARGB8888
+        Depth* last_depth = nullptr; // what its last triangle tested against
     };
     struct Depth {
         u32 width = 0;
@@ -67,7 +71,16 @@ private:
         size_t at;
         SDL_GPUBuffer* buffer;
         u32 words, value;
+        int rt = -1; // or a ray tracing pass instead: index in rt_jobs_
     };
+    struct RtJob {
+        Target* target;
+        Depth* depth;
+        u32 params[44]; // RtParams
+    };
+    std::vector<RtJob> rt_jobs_;
+    SDL_GPUBuffer* occ_ = nullptr; // rt_trace.comp's output
+    u32 occ_words_ = 0;
     struct Compose;
 
     Target* find(u32 addr, u32 width, u8 size) const;

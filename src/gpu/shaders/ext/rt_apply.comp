@@ -1,0 +1,52 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Applies rt_trace.comp's shadows and ambient occlusion to the colour buffer:
+// a depth-aware 5x5 filter of the traced values (few rays per pixel are
+// noisy), then the pixel's colour scaled down by them.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 1
+#define NUM_RW_TEX 0
+#include "../common.glsl"
+#include "rt_common.glsl"
+
+layout(std430, RO_BUFFER(0)) readonly buffer Occlusion { uint occ[]; };
+layout(std430, RW_BUFFER(0)) buffer ColorBuffer { uint color_buf[]; };
+
+RT_PARAMS
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    uint W = P.dims.x, H = P.dims.y;
+    if (px.x >= W || px.y >= H) return;
+    uint idx = px.y * W + px.x;
+    float dist = uintBitsToFloat(occ[idx * 2u + 1u]);
+    if (!(dist > 0.0)) return;
+
+    int step = int(P.misc.w);
+    float sum_w = 0.0, lit = 0.0, ao = 0.0;
+    for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+            ivec2 q = ivec2(px) + ivec2(dx, dy) * step;
+            if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
+            uint j = uint(q.y) * W + uint(q.x);
+            float qd = uintBitsToFloat(occ[j * 2u + 1u]);
+            if (!(qd > 0.0)) continue;
+            float w = exp(-abs(qd - dist) / (0.01 * dist)) * exp(-float(dx * dx + dy * dy) * 0.18);
+            uint v = occ[j * 2u];
+            lit += w * float(v & 0xFFFFu);
+            ao += w * float(v >> 16);
+            sum_w += w;
+        }
+    if (sum_w <= 0.0) return;
+    lit /= sum_w * 65535.0;
+    ao /= sum_w * 65535.0;
+
+    float k = (1.0 - P.strength.x * (1.0 - lit)) * (1.0 - P.strength.y * (1.0 - ao));
+    uint c = color_buf[idx];
+    vec3 rgb = vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu)) * k;
+    uvec3 o = uvec3(clamp(rgb + 0.5, 0.0, 255.0));
+    color_buf[idx] = (c & 0xFF000000u) | (o.r << 16) | (o.g << 8) | o.b;
+}

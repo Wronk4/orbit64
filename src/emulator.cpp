@@ -269,6 +269,7 @@ void Emulator::render_frame(VideoFrame& out) {
     // At native resolution the high-level renderer's frames go through the
     // exact VI too: it writes the coverage (ninth bits) and dithering the
     // VI's anti-aliasing and dither filters work from.
+    rdp.rt_before_present();
     const bool native_exact_vi = !hr && rdp.exact_rdp()->scale() <= 1;
     if ((rdp.exact_drawing() || native_exact_vi) && vi_exact_) {
         rdp.flush_pending(); // queued bit-exact draws

@@ -115,8 +115,19 @@ public:
     // A video frame is over: what it drew becomes the scene rays are traced in.
     void rt_end_frame() {
         if (raytracing_enabled_) rt_.end_frame();
+        rt_scene_done_ = false;
     }
     size_t rt_triangles() const { return rt_.active().triangle_count(); }
+    // Before the frame is shown: ray traces the 3D scene drawn last, if no
+    // 2D drawing (which does that) came after it.
+    void rt_before_present() {
+        if (rt_px_pending_) rt_pixel_flush();
+    }
+    // How dark full shadow and full occlusion make a pixel (0..1).
+    void set_rt_strength(f32 shadow, f32 ao) {
+        rt_shadow_strength_ = shadow;
+        rt_ao_strength_ = ao;
+    }
 
     // Frontend status queries (read-only).
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
@@ -465,6 +476,23 @@ private:
     bool rt_frame_view(); // false when the projection isn't a perspective one
     void rt_light_vertex(u32 slot, Vertex& v, const orbit64::rt::RTVector3& n, u32 seed);
     void rt_triangle(u32 a, u32 b, u32 c);
+    // Per-pixel ray tracing (HiResRenderer::ray_trace) when the renderer can:
+    // the vertices are then left as the game lit them.
+    bool rt_pixel_mode() const { return hires_ && hires_->supports_ray_tracing(); }
+    bool rt_cur_3d_ = false;     // the triangle being drawn is a 3D one
+    bool rt_cur_casts_ = false;  // ... and an opaque one, in the scene
+    bool rt_px_pending_ = false; // 3D drawn into rt_px_target_ that isn't ray traced yet
+    bool rt_scene_done_ = false; // the scene being built had its pass: the next 3D starts another
+    HiResTarget* rt_px_target_ = nullptr;
+    Matrix4x4 rt_px_proj_{};
+    f32 rt_px_vp_[6] = {};
+    orbit64::rt::RTVector3 rt_px_eye_{};
+    u32 rt_px_frame_ = 0;
+    f32 rt_shadow_strength_ = 0.55f, rt_ao_strength_ = 1.0f;
+    // Before drawing into `hr`: the 3D scene drawn so far gets its pass when
+    // what follows isn't more of it.
+    void rt_pixel_before_draw(HiResTarget* hr, bool scene_3d);
+    void rt_pixel_flush();
     bool execute_cbfd_command(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size);
 
     // The single 2D transform matrix (no stack, no push/pop) used by

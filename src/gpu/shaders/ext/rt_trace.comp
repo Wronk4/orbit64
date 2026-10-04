@@ -1,0 +1,182 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Per-pixel ray tracing of a finished 3D scene (RdpRenderer::ray_trace): one
+// invocation per pixel of the target finds the surface it shows by tracing a
+// ray from the eye through the BVH of the scene's triangles, checks it
+// against the depth buffer, then traces soft shadow rays toward the main light
+// and ambient occlusion rays over the hemisphere. rt_apply.comp filters the
+// result and darkens the colour buffer with it.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define NUM_UNIFORM 1
+#define NUM_RO_BUF 2
+#define NUM_RW_TEX 0
+#include "../common.glsl"
+#include "rt_common.glsl"
+
+layout(std430, RO_BUFFER(0)) readonly buffer FrameData { uint D[]; }; // the BVH at P.dims.z
+layout(std430, RO_BUFFER(1)) readonly buffer DepthBuffer { float depth_buf[]; };
+layout(std430, RW_BUFFER(0)) buffer Occlusion { uint occ[]; }; // per pixel: shadow | ao << 16, distance
+
+RT_PARAMS
+
+float fw(uint i) { return uintBitsToFloat(D[i]); }
+vec3 v3(uint i) { return vec3(fw(i), fw(i + 1u), fw(i + 2u)); }
+
+// Slab test: entry distance, or -1 on a miss.
+float box_hit(uint n, vec3 o, vec3 inv_d, float tmax) {
+    vec3 lo = (v3(n) - o) * inv_d, hi = (v3(n + 3u) - o) * inv_d;
+    vec3 a = min(lo, hi), b = max(lo, hi);
+    float t0 = max(max(a.x, a.y), max(a.z, 0.0));
+    float t1 = min(min(b.x, b.y), min(b.z, tmax));
+    return t1 >= t0 ? t0 : -1.0;
+}
+
+// Möller-Trumbore, both faces.
+bool tri_hit(uint t, vec3 o, vec3 d, float tmax, out float hit) {
+    vec3 v0 = v3(t), e1 = v3(t + 3u), e2 = v3(t + 6u);
+    vec3 h = cross(d, e2);
+    float a = dot(e1, h);
+    if (abs(a) < 1e-12) return false;
+    float f = 1.0 / a;
+    vec3 s = o - v0;
+    float u = f * dot(s, h);
+    if (u < 0.0 || u > 1.0) return false;
+    vec3 q = cross(s, e1);
+    float v = f * dot(d, q);
+    if (v < 0.0 || u + v > 1.0) return false;
+    hit = f * dot(e2, q);
+    return hit > 0.0 && hit < tmax;
+}
+
+// Closest hit (any_hit: the first one) along o + t d, t < tmax. Returns the
+// triangle's word offset or ~0.
+uint trace(vec3 o, vec3 d, inout float tmax, bool any_hit) {
+    const uint nodes = P.dims.z, tris = P.dims.w;
+    vec3 inv_d = 1.0 / mix(d, vec3(1e-12), lessThan(abs(d), vec3(1e-12)));
+    uint stack[48];
+    int sp = 0;
+    stack[sp++] = 0u;
+    uint best = 0xFFFFFFFFu;
+    while (sp > 0) {
+        uint ni = stack[--sp];
+        uint n = nodes + ni * 8u;
+        if (box_hit(n, o, inv_d, tmax) < 0.0) continue;
+        uint first = D[n + 6u], count = D[n + 7u];
+        if (count != 0u) {
+            for (uint i = first; i < first + count; ++i) {
+                float t;
+                uint tw = tris + i * 12u;
+                if (tri_hit(tw, o, d, tmax, t)) {
+                    tmax = t;
+                    best = tw;
+                    if (any_hit) return best;
+                }
+            }
+        } else if (sp < 46) {
+            stack[sp++] = first;   // right
+            stack[sp++] = ni + 1u; // left, first
+        }
+    }
+    return best;
+}
+
+vec3 xform(vec4 r0, vec4 r1, vec4 r2, vec4 r3, vec4 v, out float w) {
+    vec4 c = v.x * r0 + v.y * r1 + v.z * r2 + v.w * r3;
+    w = c.w;
+    return c.xyz;
+}
+
+void basis(vec3 n, out vec3 t, out vec3 b) {
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float c = n.x * n.y * a;
+    t = vec3(1.0 + s * n.x * n.x * a, s * c, -s * n.x);
+    b = vec3(c, s + n.y * n.y * a, -n.y);
+}
+
+float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    uint W = P.dims.x, H = P.dims.y;
+    if (px.x >= W || px.y >= H) return;
+    uint idx = px.y * W + px.x;
+    occ[idx * 2u] = 0xFFFFFFFFu;
+    occ[idx * 2u + 1u] = floatBitsToUint(-1.0);
+
+    float zb = depth_buf[idx];
+    if (!(zb < 1e29)) return; // nothing 3D drawn here
+    int z18 = z_decompress(int(zb) >> 4);
+    if (z18 >= 0x3FFF0) return; // the far plane: cleared
+
+    // The pixel's centre in screen space, then NDC.
+    float inv_s = P.vpz.z;
+    float sx = (float(px.x) + 0.5) * inv_s, sy = (float(px.y) + 0.5) * inv_s;
+    float xn = (sx - P.vp.z) / P.vp.x;
+    float yn = -(sy - P.vp.w) / P.vp.y;
+    float wa, wb, wz;
+    vec3 a = xform(P.ip0, P.ip1, P.ip2, P.ip3, vec4(xn, yn, -1.0, 1.0), wa) / wa;
+    vec3 b = xform(P.ip0, P.ip1, P.ip2, P.ip3, vec4(xn, yn, 1.0, 1.0), wb) / wb;
+    // Where the depth buffer says the surface is.
+    float zn = ((float(z18) / 256.0) - P.vpz.y) / P.vpz.x;
+    vec3 pz = xform(P.ip0, P.ip1, P.ip2, P.ip3, vec4(xn, yn, zn, 1.0), wz) / wz;
+
+    vec3 d = b - a;
+    float len = length(d);
+    if (!(len > 0.0)) return;
+    d /= len;
+    float t = len;
+    uint hit = trace(a, d, t, false);
+    if (hit == 0xFFFFFFFFu) return;
+    vec3 p = a + d * t;
+    float scale = P.vpz.w;
+    float dist = distance(p, P.eye.xyz);
+    // Something the BVH doesn't hold (a billboard, a cut-out texture) in
+    // front: leave the pixel alone.
+    if (distance(p, pz) > 0.03 * dist + 0.5 * scale) return;
+    vec3 n = v3(hit + 9u);
+    if (dot(n, d) > 0.0) n = -n;
+
+    float bias = max(scale * 0.02, length(p) * 1e-4);
+    vec3 o = p + n * bias;
+    float noise = ign(vec2(px) + float(P.misc.x % 64u) * 5.588238);
+    vec3 t1, b1;
+
+    // Soft shadow from the main light.
+    float lit = 1.0;
+    vec3 l = P.sun.xyz;
+    if (dot(n, l) > 0.02) {
+        basis(l, t1, b1);
+        uint ns = P.misc.z;
+        float open = 0.0;
+        for (uint i = 0u; i < ns; ++i) {
+            float u = fract(noise + 0.618034 * float(i)), v = fract(noise * 7.31 + 0.754878 * float(i + 1u));
+            float r = P.sun.w * sqrt(u), ang = 6.2831853 * v;
+            vec3 dir = normalize(l + t1 * (r * cos(ang)) + b1 * (r * sin(ang)));
+            float tm = 1e30;
+            if (trace(o + l * bias, dir, tm, true) == 0xFFFFFFFFu) open += 1.0;
+        }
+        lit = open / float(ns);
+    }
+
+    // Ambient occlusion, cosine weighted.
+    basis(n, t1, b1);
+    uint na = P.misc.y;
+    float radius = P.eye.w, occl = 0.0;
+    for (uint i = 0u; i < na; ++i) {
+        float u = fract(noise + 0.754878 * float(i + 1u)), v = fract(noise * 3.17 + 0.569840 * float(i + 1u));
+        float r = sqrt(u), ang = 6.2831853 * v;
+        vec3 dir = normalize(t1 * (r * cos(ang)) + b1 * (r * sin(ang)) + n * sqrt(max(0.0, 1.0 - u)));
+        float tm = radius;
+        if (trace(o, dir, tm, false) != 0xFFFFFFFFu) {
+            float k = 1.0 - tm / radius;
+            occl += 0.35 + 0.65 * k * k;
+        }
+    }
+    float ao = clamp(1.0 - occl / float(na), 0.0, 1.0);
+
+    occ[idx * 2u] = uint(clamp(lit, 0.0, 1.0) * 65535.0) | (uint(ao * 65535.0) << 16);
+    occ[idx * 2u + 1u] = floatBitsToUint(dist);
+}

@@ -1,6 +1,8 @@
 #include "emulator.hpp"
 #include "ui/app.hpp"
 #include "profiler.hpp"
+#include "gpu/device.hpp"
+#include "gpu/rdp_gpu.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <iostream>
@@ -94,6 +96,7 @@ int main(int argc, char* argv[]) {
     bool use_save_file = true;
     std::string wav_path;
     bool raytracing = false;
+    bool gpu_hires = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -130,6 +133,8 @@ int main(int argc, char* argv[]) {
             profile_path = argv[++i]; // sampling profile of the run, see src/profiler.hpp
         } else if (arg == "--raytracing") {
             raytracing = true;
+        } else if (arg == "--gpu") {
+            gpu_hires = true; // internal resolutions on the GPU renderer, as the frontend does
         } else if (arg == "--mash" && i + 1 < argc) {
             mash_btn = argv[++i];
         } else if (arg == "--press" && i + 1 < argc) {
@@ -183,6 +188,20 @@ int main(int argc, char* argv[]) {
     if (!emu.load_rom(rom_path)) {
         std::cerr << "[Main] Failed to load ROM: " << rom_path << "\n";
         return 1;
+    }
+    std::shared_ptr<gpu::Device> gpu_dev;
+    if (gpu_hires) {
+        if (!SDL_Init(SDL_INIT_VIDEO)) {
+            std::cerr << "[Main] SDL_Init: " << SDL_GetError() << "\n";
+            return 1;
+        }
+        gpu_dev = std::make_shared<gpu::Device>(gpu::create_device());
+        if (!gpu_dev->ok()) {
+            std::cerr << "[Main] GPU renderer unavailable: " << gpu_dev->error() << "\n";
+            return 1;
+        }
+        std::cout << "[Main] GPU renderer: " << gpu_dev->driver() << (gpu_dev->rt_ok() ? ", ray tracing" : "") << "\n";
+        emu.get_rdp().set_hires_factory(gpu::make_hires_factory(gpu_dev));
     }
     // Internal resolution of the RDP (screenshots come out that many times larger).
     emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
