@@ -348,8 +348,8 @@ void App::settings_graphics() {
     row_end();
 
     row_begin("Ray tracing",
-              "Traces every frame's 3D scene: soft cast shadows and ambient occlusion. Per pixel on the GPU at internal "
-              "resolutions of 2x and up (Vulkan); per vertex otherwise. HLE graphics only.",
+              "Traces every frame's 3D scene: soft cast shadows, ambient occlusion and per-pixel lighting. Per pixel "
+              "with the GPU video backend on Vulkan; per vertex otherwise. HLE graphics only.",
               cw);
     if (toggle("raytracing", &settings_.hle_raytracing)) {
         core_.set_raytracing(settings_.hle_raytracing);
@@ -362,6 +362,19 @@ void App::settings_graphics() {
         row_begin("Ambient occlusion", "How dark creases, corners and contact points get.", cw);
         if (slider_int("rtao", &settings_.rt_ao, 0, 100, "%d%%", cw)) core_.set_rt_strength(settings_.rt_shadow, settings_.rt_ao);
         row_end();
+        row_begin("Per-pixel lighting",
+                  "Lights lit objects at every pixel from their smoothed normals, instead of blending colours lit at "
+                  "the corners: smooth shading across each triangle, with highlights.",
+                  cw);
+        if (toggle("rtpxl", &settings_.rt_pixel_lighting))
+            core_.set_rt_pixel_lighting(settings_.rt_pixel_lighting, settings_.rt_specular);
+        row_end();
+        if (settings_.rt_pixel_lighting) {
+            row_begin("Highlights", "Strength of the specular highlights of per-pixel lighting.", cw);
+            if (slider_int("rtspec", &settings_.rt_specular, 0, 100, "%d%%", cw))
+                core_.set_rt_pixel_lighting(settings_.rt_pixel_lighting, settings_.rt_specular);
+            row_end();
+        }
     }
 
     {

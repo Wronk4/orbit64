@@ -40,6 +40,8 @@ f32 area(const RTAABB& b) {
 
 void RayTracingScene::clear() {
     tris_.clear();
+    attrs_.clear();
+    light_sets_.clear();
     tri_bounds_.clear();
     centers_.clear();
     order_.clear();
@@ -48,7 +50,13 @@ void RayTracingScene::clear() {
     built_ = false;
 }
 
-void RayTracingScene::add_triangle(const RTVector3& v0, const RTVector3& v1, const RTVector3& v2) {
+u32 RayTracingScene::add_light_set(const RTLightSet& ls) {
+    if (light_sets_.empty() || !(light_sets_.back() == ls)) light_sets_.push_back(ls);
+    return static_cast<u32>(light_sets_.size() - 1);
+}
+
+void RayTracingScene::add_triangle(const RTVector3& v0, const RTVector3& v1, const RTVector3& v2,
+                                   const RTTriangleAttr& attr) {
     if (!v0.finite() || !v1.finite() || !v2.finite()) return;
     RTTriangle t;
     t.v0 = v0;
@@ -63,6 +71,7 @@ void RayTracingScene::add_triangle(const RTVector3& v0, const RTVector3& v1, con
     b.expand(v1);
     b.expand(v2);
     tris_.push_back(t);
+    attrs_.push_back(attr);
     tri_bounds_.push_back(b);
     centers_.push_back((v0 + v1 + v2) * (1.0f / 3.0f));
     built_ = false;
@@ -90,8 +99,13 @@ void RayTracingScene::build_bvh() {
 
     // Triangles in leaf order, for locality.
     std::vector<RTTriangle> sorted(n);
-    for (u32 i = 0; i < n; ++i) sorted[i] = tris_[order_[i]];
+    std::vector<RTTriangleAttr> sorted_attrs(n);
+    for (u32 i = 0; i < n; ++i) {
+        sorted[i] = tris_[order_[i]];
+        sorted_attrs[i] = attrs_[order_[i]];
+    }
     tris_.swap(sorted);
+    attrs_.swap(sorted_attrs);
 }
 
 void RayTracingScene::build(u32 node, u32 first, u32 count, int depth) {
@@ -170,7 +184,7 @@ void RayTracingScene::build(u32 node, u32 first, u32 count, int depth) {
     nodes_[node].count = 0;
 }
 
-u32 RayTracingScene::serialize(std::vector<u32>& out) const {
+u32 RayTracingScene::serialize(std::vector<u32>& out, u32* lights_offset) const {
     out.clear();
     if (!ready()) return 0;
     auto f = [&](f32 v) { out.push_back(std::bit_cast<u32>(v)); };
@@ -182,9 +196,27 @@ u32 RayTracingScene::serialize(std::vector<u32>& out) const {
         out.push_back(n.count);
     }
     const u32 tri_offset = static_cast<u32>(out.size());
-    for (const RTTriangle& t : tris_) {
-        for (const RTVector3* v : {&t.v0, &t.e1, &t.e2, &t.normal}) {
+    for (size_t i = 0; i < tris_.size(); ++i) {
+        const RTTriangle& t = tris_[i];
+        const RTTriangleAttr& a = attrs_[i];
+        for (const RTVector3* v : {&t.v0, &t.e1, &t.e2, &t.normal, &a.n[0], &a.n[1], &a.n[2]}) {
             f(v->x); f(v->y); f(v->z);
+        }
+        out.push_back(a.shade[0]);
+        out.push_back(a.shade[1]);
+        out.push_back(a.shade[2]);
+        out.push_back(a.light_set);
+        out.push_back(a.lit ? 1u : 0u);
+        out.push_back(0);
+        out.push_back(0);
+    }
+    if (lights_offset) *lights_offset = static_cast<u32>(out.size());
+    for (const RTLightSet& ls : light_sets_) {
+        f(ls.ambient[0]); f(ls.ambient[1]); f(ls.ambient[2]);
+        out.push_back(ls.count);
+        for (int l = 0; l < 2; ++l) {
+            f(ls.dir[l][0]); f(ls.dir[l][1]); f(ls.dir[l][2]);
+            f(ls.col[l][0]); f(ls.col[l][1]); f(ls.col[l][2]);
         }
     }
     return tri_offset;
