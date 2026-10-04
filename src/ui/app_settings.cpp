@@ -348,8 +348,8 @@ void App::settings_graphics() {
     row_end();
 
     row_begin("Ray tracing",
-              "Traces every frame's 3D scene: soft cast shadows, ambient occlusion and per-pixel lighting. Per pixel "
-              "with the GPU video backend on Vulkan; per vertex otherwise. HLE graphics only.",
+              "Traces every frame's 3D scene per pixel: soft cast shadows, ambient occlusion and per-pixel lighting. "
+              "Needs the GPU video backend on Vulkan; HLE graphics only.",
               cw);
     if (toggle("raytracing", &settings_.hle_raytracing)) {
         core_.set_raytracing(settings_.hle_raytracing);
