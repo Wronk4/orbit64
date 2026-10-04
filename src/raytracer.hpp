@@ -131,6 +131,15 @@ struct RTTriangleAttr {
     u32 shade[3] = {};
     u32 light_set = 0;
     bool lit = false;
+    bool metal = false; // environment-mapped: reflects the scene
+    bool water = false; // translucent water: reflects, casts no shadow
+    // Cut-out texture (foliage, fences, billboards): solid only where the
+    // texture is. tex_state is the renderer's recorded draw state
+    // (HiResRenderer::rt_texture_state) in batch tex_batch; s, t per corner.
+    bool cutout = false;
+    u32 tex_state = ~0u;
+    u64 tex_batch = 0;
+    f32 st[6] = {};
 };
 
 struct BVHNode {
@@ -158,11 +167,13 @@ public:
     // The BVH as 32-bit words for the GPU: nodes (min xyz, max xyz, first,
     // count; an inner node's left child follows it, `first` is the right
     // one), then triangles (kTriWords each: v0, e1, e2, face normal, the
-    // corners' normals, their shades, light set, lit), then the light sets
+    // corners' normals, their shades, light set, flags: lit 1, metal 2,
+    // water 4, cut-out 8; cut-outs' draw state (~0 unless recorded in
+    // `tex_batch`) and corners' s, t), then the light sets
     // (kLightSetWords each: ambient, count, then per light direction and
     // colour). Returns the triangles' offset; *lights_offset the sets'.
-    static constexpr u32 kTriWords = 28, kLightSetWords = 16;
-    u32 serialize(std::vector<u32>& out, u32* lights_offset = nullptr) const;
+    static constexpr u32 kTriWords = 36, kLightSetWords = 16;
+    u32 serialize(std::vector<u32>& out, u32* lights_offset = nullptr, u64 tex_batch = 0) const;
 
     bool intersect_any(const RTRay& ray) const;
     bool intersect_closest(const RTRay& ray, f32& hit_t, RTVector3& hit_normal) const;

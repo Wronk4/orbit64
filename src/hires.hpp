@@ -114,6 +114,9 @@ struct RtPass {
     f32 specular = 0.35f;      // per-pixel highlights
     bool pixel_lighting = true; // relight lit triangles per pixel (RtPass::bvh's light sets)
     u32 lights_offset = 0;     // word offset of the light sets in bvh
+    f32 water_reflect = 0.0f, metal_reflect = 0.0f; // reflection strengths (0: none)
+    f32 gi = 0.0f;             // global illumination strength (0: ambient occlusion only)
+    u64 tex_batch = 0;         // the batch the cut-outs' texture states are valid in
     u32 frame = 0;
 };
 
@@ -157,6 +160,13 @@ public:
     // so far (renderers that can; the RDP lights vertices itself otherwise).
     virtual bool supports_ray_tracing() const { return false; }
     virtual void ray_trace(HiResTarget* t, const RtPass& pass) { (void)t; (void)pass; }
+    // Records `st` (with its texture) for ray_trace() to test texture alpha
+    // with: its offset, or ~0u. Valid while rt_batch() stays the same.
+    virtual u32 rt_texture_state(const DrawState& st, u64 serial, u64 tmem_gen) {
+        (void)st; (void)serial; (void)tmem_gen;
+        return ~0u;
+    }
+    virtual u64 rt_batch() const { return 0; }
     // Starts drawing everything recorded so far.
     virtual void flush() = 0;
 

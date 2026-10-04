@@ -45,6 +45,8 @@ public:
     void clear_depth() override;
     bool supports_ray_tracing() const override { return dev_->rt_ok(); }
     void ray_trace(HiResTarget* t, const RtPass& pass) override;
+    u32 rt_texture_state(const DrawState& st, u64 serial, u64 tmem_gen) override;
+    u64 rt_batch() const override { return batch_; }
     void flush() override;
     bool present(const VIScanout& so, const u8* rdram, size_t rdram_size, VideoFrame& out) override;
     void end_frame() override;
@@ -76,10 +78,11 @@ private:
     struct RtJob {
         Target* target;
         Depth* depth;
-        u32 params[48]; // RtParams
+        u32 params[72]; // RtParams
     };
     std::vector<RtJob> rt_jobs_;
     SDL_GPUBuffer* occ_ = nullptr; // rt_trace.comp's output
+    u64 batch_ = 1;                // counts reset_batch(): data_ offsets are per batch
     u32 occ_words_ = 0;
     struct Compose;
 

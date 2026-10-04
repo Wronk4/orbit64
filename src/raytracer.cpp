@@ -184,7 +184,7 @@ void RayTracingScene::build(u32 node, u32 first, u32 count, int depth) {
     nodes_[node].count = 0;
 }
 
-u32 RayTracingScene::serialize(std::vector<u32>& out, u32* lights_offset) const {
+u32 RayTracingScene::serialize(std::vector<u32>& out, u32* lights_offset, u64 tex_batch) const {
     out.clear();
     if (!ready()) return 0;
     auto f = [&](f32 v) { out.push_back(std::bit_cast<u32>(v)); };
@@ -206,7 +206,10 @@ u32 RayTracingScene::serialize(std::vector<u32>& out, u32* lights_offset) const 
         out.push_back(a.shade[1]);
         out.push_back(a.shade[2]);
         out.push_back(a.light_set);
-        out.push_back(a.lit ? 1u : 0u);
+        out.push_back((a.lit ? 1u : 0u) | (a.metal ? 2u : 0u) | (a.water ? 4u : 0u) | (a.cutout ? 8u : 0u));
+        out.push_back(a.cutout && a.tex_batch == tex_batch ? a.tex_state : ~0u);
+        for (f32 v : a.st) f(v);
+        out.push_back(0);
         out.push_back(0);
         out.push_back(0);
     }
