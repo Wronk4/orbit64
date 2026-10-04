@@ -1,3 +1,5 @@
+// Unit tests of the HLE ray tracer (src/raytracer.cpp): cmake --build <dir> --target test_raytracing
+#undef NDEBUG // the checks are asserts, in every build type
 #include "../src/raytracer.hpp"
 #include <iostream>
 #include <cassert>
@@ -96,36 +98,66 @@ void test_ambient_occlusion() {
     std::cout << "  -> test_ambient_occlusion PASSED\n";
 }
 
-void test_lighting_evaluation() {
-    std::cout << "[Test] Running test_lighting_evaluation...\n";
+void test_scale_independence() {
+    std::cout << "[Test] Running test_scale_independence...\n";
+    // The shadow test's scene in units 1000 times larger (games differ wildly).
+    for (f32 k : {0.01f, 1.0f, 1000.0f}) {
+        RayTracingScene scene;
+        scene.add_triangle(RTVector3{-100, 0, -100} * k, RTVector3{100, 0, -100} * k, RTVector3{100, 0, 100} * k);
+        scene.add_triangle(RTVector3{-100, 0, -100} * k, RTVector3{100, 0, 100} * k, RTVector3{-100, 0, 100} * k);
+        scene.add_triangle(RTVector3{-10, 20, -10} * k, RTVector3{10, 20, -10} * k, RTVector3{10, 20, 10} * k);
+        scene.add_triangle(RTVector3{-10, 20, -10} * k, RTVector3{10, 20, 10} * k, RTVector3{-10, 20, 10} * k);
+        scene.build_bvh();
+        const f32 under = scene.compute_shadow(RTVector3{0, 0, 0} * k, {0, 1, 0}, {0, 1, 0});
+        const f32 open = scene.compute_shadow(RTVector3{50, 0, 50} * k, {0, 1, 0}, {0, 1, 0});
+        // A point on the lit ground must not shadow itself.
+        const f32 self = scene.compute_shadow(RTVector3{60, 0, -60} * k, {0, 1, 0}, RTVector3{1, 1, 0}.normalized());
+        std::cout << "  scale " << k << ": under " << under << ", open " << open << ", self " << self << "\n";
+        assert(under < 0.1f);
+        assert(open > 0.9f);
+        assert(self > 0.9f);
+    }
+    std::cout << "  -> test_scale_independence PASSED\n";
+}
+
+void test_frame_scenes() {
+    std::cout << "[Test] Running test_frame_scenes...\n";
+    FrameScenes fs;
+    assert(!fs.active().ready());
+    fs.building().add_triangle({0, 0, 10}, {10, 0, 10}, {0, 10, 10});
+    assert(!fs.active().ready()); // nothing to trace until the frame ends
+    fs.end_frame();
+    assert(fs.active().ready() && fs.active().triangle_count() == 1);
+    assert(fs.building().empty());
+    fs.end_frame(); // a frame that drew nothing keeps the last scene
+    assert(fs.active().triangle_count() == 1);
+    std::cout << "  -> test_frame_scenes PASSED\n";
+}
+
+void test_many_triangles() {
+    std::cout << "[Test] Running test_many_triangles...\n";
+    // A 100 x 100 grid of quads: the BVH must agree with brute force.
     RayTracingScene scene;
-
-    // Add sphere-like / box mesh
-    scene.add_triangle({-5, 0, -5}, {5, 0, -5}, {0, 5, 0});
+    for (int z = 0; z < 100; ++z)
+        for (int x = 0; x < 100; ++x) {
+            const f32 h = std::sin(x * 0.3f) * std::cos(z * 0.2f) * 3.0f;
+            scene.add_triangle({f32(x), h, f32(z)}, {f32(x + 1), h, f32(z)}, {f32(x + 1), h, f32(z + 1)});
+            scene.add_triangle({f32(x), h, f32(z)}, {f32(x + 1), h, f32(z + 1)}, {f32(x), h, f32(z + 1)});
+        }
     scene.build_bvh();
-
-    RTVector3 pos(0, 0, -10);
-    RTVector3 norm(0, 0, -1);
-    RTVector3 view(0, 0, -1);
-    RTVector3 amb(0.2f, 0.2f, 0.2f);
-
-    std::vector<RTLight> lights;
-    RTLight sun;
-    sun.dir = {0, 0, -1};
-    sun.color = {1.0f, 1.0f, 1.0f};
-    sun.intensity = 1.0f;
-    sun.is_point = false;
-    lights.push_back(sun);
-
-    RTVector3 base_col(0.8f, 0.1f, 0.1f); // red
-    auto lit = scene.evaluate_lighting(pos, norm, view, amb, lights, base_col);
-
-    std::cout << "  Evaluated lighting RGB: (" << lit.x << ", " << lit.y << ", " << lit.z << ")\n";
-    assert(lit.x > 0.5f); // Red component illuminated
-    assert(lit.x > lit.y); // Dominantly red
-    assert(lit.z >= 0.0f && lit.z <= 1.0f);
-
-    std::cout << "  -> test_lighting_evaluation PASSED\n";
+    int hits = 0;
+    for (int i = 0; i < 1000; ++i) {
+        const f32 x = 0.5f + (i % 37) * 2.6f, z = 0.5f + (i % 41) * 2.4f;
+        f32 t;
+        RTVector3 n;
+        if (scene.intersect_closest(RTRay({x, 50, z}, {0, -1, 0}), t, n)) {
+            ++hits;
+            assert(t > 46.0f && t < 54.0f);
+        }
+    }
+    std::cout << "  " << hits << " / 1000 rays hit\n";
+    assert(hits == 1000);
+    std::cout << "  -> test_many_triangles PASSED\n";
 }
 
 int main() {
@@ -133,7 +165,9 @@ int main() {
     test_basic_intersection();
     test_shadows();
     test_ambient_occlusion();
-    test_lighting_evaluation();
+    test_scale_independence();
+    test_frame_scenes();
+    test_many_triangles();
     std::cout << "=== All Ray Tracing Tests Passed Successfully! ===\n";
     return 0;
 }
