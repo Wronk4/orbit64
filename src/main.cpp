@@ -93,6 +93,7 @@ int main(int argc, char* argv[]) {
     std::string profile_path;
     bool use_save_file = true;
     std::string wav_path;
+    bool raytracing = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -127,6 +128,8 @@ int main(int argc, char* argv[]) {
             wav_path = argv[++i]; // raw AI output (native rate, s16 stereo) of the run
         } else if (arg == "--profile" && i + 1 < argc) {
             profile_path = argv[++i]; // sampling profile of the run, see src/profiler.hpp
+        } else if (arg == "--raytracing") {
+            raytracing = true;
         } else if (arg == "--mash" && i + 1 < argc) {
             mash_btn = argv[++i];
         } else if (arg == "--press" && i + 1 < argc) {
@@ -166,7 +169,7 @@ int main(int argc, char* argv[]) {
             if (!found_roms.empty()) break;
         }
         if (found_roms.empty()) {
-            std::cerr << "Usage: n64 [rom_file] [--headless <frames>] [--scale <1-8>] [--rsp hle|lle-gfx|lle] [--screenshot <path.bmp>] [--mash <btn>] [--press <frame:btn>]\n";
+            std::cerr << "Usage: n64 [rom_file] [--headless <frames>] [--scale <1-8>] [--raytracing] [--rsp hle|lle-gfx|lle] [--screenshot <path.bmp>] [--mash <btn>] [--press <frame:btn>]\n";
             return 1;
         }
         std::sort(found_roms.begin(), found_roms.end());
@@ -183,6 +186,7 @@ int main(int argc, char* argv[]) {
     }
     // Internal resolution of the RDP (screenshots come out that many times larger).
     emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
+    if (raytracing) emu.get_rdp().set_raytracing(true);
     if (cpu_core_arg == "interp") emu.set_cpu_core(CpuCore::Interpreter);
     else if (cpu_core_arg == "jit") emu.set_cpu_core(CpuCore::Recompiler);
     if (rsp_arg == "hle") emu.get_rsp().set_mode(RspMode::HLE);

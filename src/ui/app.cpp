@@ -603,6 +603,7 @@ void App::update_input() {
     core_.set_limit_speed(settings_.limit_speed);
     core_.set_fps_limit(settings_.fps_limit);
     core_.set_internal_scale(settings_.internal_scale);
+    core_.set_raytracing(settings_.hle_raytracing);
     core_.set_expansion_pak(settings_.expansion_pak);
 }
 
@@ -787,6 +788,7 @@ void App::launch(const fs::path& rom) {
         core_.set_rsp_mode(settings_.rsp_mode);
         core_.set_rdp_exact(settings_.rdp_exact);
         core_.set_rdp_exact_gpu(settings_.rdp_exact_gpu);
+        core_.set_raytracing(settings_.hle_raytracing);
         std::string err;
         if (!core_.start(rom, err)) {
             error_title_ = "Failed to start emulation";

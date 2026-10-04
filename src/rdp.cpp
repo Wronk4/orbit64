@@ -312,6 +312,11 @@ void RDP::reset() {
     internal_zbuffer.assign(640 * 480, 1e30f);
     if (capture_shadow_) capture_shadow_->reset();
 
+    rt_scene_.clear();
+    if (const char* env_rt = std::getenv("ORBIT64_RAYTRACING")) {
+        raytracing_enabled_ = (std::strcmp(env_rt, "1") == 0 || std::strcmp(env_rt, "true") == 0 || std::strcmp(env_rt, "on") == 0);
+    }
+
     draw_state_dirty_ = true;
     ++tmem_gen_;
     // Start over from an empty set of high-resolution buffers.
@@ -1117,7 +1122,59 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
             v.v = (tv / 32.0f) * texture_scale_t;
         }
 
-        if ((geometry_mode & 0x00020000) && cbfd_ && ucode == MicrocodeType::F3DEX2) {
+        if (raytracing_enabled_ && (geometry_mode & 0x00020000)) {
+            const auto& mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
+            f32 cx = vx * mv.m[0][0] + vy * mv.m[1][0] + vz * mv.m[2][0] + mv.m[3][0];
+            f32 cy = vx * mv.m[0][1] + vy * mv.m[1][1] + vz * mv.m[2][1] + mv.m[3][1];
+            f32 cz = vx * mv.m[0][2] + vy * mv.m[1][2] + vz * mv.m[2][2] + mv.m[3][2];
+
+            orbit64::rt::RTVector3 v_pos(cx, cy, cz);
+            orbit64::rt::RTVector3 v_norm(tnx, tny, tnz);
+            orbit64::rt::RTVector3 v_view(-cx, -cy, -cz);
+            orbit64::rt::RTVector3 amb(ambient_light.r / 255.0f, ambient_light.g / 255.0f, ambient_light.b / 255.0f);
+
+            std::vector<orbit64::rt::RTLight> rt_lights;
+            for (const auto& l : dir_lights) {
+                orbit64::rt::RTLight rtl;
+                rtl.is_point = false;
+                rtl.dir = {l.dx, l.dy, l.dz};
+                rtl.color = {l.r / 255.0f, l.g / 255.0f, l.b / 255.0f};
+                rtl.intensity = 1.0f;
+                rt_lights.push_back(rtl);
+            }
+
+            if (cbfd_ && ucode == MicrocodeType::F3DEX2) {
+                for (u32 l = 0; l < cbfd_num_lights_; ++l) {
+                    const auto& cl = cbfd_lights_[l];
+                    orbit64::rt::RTLight rtl;
+                    rtl.is_point = true;
+                    rtl.pos = {cl.px, cl.py, cl.pz};
+                    rtl.color = {cl.r, cl.g, cl.b};
+                    rtl.radius = 500.0f;
+                    rtl.intensity = cl.ca > 0.0f ? cl.ca : 1.0f;
+                    rt_lights.push_back(rtl);
+                }
+            }
+
+            if (rt_lights.empty()) {
+                orbit64::rt::RTLight def_l;
+                def_l.dir = {0.577f, 0.707f, 0.408f};
+                def_l.color = {1.0f, 0.98f, 0.95f};
+                def_l.intensity = 1.0f;
+                rt_lights.push_back(def_l);
+            }
+
+            orbit64::rt::RTVector3 base_col = (cbfd_ && ucode == MicrocodeType::F3DEX2)
+                ? orbit64::rt::RTVector3(col[0] / 255.0f, col[1] / 255.0f, col[2] / 255.0f)
+                : orbit64::rt::RTVector3(1.0f, 1.0f, 1.0f);
+
+            auto lit = rt_scene_.evaluate_lighting(v_pos, v_norm, v_view, amb, rt_lights, base_col);
+
+            v.r = static_cast<u8>(std::clamp(lit.x * 255.0f, 0.0f, 255.0f));
+            v.g = static_cast<u8>(std::clamp(lit.y * 255.0f, 0.0f, 255.0f));
+            v.b = static_cast<u8>(std::clamp(lit.z * 255.0f, 0.0f, 255.0f));
+            v.a = col[3];
+        } else if ((geometry_mode & 0x00020000) && cbfd_ && ucode == MicrocodeType::F3DEX2) {
             // F3DEXBG: the colour stays the vertex's own, scaled by the light;
             // the normal comes from the separate table (2 bytes per vertex
             // slot) and the low byte of the vertex's flag word.
@@ -1295,6 +1352,21 @@ void RDP::finish_texture_run() {
 }
 
 void RDP::emit_triangle(u32 a, u32 b, u32 c, u8* rdram, size_t rdram_size) {
+    if (raytracing_enabled_) {
+        const Matrix4x4 mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
+        auto transform_v = [&](const RawVertex& rv) -> orbit64::rt::RTVector3 {
+            return {
+                rv.x * mv.m[0][0] + rv.y * mv.m[1][0] + rv.z * mv.m[2][0] + mv.m[3][0],
+                rv.x * mv.m[0][1] + rv.y * mv.m[1][1] + rv.z * mv.m[2][1] + mv.m[3][1],
+                rv.x * mv.m[0][2] + rv.y * mv.m[1][2] + rv.z * mv.m[2][2] + mv.m[3][2]
+            };
+        };
+        const RawVertex& ra = raw_vertex[a % raw_vertex.size()];
+        const RawVertex& rb = raw_vertex[b % raw_vertex.size()];
+        const RawVertex& rc = raw_vertex[c % raw_vertex.size()];
+        rt_scene_.add_triangle(transform_v(ra), transform_v(rb), transform_v(rc));
+    }
+
     if (capture_enabled && capture_tris < 400000) {
         const Matrix4x4 mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
         if (capture_frame.empty() || std::memcmp(&capture_frame.back().modelview, &mv, sizeof(Matrix4x4)) != 0) {
@@ -1710,6 +1782,10 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
     display_list_count++;
     dir_lights.clear();
     num_lights = 0;
+
+    if (raytracing_enabled_ && rt_scene_.triangle_count() > 32768) {
+        rt_scene_.clear();
+    }
 
     // The CPU may have changed RDRAM (and the microcode) since the last list.
     draw_state_dirty_ = true;

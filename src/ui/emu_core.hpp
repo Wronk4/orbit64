@@ -151,6 +151,7 @@ public:
     // Internal resolution of the software RDP: 1 = the game's frame buffer
     // size, 2..8 = that many times larger. Applied at the next frame.
     void set_internal_scale(int scale) { internal_scale_ = scale; }
+    void set_raytracing(bool on) { raytracing_ = on; }
     // Who renders internal resolutions above 1 (the GPU renderer), or
     // nullptr for the CPU. Applied at the next frame; the high-resolution
     // buffers start over.
@@ -247,6 +248,7 @@ private:
     bool exact_factory_dirty_ = false; // guarded by factory_mutex_
     std::atomic<int> fps_limit_{0};
     std::atomic<int> internal_scale_{1};
+    std::atomic<bool> raytracing_{false};
     std::mutex factory_mutex_;
     HiResFactory hires_factory_;
     bool factory_dirty_ = false; // guarded by factory_mutex_

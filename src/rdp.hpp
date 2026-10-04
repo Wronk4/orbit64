@@ -4,6 +4,7 @@
 #include "hires.hpp"
 #include "raster.hpp"
 #include "rdp_exact.hpp"
+#include "raytracer.hpp"
 #include <vector>
 #include <array>
 #include <memory>
@@ -103,6 +104,9 @@ public:
         cbfd_ = on;
     }
     MicrocodeType get_ucode_type() const { return ucode_type; }
+
+    void set_raytracing(bool on) { raytracing_enabled_ = on; }
+    bool raytracing() const { return raytracing_enabled_; }
 
     // Frontend status queries (read-only).
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
@@ -437,6 +441,8 @@ private:
     std::array<CbfdLight, 13> cbfd_lights_{};
     u32 cbfd_num_lights_{0};
     f32 cbfd_ldir_[13][3]{}; // their directions in model space (execute_vtx)
+    bool raytracing_enabled_{false};
+    orbit64::rt::RayTracingScene rt_scene_;
     bool execute_cbfd_command(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size);
 
     // The single 2D transform matrix (no stack, no push/pop) used by

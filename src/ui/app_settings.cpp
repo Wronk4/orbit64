@@ -347,6 +347,14 @@ void App::settings_graphics() {
     toggle("fpsov", &settings_.show_fps_overlay);
     row_end();
 
+    row_begin("Ray Tracing (HLE)",
+              "Replaces Nintendo 64 Gouraud lighting with ray tracing: cast shadows, soft penumbras, ambient occlusion and specular highlights across microcodes.",
+              cw);
+    if (toggle("raytracing", &settings_.hle_raytracing)) {
+        core_.set_raytracing(settings_.hle_raytracing);
+    }
+    row_end();
+
     row_begin("Video backend",
               "GPU uses Metal, Vulkan or Direct3D 12 and renders high internal resolutions on the graphics card. "
               "Compatibility works with any driver but renders on the CPU. Applies after a restart.",
