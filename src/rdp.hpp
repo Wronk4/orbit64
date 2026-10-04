@@ -108,8 +108,9 @@ public:
     }
     MicrocodeType get_ucode_type() const { return ucode_type; }
 
-    // Ray-traced vertex lighting (src/raytracer.hpp): shadows, ambient
-    // occlusion and highlights from the geometry of the frame before.
+    // Ray tracing (src/raytracer.hpp), per pixel by the high-resolution
+    // renderer (HiResRenderer::ray_trace): shadows, ambient occlusion and
+    // per-pixel lighting. Nothing happens with a renderer that can't.
     // With a GPU renderer that traces rays, ray tracing also turns on the
     // high-resolution path at scale 1 (per-pixel tracing needs it).
     void set_raytracing(bool on);
@@ -473,9 +474,8 @@ private:
     f32 cbfd_ldir_[13][3]{}; // their directions in model space (execute_vtx)
     bool raytracing_enabled_{false};
     orbit64::rt::FrameScenes rt_;
-    // Per vertex slot: the position in modelview space, and whether it is
-    // 0 untraced (2D, billboards), 1 waiting for its first triangle (unlit:
-    // traced with the face's normal) or 2 done.
+    // Per vertex slot: the position in modelview space, and whether it is part
+    // of the 3D scene (1) or not (0: 2D, billboards).
     std::array<orbit64::rt::RTVector3, 80> rt_pos_{};
     std::array<u8, 80> rt_state_{};
     // Lit vertices, for per-pixel lighting: the normal (modelview space) and
@@ -484,35 +484,22 @@ private:
     std::array<bool, 80> rt_lit_{};
     std::array<orbit64::rt::RTLightSet, 80> rt_lset_{};
     // The light unlit geometry is shadowed from: the strongest directional
-    // light the game used last.
+    // light of the frame before.
     orbit64::rt::RTVector3 rt_sun_{0.35f, 0.85f, 0.4f};
     // The strongest light of the frame being drawn, which rt_sun_ moves
     // toward when it ends (rt_new_frame): one light per frame, no jumps
     // between the lights of different objects.
     orbit64::rt::RTVector3 rt_sun_next_{};
     f32 rt_sun_best_ = 0.0f;
-    // Per vertex (its address in RDRAM and how many times it was used this
-    // frame, for instanced meshes): its traced values smoothed over frames, so
-    // a few rays a vertex don't flicker.
-    struct RtHistory {
-        f32 v[3];
-        u32 frame;
-    };
-    std::unordered_map<u64, RtHistory> rt_hist_;
-    std::unordered_map<u32, u16> rt_uses_;
     u32 rt_frame_no_ = 0;
     u32 hires_req_scale_ = 1; // what set_hires_scale() asked for
     bool rt_native_unsupported_ = false; // the factory's renderer can't trace rays
     void rt_new_frame();
     void update_hires(u32 scale);
-    // Smooths traced values (count of them) of the vertex in `slot`.
-    void rt_smooth(u32 slot, f32* vals, int count);
     orbit64::rt::RTVector3 rt_eye_{}; // the camera, in modelview space
     bool rt_frame_view(); // false when the projection isn't a perspective one
-    void rt_light_vertex(u32 slot, Vertex& v, const orbit64::rt::RTVector3& n, u32 seed);
     void rt_triangle(u32 a, u32 b, u32 c);
-    // Per-pixel ray tracing (HiResRenderer::ray_trace) when the renderer can:
-    // the vertices are then left as the game lit them.
+    // Whether the renderer traces rays (HiResRenderer::ray_trace).
     bool rt_pixel_mode() const { return hires_ && hires_->supports_ray_tracing(); }
     bool rt_cur_3d_ = false;     // the triangle being drawn is a 3D one
     bool rt_cur_casts_ = false;  // ... and an opaque one, in the scene

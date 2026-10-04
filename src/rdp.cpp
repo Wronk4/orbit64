@@ -402,7 +402,6 @@ void RDP::update_hires(u32 scale) {
 void RDP::set_raytracing(bool on) {
     if (on == raytracing_enabled_) return;
     rt_.clear();
-    rt_hist_.clear();
     raytracing_enabled_ = on;
     update_hires(hires_req_scale_);
 }
@@ -414,21 +413,7 @@ void RDP::rt_new_frame() {
         if (rt_frame_no_ < 2) rt_sun_ = rt_sun_next_;
     }
     rt_sun_best_ = 0.0f;
-    rt_uses_.clear();
     ++rt_frame_no_;
-    if (rt_hist_.size() > 200000) rt_hist_.clear();
-}
-
-void RDP::rt_smooth(u32 slot, f32* vals, int count) {
-    const u32 addr = raw_vertex[slot].src;
-    const u64 key = (static_cast<u64>(rt_uses_[addr]++) << 32) | addr;
-    auto it = rt_hist_.find(key);
-    if (it != rt_hist_.end() && rt_frame_no_ - it->second.frame <= 2) {
-        for (int i = 0; i < count; ++i) vals[i] = it->second.v[i] * 0.7f + vals[i] * 0.3f;
-    }
-    RtHistory& h = rt_hist_[key];
-    for (int i = 0; i < count; ++i) h.v[i] = vals[i];
-    h.frame = rt_frame_no_;
 }
 
 HiResTarget* RDP::hires_target(u8* rdram, size_t rdram_size) {
@@ -1112,9 +1097,9 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         }
     }
 
-    // Ray tracing: the vertices' positions in modelview space, where the
-    // last frame's triangles are; lit ones are traced right away.
-    const bool rt_on = raytracing_enabled_ && rt_frame_view();
+    // Ray tracing (per pixel, by renderers that can): the vertices'
+    // positions in modelview space, and for lit ones normals and lights.
+    const bool rt_on = raytracing_enabled_ && rt_pixel_mode() && rt_frame_view();
     const Matrix4x4& rt_mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
     if (rt_on && (geometry_mode & 0x00020000) && !cbfd_) {
         // The frame's strongest directional light also lights the unlit
@@ -1291,8 +1276,6 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
                 rt_nrm_[dest_idx] = orbit64::rt::RTVector3(tnx, tny, tnz).normalized();
                 rt_lset_[dest_idx] = rt_ls;
             }
-            if ((geometry_mode & 0x00020000) && !cbfd_ && rt_.active().ready() && !rt_pixel_mode())
-                rt_light_vertex(dest_idx, v, {tnx, tny, tnz}, cur_vtx * 2654435761u);
         }
         // G_FOG: the shade alpha is the fog factor, z/w scaled and offset as
         // gSPFogPosition set it up (0 behind the eye), for the blender's A_SHADE.
@@ -1447,44 +1430,7 @@ bool RDP::rt_frame_view() {
     return true;
 }
 
-// A lit vertex, lit again: the game's ambient and directional lights, with
-// ambient occlusion on the ambient, traced shadows on the two strongest
-// lights and a specular highlight from the strongest.
-void RDP::rt_light_vertex(u32 slot, Vertex& v, const orbit64::rt::RTVector3& normal, u32 seed) {
-    using orbit64::rt::RTVector3;
-    const auto& scene = rt_.active();
-    const RTVector3 p = rt_pos_[slot];
-    const RTVector3 n = normal.normalized();
-    // Ambient occlusion and the shadows of the first two lights, smoothed
-    // over frames.
-    f32 vals[3] = {scene.compute_ao(p, n, scene.scale() * 1.5f, 8, seed), 1.0f, 1.0f};
-    for (size_t i = 0; i < dir_lights.size() && i < 2; ++i) {
-        const auto& l = dir_lights[i];
-        const RTVector3 ld(l.dx, l.dy, l.dz);
-        if (n.dot(ld) > 0.0f && (l.r | l.g | l.b) != 0)
-            vals[1 + i] = scene.compute_shadow(p, n, ld, 1e30f, 6, 0.05f, seed + static_cast<u32>(i));
-    }
-    rt_smooth(slot, vals, 3);
-    const f32 ao = 1.0f - rt_ao_strength_ * 0.35f * (1.0f - vals[0]);
-    f32 r = ambient_light.r * ao, g = ambient_light.g * ao, b = ambient_light.b * ao;
-    for (size_t i = 0; i < dir_lights.size(); ++i) {
-        const auto& l = dir_lights[i];
-        const f32 ndl = n.dot(RTVector3(l.dx, l.dy, l.dz));
-        if (ndl <= 0.0f) continue;
-        const f32 shadow = i < 2 ? 1.0f - rt_shadow_strength_ * (1.0f - vals[1 + i]) : 1.0f;
-        r += l.r * ndl * shadow;
-        g += l.g * ndl * shadow;
-        b += l.b * ndl * shadow;
-    }
-    v.r = static_cast<u8>(std::clamp(r, 0.0f, 255.0f));
-    v.g = static_cast<u8>(std::clamp(g, 0.0f, 255.0f));
-    v.b = static_cast<u8>(std::clamp(b, 0.0f, 255.0f));
-    rt_state_[slot] = 2;
-}
-
-// A 3D triangle: into the scene the next frame traces, and its unlit
-// corners (scenery with baked colours, which most of a level is) darkened
-// by ambient occlusion and by the shadow of the main light.
+// A 3D triangle: into the scene the frame's per-pixel pass traces.
 void RDP::rt_triangle(u32 a, u32 b, u32 c) {
     using orbit64::rt::RTVector3;
     const u32 n_slots = static_cast<u32>(rt_state_.size());
@@ -1520,33 +1466,6 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
         }
         scene_b.add_triangle(pa, pb, pc, attr);
         rt_cur_casts_ = true;
-    }
-
-    if (rt_state_[a] != 1 && rt_state_[b] != 1 && rt_state_[c] != 1) return;
-    const auto& scene = rt_.active();
-    RTVector3 n = (pb - pa).cross(pc - pa);
-    if (!scene.ready() || n.length_squared() <= 0.0f || rt_pixel_mode()) {
-        rt_state_[a] = rt_state_[b] = rt_state_[c] = 2;
-        return;
-    }
-    n = n.normalized();
-    // The side the camera sees (the triangle is being drawn).
-    if (n.dot(rt_eye_ - pa) < 0.0f) n = -n;
-    const f32 radius = scene.scale() * 1.5f;
-    for (u32 s : {a, b, c}) {
-        if (rt_state_[s] != 1) continue;
-        rt_state_[s] = 2;
-        const RTVector3 p = rt_pos_[s];
-        // Seeded by the vertex's address: the same rays every frame.
-        const u32 seed = raw_vertex[s].src * 2654435761u;
-        f32 vals[2] = {scene.compute_ao(p, n, radius, 8, seed), 1.0f};
-        if (n.dot(rt_sun_) > 0.05f) vals[1] = scene.compute_shadow(p, n, rt_sun_, 1e30f, 6, 0.06f, seed);
-        rt_smooth(s, vals, 2);
-        const f32 k = (1.0f - rt_ao_strength_ * 0.35f * (1.0f - vals[0])) * (1.0f - rt_shadow_strength_ * (1.0f - vals[1]));
-        Vertex& v = vertex_cache[s];
-        v.r = static_cast<u8>(v.r * k);
-        v.g = static_cast<u8>(v.g * k);
-        v.b = static_cast<u8>(v.b * k);
     }
 }
 

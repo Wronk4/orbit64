@@ -1,7 +1,7 @@
 #pragma once
-// Ray tracing for the HLE renderer: the triangles a frame drew, in a BVH, for
-// the next frame's vertex lighting to trace shadow and ambient occlusion rays
-// against (RDP::execute_vtx / RDP::emit_triangle). Positions are in the space
+// Ray tracing for the HLE renderer: the triangles a frame drew, in a BVH, that
+// the GPU traces shadow, ambient occlusion and lighting rays against per pixel
+// (RDP::rt_pixel_flush, shaders/ext/rt_trace.comp). Positions are in the space
 // the modelview puts them in, which is the same for every object of a frame.
 
 #include "common.hpp"
@@ -191,8 +191,8 @@ private:
     f32 bias(const RTVector3& pos) const { return std::max(scale_ * 0.02f, pos.length() * 1e-4f); }
 };
 
-// Two scenes: the frame being drawn adds to one while vertex lighting traces
-// against the last finished frame's.
+// Two scenes: the frame being drawn adds to one; the other is the last
+// finished frame's.
 class FrameScenes {
 public:
     RayTracingScene& building() { return scenes_[cur_ ^ 1]; }
