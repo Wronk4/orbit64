@@ -290,7 +290,6 @@ void main() {
     // Soft shadow from the main light.
     float lit = 1.0;
     vec3 l = P.sun.xyz;
-    if (relight && D[ls + 3u] != 0u) l = normalize(v3(ls + 4u));
     float ndl = dot(relight ? sn : n, l);
     if (traced && ndl > 0.0 && dot(n, l) > -0.2) {
         basis(l, t1, b1);
@@ -373,7 +372,9 @@ void main() {
         uint count = D[ls + 3u];
         vec3 view = normalize(P.eye.xyz - p);
         for (uint k = 0u; k < count && k < 2u; ++k) {
-            vec3 ld = normalize(v3(ls + 4u + k * 6u));
+            // The main light comes from the sun (where the shadows fall
+            // from), with the game's colour; the other as the game has it.
+            vec3 ld = k == 0u ? P.sun.xyz : normalize(v3(ls + 4u + k * 6u));
             vec3 col = v3(ls + 7u + k * 6u) / 255.0;
             vec3 c = col * max(dot(sn, ld), 0.0);
             if (k == 0u) {
