@@ -19,6 +19,10 @@
 //   pr0..pr3  rows of the projection: modelview space -> clip
 //   refl      reflection strength of water and of metal, ripples, time
 //   gi        global illumination strength, bounce ray length
+//   sunc      sunlight's colour times its strength, -
+//   fx        light shafts, haze, lens flare, cool shade (strengths)
+//   sunscr    the sun on screen (native pixels), 1 when in front of the eye,
+//             the distance haze and light shafts build up over
 #define RT_PARAMS                                                                                    \
     layout(std140, UNIFORM(0)) uniform Params {                                                      \
         vec4 ip0, ip1, ip2, ip3;                                                                     \
@@ -29,6 +33,7 @@
         vec4 pr0, pr1, pr2, pr3;                                                                     \
         vec4 refl;                                                                                   \
         vec4 gi;                                                                                     \
+        vec4 sunc, fx, sunscr;                                                                       \
     } P;
 
 // Per pixel in the occlusion buffer (8 words): shadow | ao << 16, distance,
@@ -37,7 +42,10 @@
 // 0..1): (base r, g), (base b, main r), (main g, b), (shade r, g),
 // (shade b, 1 when there is lighting), then the reflection to blend in
 // (RGBA8: colour, alpha the amount), the light bounced off what is around
-// (RGB8), 1 when shadow and hemisphere rays were traced here.
+// (RGB8), then bit 0: shadow and hemisphere rays were traced here, bit 1:
+// sky (nothing 3D drawn), bit 2: not shaded (what the BVH doesn't hold, a
+// billboard: only haze, shafts and flare), bits 8-15: N.L toward the sun, 16-31: light
+// shafts (sunlit air along the eye ray).
 #define OCC_WORDS 10u
 
 // RayTracingScene::kTriWords and the flags in a triangle's word 25.

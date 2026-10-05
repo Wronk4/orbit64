@@ -105,6 +105,17 @@ struct Settings {
     bool rt_reflections = true;    // ray-traced reflections on water and metal
     int rt_gi = 60;                // 0..100: global illumination (path-traced bounced light)
     int rt_quality = 0;            // 0 fast, 1 balanced, 2 ultra (shadow and bounce rays for every pixel)
+    // The sun (ray tracing): direction in degrees, softness, strength, warmth.
+    int sun_azimuth = 53;          // 0..359 around the world's up
+    int sun_elevation = 58;        // 5..90 above the horizon
+    int sun_softness = 28;         // 0..100 shadow edges
+    int sun_strength = 100;        // 50..200 %
+    int sun_warmth = 30;           // 0..100 white to orange
+    // Cinematic effects (ray tracing), 0..100.
+    int rt_shafts = 40;            // light shafts (volumetric light)
+    int rt_haze = 25;              // atmospheric haze
+    int rt_flare = 35;             // sun glow and lens flare
+    int rt_cool_shade = 50;        // cool, sky-lit shade
     // Post-processing of the shown frame (src/gpu/postfx.hpp; Vulkan).
     bool postfx = true;
     int pfx_bloom = 60;      // 0..100
@@ -114,6 +125,8 @@ struct Settings {
     int pfx_vignette = 15;   // 0..100
     bool pfx_fxaa = true;
     bool pfx_tonemap = true;
+    int pfx_chroma = 15;     // 0..100 chromatic aberration
+    int pfx_grain = 0;       // 0..100 film grain
     // NVIDIA DLSS on the shown frame (src/gpu/dlss.hpp): 0 off, 1 DLAA,
     // 2 Quality, 3 Balanced, 4 Performance, 5 Ultra Performance.
     int dlss_mode = 2;

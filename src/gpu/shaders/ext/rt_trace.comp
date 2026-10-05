@@ -184,6 +184,21 @@ vec4 reflection(vec3 o, vec3 r) {
     return vec4(load_color(uint(q.y) * P.dims.x + uint(q.x)), sky ? 0.9 : 0.4);
 }
 
+// Light shafts: the fraction of points along the eye ray up to `len` that
+// see the sun, times how much air that is (fog distance P.sunscr.w).
+float shafts(vec3 a, vec3 d, float len, float noise) {
+    const uint steps = 12u;
+    float open = 0.0;
+    vec3 l = P.sun.xyz;
+    for (uint k = 0u; k < steps; ++k) {
+        float tt = len * (float(k) + fract(noise + 0.618034 * float(k))) / float(steps);
+        float tm = 1e30;
+        vec2 ignored;
+        if (trace(a + d * tt, l, tm, true, ignored, true) == 0xFFFFFFFFu) open += 1.0;
+    }
+    return open / float(steps) * (1.0 - exp(-len / P.sunscr.w));
+}
+
 uint pack_reflection(vec3 c, float a) {
     uvec4 v = uvec4(clamp(vec4(c, a), 0.0, 1.0) * 255.0 + 0.5);
     return v.r | (v.g << 8) | (v.b << 16) | (v.a << 24);
@@ -209,9 +224,8 @@ void main() {
     }
 
     float zb = depth_buf[idx];
-    if (!(zb < 1e29)) return; // nothing 3D drawn here
-    int z18 = z_decompress(int(zb) >> 4);
-    if (z18 >= 0x3FFF0) return; // the far plane: cleared
+    int z18 = zb < 1e29 ? z_decompress(int(zb) >> 4) : 0x3FFFF;
+    bool has_depth = z18 < 0x3FFF0; // else nothing 3D was drawn here (the far plane: cleared)
 
     // The pixel's centre in screen space, then NDC.
     float inv_s = P.vpz.z;
@@ -230,6 +244,18 @@ void main() {
     if (!(len > 0.0)) return;
     d /= len;
     float t = len;
+
+    if (!has_depth) {
+        // The sky: light shafts across it, the sun's flare over it.
+        if (!second) {
+            occ[ob + 1u] = floatBitsToUint(P.vpz.w * 400.0);
+            occ[ob + 9u] = 2u;
+        } else {
+            float v = P.fx.x > 0.0 ? shafts(a, d, P.sunscr.w * 1.5, ign(vec2(px))) : 0.0;
+            occ[ob + 9u] = 3u | (uint(clamp(v, 0.0, 1.0) * 65535.0) << 16);
+        }
+        return;
+    }
     vec2 uv;
     uint hit = trace(a, d, t, false, uv, false);
     if (hit == 0xFFFFFFFFu) return;
@@ -271,7 +297,14 @@ void main() {
     float dist = distance(p, P.eye.xyz);
     // Something the BVH doesn't hold (a billboard, a cut-out texture) in
     // front: leave the pixel alone.
-    if (distance(p, pz) > 0.03 * dist + 0.5 * scale) return;
+    if (distance(p, pz) > 0.03 * dist + 0.5 * scale) {
+        // Still in the air the haze and light shafts are in (bit 2: no shading).
+        if (!second) {
+            occ[ob + 1u] = floatBitsToUint(distance(pz, P.eye.xyz));
+            occ[ob + 9u] = 4u;
+        }
+        return;
+    }
     vec3 n = v3(hit + 9u);
     if (dot(n, d) > 0.0) n = -n;
     // A lit triangle: its own lights, and its corners' normals blended
@@ -299,6 +332,7 @@ void main() {
     float lit = 1.0;
     vec3 l = P.sun.xyz;
     float ndl = dot(relight ? sn : n, l);
+    if (!second) occ[ob + 9u] = uint(clamp(ndl, 0.0, 1.0) * 255.0) << 8;
     if (traced && ndl > 0.0 && dot(n, l) > -0.2) {
         basis(l, t1, b1);
         uint ns = P.misc.z;
@@ -309,7 +343,9 @@ void main() {
             vec3 dir = normalize(l + t1 * (r * cos(ang)) + b1 * (r * sin(ang)));
             float tm = 1e30;
             vec2 ignored;
-            if (trace(o + l * bias, dir, tm, true, ignored, true) == 0xFFFFFFFFu) open += 1.0;
+            // Started well off the surface toward the light: the faceted ground of
+            // N64 games would otherwise shadow itself at low sun angles.
+            if (trace(o + l * max(bias, scale * 0.3), dir, tm, true, ignored, true) == 0xFFFFFFFFu) open += 1.0;
         }
         lit = open / float(ns);
         // Surfaces whose colours the game lit (baked into the vertices) get
@@ -356,7 +392,8 @@ void main() {
     if (second) {
         occ[ob] = uint(clamp(lit, 0.0, 1.0) * 65535.0) | (uint(ao * 65535.0) << 16);
         occ[ob + 8u] = pack_reflection(bounce, 0.0);
-        occ[ob + 9u] = 1u;
+        float v = P.fx.x > 0.0 ? shafts(a, d, distance(a, p), noise) : 0.0;
+        occ[ob + 9u] = (occ[ob + 9u] & 0xFF00u) | 1u | (uint(clamp(v, 0.0, 1.0) * 65535.0) << 16);
         return;
     }
     occ[ob + 1u] = floatBitsToUint(dist);
