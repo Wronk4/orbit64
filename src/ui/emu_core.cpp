@@ -521,6 +521,7 @@ void EmuCore::run_one_frame(FrameClock& fc) {
     emu_->get_rdp().set_rt_pixel_lighting(rt_pixel_lighting_.load(), rt_specular_.load() / 100.0f);
     emu_->get_rdp().set_rt_reflections(rt_reflections_.load());
     emu_->get_rdp().set_rt_gi(rt_gi_.load() / 100.0f);
+    emu_->get_rdp().set_rt_quality(static_cast<u32>(rt_quality_.load()));
     std::string gb_rom[4];
     {
         std::lock_guard<std::mutex> lk(input_mutex_);

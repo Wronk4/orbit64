@@ -116,6 +116,9 @@ struct RtPass {
     u32 lights_offset = 0;     // word offset of the light sets in bvh
     f32 water_reflect = 0.0f, metal_reflect = 0.0f; // reflection strengths (0: none)
     f32 gi = 0.0f;             // global illumination strength (0: ambient occlusion only)
+    // 0 fast (shadow and bounce rays once per native pixel), 1 balanced
+    // (twice as dense each way), 2 ultra (every pixel, more rays).
+    u32 quality = 0;
     u64 tex_batch = 0;         // the batch the cut-outs' texture states are valid in
     u32 frame = 0;
 };
