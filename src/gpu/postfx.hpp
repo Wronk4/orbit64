@@ -20,6 +20,8 @@ public:
         float vignette = 0.15f; // 0..1
         float exposure = 1.0f;
         float contrast = 1.1f;
+        float chroma = 0.0f;    // chromatic aberration 0..1
+        float grain = 0.0f;     // film grain 0..1
         bool tonemap = true;
         bool fxaa = true;
     };

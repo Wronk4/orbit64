@@ -616,6 +616,9 @@ void App::update_input() {
     core_.set_rt_reflections(settings_.rt_reflections);
     core_.set_rt_gi(settings_.rt_gi);
     core_.set_rt_quality(settings_.rt_quality);
+    core_.set_rt_sun(settings_.sun_azimuth, settings_.sun_elevation, settings_.sun_softness, settings_.sun_strength,
+                     settings_.sun_warmth);
+    core_.set_rt_effects(settings_.rt_shafts, settings_.rt_haze, settings_.rt_flare, settings_.rt_cool_shade);
     core_.set_expansion_pak(settings_.expansion_pak);
 }
 
@@ -723,6 +726,8 @@ SDL_Texture* App::postprocess(const std::uint32_t* px, int w, int h) {
     p.vignette = settings_.pfx_vignette / 100.0f;
     p.fxaa = settings_.pfx_fxaa;
     p.tonemap = settings_.pfx_tonemap;
+    p.chroma = settings_.pfx_chroma / 100.0f;
+    p.grain = settings_.pfx_grain / 100.0f;
     SDL_GPUTexture* out = nullptr;
     if (px)
         out = postfx_->run(px, w, h, p);

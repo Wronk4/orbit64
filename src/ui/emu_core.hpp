@@ -165,6 +165,13 @@ public:
     void set_rt_reflections(bool on) { rt_reflections_ = on; }
     void set_rt_gi(int strength) { rt_gi_ = strength; } // 0..100
     void set_rt_quality(int q) { rt_quality_ = q; }      // 0 fast, 1 balanced, 2 ultra
+    // The sun (degrees, 0..100, %, 0..100) and the cinematic effects (0..100).
+    void set_rt_sun(int azimuth, int elevation, int softness, int strength, int warmth) {
+        sun_[0] = azimuth; sun_[1] = elevation; sun_[2] = softness; sun_[3] = strength; sun_[4] = warmth;
+    }
+    void set_rt_effects(int shafts, int haze, int flare, int cool) {
+        fx_[0] = shafts; fx_[1] = haze; fx_[2] = flare; fx_[3] = cool;
+    }
     // Who renders internal resolutions above 1 (the GPU renderer), or
     // nullptr for the CPU. Applied at the next frame; the high-resolution
     // buffers start over.
@@ -268,6 +275,8 @@ private:
     std::atomic<bool> rt_reflections_{true};
     std::atomic<int> rt_gi_{60};
     std::atomic<int> rt_quality_{0};
+    std::atomic<int> sun_[5] = {53, 58, 28, 100, 30};
+    std::atomic<int> fx_[4] = {40, 25, 35, 50};
     std::mutex factory_mutex_;
     HiResFactory hires_factory_;
     bool factory_dirty_ = false; // guarded by factory_mutex_

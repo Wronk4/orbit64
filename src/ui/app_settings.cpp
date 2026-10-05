@@ -385,6 +385,42 @@ void App::settings_graphics() {
                   cw);
         if (slider_int("rtgi", &settings_.rt_gi, 0, 100, "%d%%", cw)) core_.set_rt_gi(settings_.rt_gi);
         row_end();
+        // The sun.
+        auto sun_changed = [&] {
+            core_.set_rt_sun(settings_.sun_azimuth, settings_.sun_elevation, settings_.sun_softness,
+                             settings_.sun_strength, settings_.sun_warmth);
+        };
+        row_begin("Sun direction", "Where the sun stands, around the world (degrees).", cw);
+        if (slider_int("sunaz", &settings_.sun_azimuth, 0, 359, "%d\xC2\xB0", cw)) sun_changed();
+        row_end();
+        row_begin("Sun height", "How high above the horizon: low for long evening shadows, high for midday.", cw);
+        if (slider_int("sunel", &settings_.sun_elevation, 5, 90, "%d\xC2\xB0", cw)) sun_changed();
+        row_end();
+        row_begin("Shadow softness", "Sharp shadows of a small, bright sun to soft, hazy ones.", cw);
+        if (slider_int("sunsoft", &settings_.sun_softness, 0, 100, "%d%%", cw)) sun_changed();
+        row_end();
+        row_begin("Sun strength", "How bright sunlight is.", cw);
+        if (slider_int("sunstr", &settings_.sun_strength, 50, 200, "%d%%", cw)) sun_changed();
+        row_end();
+        row_begin("Sun warmth", "White midday light to the orange of a setting sun.", cw);
+        if (slider_int("sunwarm", &settings_.sun_warmth, 0, 100, "%d%%", cw)) sun_changed();
+        row_end();
+        // Cinematic effects.
+        auto fx_changed = [&] {
+            core_.set_rt_effects(settings_.rt_shafts, settings_.rt_haze, settings_.rt_flare, settings_.rt_cool_shade);
+        };
+        row_begin("Light shafts", "Volumetric light: sunbeams through the air, traced past what blocks the sun.", cw);
+        if (slider_int("rtshaft", &settings_.rt_shafts, 0, 100, "%d%%", cw)) fx_changed();
+        row_end();
+        row_begin("Atmospheric haze", "Distance fades into the colour of the sky, warmer toward the sun.", cw);
+        if (slider_int("rthaze", &settings_.rt_haze, 0, 100, "%d%%", cw)) fx_changed();
+        row_end();
+        row_begin("Lens flare", "The sun's glow and lens flare when it is in view and not hidden.", cw);
+        if (slider_int("rtflare", &settings_.rt_flare, 0, 100, "%d%%", cw)) fx_changed();
+        row_end();
+        row_begin("Cool shade", "Shade lit by the blue sky, sunlit areas by the warm sun: a filmic look.", cw);
+        if (slider_int("rtcool", &settings_.rt_cool_shade, 0, 100, "%d%%", cw)) fx_changed();
+        row_end();
         row_begin("Reflections",
                   "Ray-traced reflections on water and on metal (what the game environment-maps): the scene "
                   "mirrored where it is on screen, the sky beyond.",
@@ -440,6 +476,12 @@ void App::settings_graphics() {
             row_end();
             row_begin("Contrast", "A filmic S-curve: deeper shadows, brighter mid-tones.", cw);
             slider_int("pfxcon", &settings_.pfx_contrast, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Chromatic aberration", "Colour fringes toward the edges, as through a camera lens.", cw);
+            slider_int("pfxca", &settings_.pfx_chroma, 0, 100, "%d%%", cw);
+            row_end();
+            row_begin("Film grain", "Fine, moving grain, as on film.", cw);
+            slider_int("pfxgrain", &settings_.pfx_grain, 0, 100, "%d%%", cw);
             row_end();
             row_begin("Vignette", "Darkens the corners of the picture.", cw);
             slider_int("pfxvig", &settings_.pfx_vignette, 0, 100, "%d%%", cw);

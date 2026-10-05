@@ -144,6 +144,16 @@ public:
     void set_rt_gi(f32 strength) { rt_gi_ = strength; }
     // 0 fast, 1 balanced, 2 ultra (RtPass::quality).
     void set_rt_quality(u32 q) { rt_quality_ = q; }
+    // The sun: direction (degrees: azimuth around the world's up, elevation
+    // above the horizon), shadow softness 0..1, strength, warmth 0..1.
+    void set_rt_sun(f32 azimuth, f32 elevation, f32 softness, f32 strength, f32 warmth);
+    // Light shafts, haze, lens flare and cool shade, 0..1 each.
+    void set_rt_effects(f32 shafts, f32 haze, f32 flare, f32 cool_shade) {
+        rt_shafts_ = shafts;
+        rt_haze_ = haze;
+        rt_flare_ = flare;
+        rt_cool_ = cool_shade;
+    }
 
     // Frontend status queries (read-only).
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
@@ -528,6 +538,9 @@ private:
     bool rt_reflections_ = true;    // on water and metal
     f32 rt_gi_ = 0.6f;              // global illumination strength
     u32 rt_quality_ = 0;
+    f32 rt_sun_cone_ = 0.023f;
+    f32 rt_sun_color_[3] = {1.0f, 0.96f, 0.9f};
+    f32 rt_shafts_ = 0.4f, rt_haze_ = 0.25f, rt_flare_ = 0.35f, rt_cool_ = 0.5f;
     u32 rt_dbg_water_ = 0;
     f32 rt_specular_ = 0.35f;
     // Before drawing into `hr`: the 3D scene drawn so far gets its pass when

@@ -1,8 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Applies rt_trace.comp's shadows and ambient occlusion to the colour buffer:
-// a depth-aware 5x5 filter of the traced values (few rays per pixel are
-// noisy), then the pixel's colour scaled down by them.
+// Applies rt_trace.comp's results to the colour buffer: a depth-aware 5x5
+// filter of the traced values (few rays per pixel are noisy), then per pixel
+// shadows, ambient occlusion and per-pixel lighting, bounced light,
+// reflections, the colour of sunlight and of shade, atmospheric haze, light
+// shafts and the sun's glow and lens flare.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -17,6 +19,53 @@ layout(std430, RW_BUFFER(0)) buffer ColorBuffer { uint color_buf[]; };
 
 RT_PARAMS
 
+// The eye ray's direction through a pixel (modelview space).
+vec3 view_dir(uvec2 px) {
+    float inv_s = P.vpz.z;
+    float xn = ((float(px.x) + 0.5) * inv_s - P.vp.z) / P.vp.x;
+    float yn = -((float(px.y) + 0.5) * inv_s - P.vp.w) / P.vp.y;
+    vec4 a = xn * P.ip0 + yn * P.ip1 - P.ip2 + P.ip3;
+    vec4 b = xn * P.ip0 + yn * P.ip1 + P.ip2 + P.ip3;
+    return normalize(b.xyz / b.w - a.xyz / a.w);
+}
+
+// How much of the sun shows around its position on screen (sky there).
+float sun_visible(uint W, uint H) {
+    if (P.sunscr.z < 0.5) return 0.0;
+    vec2 sp = P.sunscr.xy / P.vpz.z;
+    float r = 3.0 / P.vpz.z + 2.0, v = 0.0;
+    const vec2 taps[5] = vec2[](vec2(0.0), vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
+    for (int i = 0; i < 5; ++i) {
+        ivec2 q = ivec2(sp + taps[i] * r);
+        if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
+        if ((occ[(uint(q.y) * W + uint(q.x)) * OCC_WORDS + 9u] & 2u) != 0u) v += 0.2;
+    }
+    return v;
+}
+
+// The sun's glow, a horizontal streak and ghosts along the line through the
+// centre of the screen, in 0..255 units.
+vec3 lens_flare(uvec2 px, uint W, uint H, float vis) {
+    vec2 sp = P.sunscr.xy / P.vpz.z, p = vec2(px) + 0.5, c = vec2(W, H) * 0.5;
+    float h = float(H);
+    vec3 sun = P.sunc.rgb;
+    float dsun = distance(p, sp);
+    vec3 o = sun * (exp(-dsun / (0.08 * h)) * 0.5 + exp(-dsun / (0.012 * h)) * 1.4);
+    vec2 dd = abs(p - sp);
+    o += sun * exp(-dd.y / (0.004 * h)) * exp(-dd.x / (0.35 * float(W))) * 0.35;
+    const float f[5] = float[](0.55, 1.0, 1.45, 1.9, 2.4);
+    const float rad[5] = float[](0.045, 0.018, 0.07, 0.028, 0.11);
+    const vec3 col[5] = vec3[](vec3(1.0, 0.7, 0.4), vec3(0.5, 1.0, 0.6), vec3(0.4, 0.6, 1.0), vec3(1.0, 0.5, 0.8),
+                               vec3(0.6, 0.8, 1.0));
+    for (int i = 0; i < 5; ++i) {
+        vec2 g = sp + (c - sp) * f[i];
+        float r = rad[i] * h;
+        float disc = smoothstep(r, r * 0.6, distance(p, g));
+        o += col[i] * disc * 0.22;
+    }
+    return o * vis * 255.0;
+}
+
 void main() {
     uvec2 px = gl_GlobalInvocationID.xy;
     uint W = P.dims.x, H = P.dims.y;
@@ -25,18 +74,23 @@ void main() {
     uint ob = idx * OCC_WORDS;
     float dist = uintBitsToFloat(occ[ob + 1u]);
     if (!(dist > 0.0)) return;
+    uint w9 = occ[ob + 9u];
+    bool sky = (w9 & 2u) != 0u;
+    bool unshaded = (w9 & 4u) != 0u;
+    float ndl = float((w9 >> 8) & 0xFFu) / 255.0;
 
     // The traced pixels around: the grid's, 5 x 5 of them.
     int step = int(P.misc.w);
     ivec2 base = (ivec2(px) / step) * step;
-    float sum_w = 0.0, lit = 0.0, ao = 0.0;
+    float sum_w = 0.0, lit = 0.0, ao = 0.0, shafts = 0.0, sum_ws = 0.0;
     vec3 bounce = vec3(0.0);
     for (int dy = -2; dy <= 2; ++dy)
         for (int dx = -2; dx <= 2; ++dx) {
             ivec2 q = base + ivec2(dx, dy) * step;
             if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
             uint j = uint(q.y) * W + uint(q.x);
-            if (occ[j * OCC_WORDS + 9u] == 0u) continue;
+            uint qw9 = occ[j * OCC_WORDS + 9u];
+            if ((qw9 & 1u) == 0u) continue;
             float qd = uintBitsToFloat(occ[j * OCC_WORDS + 1u]);
             if (!(qd > 0.0)) continue;
             vec2 off = vec2(q - ivec2(px)) / float(step);
@@ -46,36 +100,77 @@ void main() {
             bounce += w * vec3(float(bc & 0xFFu), float((bc >> 8) & 0xFFu), float((bc >> 16) & 0xFFu));
             lit += w * float(v & 0xFFFFu);
             ao += w * float(v >> 16);
+            // Light in the air varies slowly: smoothed across depth too.
+            float ws = exp(-abs(qd - dist) / (0.2 * dist)) * exp(-dot(off, off) * 0.12);
+            shafts += ws * float(qw9 >> 16);
+            sum_ws += ws;
             sum_w += w;
         }
-    if (sum_w <= 0.0) return;
-    lit /= sum_w * 65535.0;
-    ao /= sum_w * 65535.0;
-    bounce /= sum_w * 255.0;
-
-    float shadow = 1.0 - P.strength.x * (1.0 - lit);
-    float occlusion = 1.0 - P.strength.y * (1.0 - ao);
-    vec3 k = vec3(shadow * occlusion);
-    vec2 w6 = unpackHalf2x16(occ[ob + 6u]);
-    if (w6.y > 0.5) {
-        // Per-pixel lighting: the colour scaled from the shade the game
-        // interpolated to the light this pixel gets (clamped as the RSP does).
-        vec2 a = unpackHalf2x16(occ[ob + 2u]), b = unpackHalf2x16(occ[ob + 3u]), c2 = unpackHalf2x16(occ[ob + 4u]);
-        vec2 s = unpackHalf2x16(occ[ob + 5u]);
-        vec3 base = vec3(a, b.x), mainl = vec3(b.y, c2);
-        vec3 shade = vec3(s, w6.x);
-        vec3 light = min(base * occlusion + mainl * shadow, vec3(1.0));
-        k = clamp(light / max(shade, vec3(1.0 / 64.0)), 0.0, 3.0);
+    if (sum_w <= 0.0 && !unshaded) return;
+    if (sum_w > 0.0) {
+        lit /= sum_w * 65535.0;
+        ao /= sum_w * 65535.0;
+        bounce /= sum_w * 255.0;
     }
+    shafts /= max(sum_ws, 1e-6) * 65535.0;
+
     uint c = color_buf[idx];
     vec3 own = vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu));
-    // Light bounced off the surroundings, coloured by them, onto this
-    // surface (its colour standing in for how much it reflects).
-    vec3 rgb = own * k + own * bounce * (P.gi.x * 1.6);
-    // Reflections (water, metal) over the lit colour.
-    uint rf = occ[ob + 7u];
-    float ra = float(rf >> 24) / 255.0;
-    if (ra > 0.0) rgb = mix(rgb, vec3(float(rf & 0xFFu), float((rf >> 8) & 0xFFu), float((rf >> 16) & 0xFFu)), ra);
+    vec3 rgb = own;
+    vec3 d = view_dir(px);
+    vec3 sun = P.sunc.rgb;
+    float cosv = dot(d, P.sun.xyz);
+
+    if (!sky && !unshaded) {
+        float shadow = 1.0 - P.strength.x * (1.0 - lit);
+        float occlusion = 1.0 - P.strength.y * (1.0 - ao);
+        // Sunlight's colour and strength where the sun reaches.
+        vec3 k = vec3(shadow * occlusion) * mix(vec3(1.0), sun, lit * ndl);
+        vec2 w6 = unpackHalf2x16(occ[ob + 6u]);
+        if (w6.y > 0.5) {
+            // Per-pixel lighting: the colour scaled from the shade the game
+            // interpolated to the light this pixel gets (clamped as the RSP does).
+            vec2 a = unpackHalf2x16(occ[ob + 2u]), b = unpackHalf2x16(occ[ob + 3u]), c2 = unpackHalf2x16(occ[ob + 4u]);
+            vec2 s = unpackHalf2x16(occ[ob + 5u]);
+            vec3 basel = vec3(a, b.x), mainl = vec3(b.y, c2);
+            vec3 shade = vec3(s, w6.x);
+            vec3 light = min(basel * occlusion + mainl * shadow * sun, vec3(1.0));
+            k = clamp(light / max(shade, vec3(1.0 / 64.0)), 0.0, 3.0);
+        }
+        // Light bounced off the surroundings, coloured by them, onto this
+        // surface (its colour standing in for how much it reflects).
+        rgb = own * k + own * bounce * (P.gi.x * 1.6);
+        // Shade is lit by the sky: cooler, bluer.
+        float shaded = (1.0 - lit) * smoothstep(0.0, 0.3, ndl) + (1.0 - ao) * 0.5;
+        rgb *= mix(vec3(1.0), vec3(0.8, 0.9, 1.15), clamp(shaded, 0.0, 1.0) * P.fx.w);
+        // Reflections (water, metal) over the lit colour.
+        uint rf = occ[ob + 7u];
+        float ra = float(rf >> 24) / 255.0;
+        if (ra > 0.0) rgb = mix(rgb, vec3(float(rf & 0xFFu), float((rf >> 8) & 0xFFu), float((rf >> 16) & 0xFFu)), ra);
+    }
+    if (!sky) {
+        // Atmospheric haze: distance fades into the sky's colour, warmer
+        // toward the sun.
+        if (P.fx.y > 0.0) {
+            float fog = P.fx.y * (1.0 - exp(-dist / P.sunscr.w));
+            vec3 fog_col = mix(vec3(0.62, 0.74, 0.92), sun / max(max(sun.r, max(sun.g, sun.b)), 1e-3),
+                               pow(max(cosv, 0.0), 6.0) * 0.7);
+            rgb = mix(rgb, fog_col * 255.0, clamp(fog * 0.8, 0.0, 1.0));
+        }
+    }
+
+    // Light shafts: sunlit air between the eye and what it sees, scattered
+    // forward (strongest looking toward the sun).
+    if (P.fx.x > 0.0) {
+        float phase = 0.15 + 1.6 * pow(max(cosv, 0.0), 8.0) + 0.4 * pow(max(cosv, 0.0), 2.0);
+        rgb += sun * 255.0 * shafts * phase * P.fx.x * 0.6;
+    }
+    // The sun's glow and lens flare.
+    if (P.fx.z > 0.0) {
+        float vis = sun_visible(W, H);
+        if (vis > 0.0) rgb += lens_flare(px, W, H, vis) * P.fx.z;
+    }
+
     uvec3 o = uvec3(clamp(rgb + 0.5, 0.0, 255.0));
     color_buf[idx] = (c & 0xFF000000u) | (o.r << 16) | (o.g << 8) | o.b;
 }

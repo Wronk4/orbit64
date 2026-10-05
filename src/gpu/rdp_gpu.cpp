@@ -43,8 +43,9 @@ struct RtParams {
     f32 pr[16];
     f32 refl[4];
     f32 gi[4];
+    f32 sunc[4], fx[4], sunscr[4];
 };
-static_assert(sizeof(RtParams) == 72 * 4);
+static_assert(sizeof(RtParams) == 84 * 4);
 
 } // namespace
 
@@ -608,7 +609,7 @@ void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
     p.vpz[3] = pass.scene_scale;
     const f32 sl = std::sqrt(pass.sun[0] * pass.sun[0] + pass.sun[1] * pass.sun[1] + pass.sun[2] * pass.sun[2]);
     for (int i = 0; i < 3; ++i) p.sun[i] = sl > 0.0f ? pass.sun[i] / sl : (i == 1 ? 1.0f : 0.0f);
-    p.sun[3] = 0.06f; // shadow cone: soft edges
+    p.sun[3] = pass.sun_cone; // shadow cone: soft edges
     for (int i = 0; i < 3; ++i) p.eye[i] = pass.eye[i];
     p.eye[3] = pass.scene_scale * 3.0f; // ambient occlusion radius
     const u32 bvh = static_cast<u32>(data_.size());
@@ -620,7 +621,7 @@ void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
     p.misc[0] = pass.frame;
     // Quality: rays and the grid shadow and hemisphere rays are traced on.
     p.misc[1] = pass.quality >= 2 ? 10 : 6; // hemisphere rays: ambient occlusion and bounced light
-    p.misc[2] = pass.quality >= 2 ? 5 : 3;  // shadow rays
+    p.misc[2] = pass.quality >= 2 ? 6 : 4;  // shadow rays
     p.misc[3] = pass.quality >= 2 ? 1u : pass.quality == 1 ? std::max<u32>(1, scale_ / 2) : scale_;
     if (const char* e = std::getenv("ORBIT64_RT_GRID")) p.misc[3] = std::max(1, std::atoi(e)); // debugging
     p.strength[0] = pass.shadow_strength;
@@ -634,6 +635,13 @@ void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
     p.refl[2] = 1.0f;                                       // ripples
     p.refl[3] = static_cast<f32>(pass.frame % 100000) * 0.05f; // time
     p.gi[0] = pass.gi;
+    for (int i = 0; i < 3; ++i) p.sunc[i] = pass.sun_color[i];
+    p.fx[0] = pass.shafts;
+    p.fx[1] = pass.haze;
+    p.fx[2] = pass.flare;
+    p.fx[3] = pass.cool_shade;
+    for (int i = 0; i < 3; ++i) p.sunscr[i] = pass.sun_screen[i];
+    p.sunscr[3] = pass.scene_scale * 80.0f; // haze and shafts build up over this
     p.gi[1] = pass.scene_scale * 8.0f; // how far bounced light comes from
     RtJob job{t, t->last_depth, {}};
     std::memcpy(job.params, &p, sizeof p);
@@ -803,7 +811,7 @@ void RdpRenderer::submit(const Compose* c) {
             SDL_BindGPUComputeStorageBuffers(cp, 0, ro, 4);
             // Every pixel, then the grid's pixels' shadow and hemisphere rays
             // (RtParams::ofs[1], misc[3]: the grid).
-            u32 params[72];
+            u32 params[84];
             std::memcpy(params, j.params, sizeof params);
             for (u32 pass = 0; pass < 2; ++pass) {
                 const u32 grid = pass ? std::max<u32>(params[39], 1) : 1;

@@ -112,6 +112,10 @@ void Settings::reset_graphics() {
     scanlines = d.scanlines; show_fps_overlay = d.show_fps_overlay; fullscreen_mode = d.fullscreen_mode;
     hle_raytracing = d.hle_raytracing; rt_shadow = d.rt_shadow; rt_ao = d.rt_ao;
     rt_pixel_lighting = d.rt_pixel_lighting; rt_specular = d.rt_specular; rt_reflections = d.rt_reflections; rt_gi = d.rt_gi; rt_quality = d.rt_quality;
+    sun_azimuth = d.sun_azimuth; sun_elevation = d.sun_elevation; sun_softness = d.sun_softness;
+    sun_strength = d.sun_strength; sun_warmth = d.sun_warmth;
+    rt_shafts = d.rt_shafts; rt_haze = d.rt_haze; rt_flare = d.rt_flare; rt_cool_shade = d.rt_cool_shade;
+    pfx_chroma = d.pfx_chroma; pfx_grain = d.pfx_grain;
     postfx = d.postfx; pfx_bloom = d.pfx_bloom; pfx_sharpen = d.pfx_sharpen; pfx_vibrance = d.pfx_vibrance;
     pfx_contrast = d.pfx_contrast; pfx_vignette = d.pfx_vignette; pfx_fxaa = d.pfx_fxaa; pfx_tonemap = d.pfx_tonemap;
     dlss_mode = d.dlss_mode; dlss_temporal = d.dlss_temporal;
@@ -311,6 +315,10 @@ bool Settings::save(const std::string& path) const {
     w.kv("hle_raytracing", hle_raytracing); w.kv("rt_shadow", rt_shadow); w.kv("rt_ao", rt_ao);
     w.kv("rt_pixel_lighting", rt_pixel_lighting); w.kv("rt_specular", rt_specular);
     w.kv("rt_reflections", rt_reflections); w.kv("rt_gi", rt_gi); w.kv("rt_quality", rt_quality);
+    w.kv("sun_azimuth", sun_azimuth); w.kv("sun_elevation", sun_elevation); w.kv("sun_softness", sun_softness);
+    w.kv("sun_strength", sun_strength); w.kv("sun_warmth", sun_warmth);
+    w.kv("rt_shafts", rt_shafts); w.kv("rt_haze", rt_haze); w.kv("rt_flare", rt_flare);
+    w.kv("rt_cool_shade", rt_cool_shade); w.kv("pfx_chroma", pfx_chroma); w.kv("pfx_grain", pfx_grain);
     w.kv("postfx", postfx); w.kv("pfx_bloom", pfx_bloom); w.kv("pfx_sharpen", pfx_sharpen);
     w.kv("pfx_vibrance", pfx_vibrance); w.kv("pfx_contrast", pfx_contrast); w.kv("pfx_vignette", pfx_vignette);
     w.kv("pfx_fxaa", pfx_fxaa); w.kv("pfx_tonemap", pfx_tonemap);
@@ -381,6 +389,10 @@ bool Settings::load(const std::string& path) {
     r.get("rt_pixel_lighting", rt_pixel_lighting); r.get("rt_specular", rt_specular);
     r.get("rt_reflections", rt_reflections); r.get("rt_gi", rt_gi); r.get("rt_quality", rt_quality);
     rt_quality = std::clamp(rt_quality, 0, 2);
+    r.get("sun_azimuth", sun_azimuth); r.get("sun_elevation", sun_elevation); r.get("sun_softness", sun_softness);
+    r.get("sun_strength", sun_strength); r.get("sun_warmth", sun_warmth);
+    r.get("rt_shafts", rt_shafts); r.get("rt_haze", rt_haze); r.get("rt_flare", rt_flare);
+    r.get("rt_cool_shade", rt_cool_shade); r.get("pfx_chroma", pfx_chroma); r.get("pfx_grain", pfx_grain);
     r.get("postfx", postfx); r.get("pfx_bloom", pfx_bloom); r.get("pfx_sharpen", pfx_sharpen);
     r.get("pfx_vibrance", pfx_vibrance); r.get("pfx_contrast", pfx_contrast); r.get("pfx_vignette", pfx_vignette);
     r.get("pfx_fxaa", pfx_fxaa); r.get("pfx_tonemap", pfx_tonemap);

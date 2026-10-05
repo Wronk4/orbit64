@@ -100,6 +100,7 @@ int main(int argc, char* argv[]) {
     bool raytracing = false;
     bool gpu_hires = false;
     int rt_quality = 0;
+    float sun_az = 53.0f, sun_el = 58.0f; // --sun <azimuth>:<elevation> (degrees)
     bool postfx = false;
     int dlss_mode = 0;
 
@@ -146,6 +147,11 @@ int main(int argc, char* argv[]) {
                       : m == "ultra" ? gpu::Dlss::UltraPerformance : 0;
         } else if (arg == "--postfx") {
             postfx = true; // screenshots through the frontend's post-processing (needs --gpu)
+        } else if (arg == "--sun" && i + 1 < argc) {
+            const std::string s = argv[++i];
+            const size_t colon = s.find(':');
+            sun_az = std::stof(s.substr(0, colon));
+            if (colon != std::string::npos) sun_el = std::stof(s.substr(colon + 1));
         } else if (arg == "--rt-quality" && i + 1 < argc) {
             const std::string q = argv[++i];
             rt_quality = q == "fast" ? 0 : q == "ultra" ? 2 : 1;
@@ -223,6 +229,7 @@ int main(int argc, char* argv[]) {
     emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
     if (raytracing) emu.get_rdp().set_raytracing(true);
     emu.get_rdp().set_rt_quality(static_cast<u32>(rt_quality));
+    emu.get_rdp().set_rt_sun(sun_az, sun_el, 0.28f, 1.0f, 0.3f);
     if (cpu_core_arg == "interp") emu.set_cpu_core(CpuCore::Interpreter);
     else if (cpu_core_arg == "jit") emu.set_cpu_core(CpuCore::Recompiler);
     if (rsp_arg == "hle") emu.get_rsp().set_mode(RspMode::HLE);

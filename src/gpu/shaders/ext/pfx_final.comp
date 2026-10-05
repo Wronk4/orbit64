@@ -12,7 +12,7 @@ layout(std140, set = 2, binding = 0) uniform Params {
     ivec4 size;   // w, h, bloom w, bloom h
     vec4 a;       // bloom strength, sharpening, vibrance, vignette
     vec4 b;       // exposure, tone mapping on, FXAA on, swap red and blue
-    vec4 c;       // contrast, frame (dither), -, -
+    vec4 c;       // contrast, frame (dither), chromatic aberration, film grain
 } P;
 
 vec3 fetch(ivec2 p) {
@@ -65,6 +65,12 @@ void main() {
         c = clamp((c + (n + s + e + w) * k) / (1.0 + 4.0 * k), 0.0, 1.0);
     }
 
+    // Chromatic aberration: red and blue apart toward the edges.
+    if (P.c.z > 0.0) {
+        vec2 off = (vec2(o) + 0.5 - vec2(P.size.xy) * 0.5) * (P.c.z * 0.006);
+        c.r = sample_src(vec2(o) + 0.5 + off).r;
+        c.b = sample_src(vec2(o) + 0.5 - off).b;
+    }
     vec3 lin = pow(c, vec3(2.2)) * P.b.x;
     vec2 uv = (vec2(o) + 0.5) / vec2(P.size.xy);
     lin += sample_bloom(uv) * P.a.x;
@@ -91,5 +97,11 @@ void main() {
     g *= 1.0 - P.a.w * smoothstep(0.25, 0.85, dot(v, v) * 2.0);
 
     float dither = (fract(52.9829189 * fract(dot(vec2(o) + P.c.y, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
+    if (P.c.w > 0.0) {
+        // Film grain, stronger in the mid-tones.
+        float n = fract(sin(dot(vec2(o) + P.c.y * 17.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+        float l = luma(g);
+        g += n * P.c.w * 0.12 * (1.0 - abs(l - 0.5) * 1.6);
+    }
     imageStore(dst, o, vec4(clamp(g + dither, 0.0, 1.0), 1.0));
 }

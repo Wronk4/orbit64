@@ -406,6 +406,17 @@ void RDP::set_raytracing(bool on) {
     update_hires(hires_req_scale_);
 }
 
+void RDP::set_rt_sun(f32 azimuth, f32 elevation, f32 softness, f32 strength, f32 warmth) {
+    const f32 az = azimuth * 0.01745329f, el = std::clamp(elevation, 1.0f, 90.0f) * 0.01745329f;
+    rt_sun_world_ = {std::cos(el) * std::sin(az), std::sin(el), std::cos(el) * std::cos(az)};
+    // From about the real sun's size (0.3 degrees) to a hazy 4 degrees.
+    rt_sun_cone_ = 0.005f + 0.065f * std::clamp(softness, 0.0f, 1.0f);
+    // Warmth: from white toward the orange of a low sun.
+    const f32 w = std::clamp(warmth, 0.0f, 1.0f);
+    const f32 warm[3] = {1.0f, 0.78f, 0.52f};
+    for (int i = 0; i < 3; ++i) rt_sun_color_[i] = (1.0f + (warm[i] - 1.0f) * w) * strength;
+}
+
 void RDP::rt_new_frame() {
     rt_views_.clear();
     rt_view_last_ = 0;
@@ -1572,6 +1583,12 @@ void RDP::rt_pixel_flush() {
     p.tri_offset = scene.serialize(p.bvh, &p.lights_offset, p.tex_batch);
     p.gi = rt_gi_;
     p.quality = rt_quality_;
+    p.sun_cone = rt_sun_cone_;
+    for (int i = 0; i < 3; ++i) p.sun_color[i] = rt_sun_color_[i];
+    p.shafts = rt_shafts_;
+    p.haze = rt_haze_;
+    p.flare = rt_flare_;
+    p.cool_shade = rt_cool_;
     p.pixel_lighting = rt_pixel_lighting_;
     p.specular = rt_specular_;
     p.water_reflect = rt_reflections_ ? 0.75f : 0.0f;
@@ -1583,6 +1600,17 @@ void RDP::rt_pixel_flush() {
     for (int i = 0; i < 6; ++i) p.vp[i] = rt_px_vp_[i];
     rt_sun_ = rt_sun_in_view();
     p.sun[0] = rt_sun_.x; p.sun[1] = rt_sun_.y; p.sun[2] = rt_sun_.z;
+    {
+        // Where the sun (a direction: w = 0) is on screen.
+        f32 c[4];
+        for (int j = 0; j < 4; ++j)
+            c[j] = rt_sun_.x * rt_px_proj_.m[0][j] + rt_sun_.y * rt_px_proj_.m[1][j] + rt_sun_.z * rt_px_proj_.m[2][j];
+        if (c[3] > 1e-6f) {
+            p.sun_screen[0] = rt_px_vp_[3] + (c[0] / c[3]) * rt_px_vp_[0];
+            p.sun_screen[1] = rt_px_vp_[4] - (c[1] / c[3]) * rt_px_vp_[1];
+            p.sun_screen[2] = 1.0f;
+        }
+    }
     p.eye[0] = rt_px_eye_.x; p.eye[1] = rt_px_eye_.y; p.eye[2] = rt_px_eye_.z;
     p.scene_scale = scene.scale();
     p.shadow_strength = rt_shadow_strength_;
@@ -1593,11 +1621,14 @@ void RDP::rt_pixel_flush() {
     if (const char* e = std::getenv("ORBIT64_RT_AO")) p.ao_strength = static_cast<f32>(std::atof(e));
     if (const char* e = std::getenv("ORBIT64_RT_RELIGHT")) p.pixel_lighting = std::atoi(e) != 0;
     if (const char* e = std::getenv("ORBIT64_RT_GI")) p.gi = static_cast<f32>(std::atof(e));
+    if (const char* e = std::getenv("ORBIT64_RT_FX")) // shafts,haze,flare,cool
+        std::sscanf(e, "%f,%f,%f,%f", &p.shafts, &p.haze, &p.flare, &p.cool_shade);
     static const bool debug = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
     if (debug && p.frame % 60 == 1) {
         u32 all = 0;
         const u32 stale = scene.stale_cutouts(p.tex_batch, &all);
-        std::fprintf(stderr, "[rt] cut-outs %u, stale texture state %u\n", all, stale);
+        std::fprintf(stderr, "[rt] cut-outs %u, stale texture state %u, sun on screen %.0f %.0f (%.0f)\n", all, stale,
+                     p.sun_screen[0], p.sun_screen[1], p.sun_screen[2]);
     }
     if (debug && p.frame % 60 == 1)
         std::fprintf(stderr, "[rt] water triangles in this pass: %u\n", rt_dbg_water_);

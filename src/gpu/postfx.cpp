@@ -176,7 +176,7 @@ SDL_GPUTexture* PostFx::process(SDL_GPUTexture* src, int w, int h, bool swap_rb,
         FinalParams fp{{w, h, bw_, bh_},
                        {p.bloom, p.sharpen, p.vibrance, p.vignette},
                        {p.exposure, p.tonemap ? 1.0f : 0.0f, p.fxaa ? 1.0f : 0.0f, swap_rb ? 1.0f : 0.0f},
-                       {p.contrast, static_cast<float>(frame_++ & 63), 0.0f, 0.0f}};
+                       {p.contrast, static_cast<float>(frame_++ & 63), p.chroma, p.grain}};
         SDL_PushGPUComputeUniformData(cmd, 0, &fp, sizeof fp);
         SDL_DispatchGPUCompute(cp, groups(w), groups(h), 1);
         SDL_EndGPUComputePass(cp);

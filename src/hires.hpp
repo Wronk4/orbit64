@@ -119,6 +119,10 @@ struct RtPass {
     // 0 fast (shadow and bounce rays once per native pixel), 1 balanced
     // (twice as dense each way), 2 ultra (every pixel, more rays).
     u32 quality = 0;
+    f32 sun_cone = 0.06f;            // shadow softness (radians)
+    f32 sun_color[3] = {1, 1, 1};    // times its strength
+    f32 shafts = 0.0f, haze = 0.0f, flare = 0.0f, cool_shade = 0.0f;
+    f32 sun_screen[3] = {};          // native screen position, 1 when in front of the eye
     u64 tex_batch = 0;         // the batch the cut-outs' texture states are valid in
     u32 frame = 0;
 };
