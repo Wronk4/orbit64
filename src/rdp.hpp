@@ -142,6 +142,8 @@ public:
     void set_rt_reflections(bool on) { rt_reflections_ = on; }
     // Global illumination (one-bounce path tracing), 0..1.
     void set_rt_gi(f32 strength) { rt_gi_ = strength; }
+    // 0 fast, 1 balanced, 2 ultra (RtPass::quality).
+    void set_rt_quality(u32 q) { rt_quality_ = q; }
 
     // Frontend status queries (read-only).
     MicrocodeType get_active_ucode() const { return current_ucode_active; }
@@ -525,6 +527,7 @@ private:
     bool rt_pixel_lighting_ = true; // per-pixel lighting of lit objects
     bool rt_reflections_ = true;    // on water and metal
     f32 rt_gi_ = 0.6f;              // global illumination strength
+    u32 rt_quality_ = 0;
     u32 rt_dbg_water_ = 0;
     f32 rt_specular_ = 0.35f;
     // Before drawing into `hr`: the 3D scene drawn so far gets its pass when

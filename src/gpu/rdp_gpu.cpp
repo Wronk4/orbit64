@@ -618,9 +618,10 @@ void RdpRenderer::ray_trace(HiResTarget* ht, const RtPass& pass) {
     p.dims[2] = bvh;
     p.dims[3] = bvh + pass.tri_offset;
     p.misc[0] = pass.frame;
-    p.misc[1] = 6; // hemisphere rays: ambient occlusion and bounced light
-    p.misc[2] = 3; // shadow rays
-    p.misc[3] = scale_; // shadow and hemisphere rays once per native pixel
+    // Quality: rays and the grid shadow and hemisphere rays are traced on.
+    p.misc[1] = pass.quality >= 2 ? 10 : 6; // hemisphere rays: ambient occlusion and bounced light
+    p.misc[2] = pass.quality >= 2 ? 5 : 3;  // shadow rays
+    p.misc[3] = pass.quality >= 2 ? 1u : pass.quality == 1 ? std::max<u32>(1, scale_ / 2) : scale_;
     if (const char* e = std::getenv("ORBIT64_RT_GRID")) p.misc[3] = std::max(1, std::atoi(e)); // debugging
     p.strength[0] = pass.shadow_strength;
     p.strength[1] = pass.ao_strength;

@@ -615,6 +615,7 @@ void App::update_input() {
     core_.set_rt_pixel_lighting(settings_.rt_pixel_lighting, settings_.rt_specular);
     core_.set_rt_reflections(settings_.rt_reflections);
     core_.set_rt_gi(settings_.rt_gi);
+    core_.set_rt_quality(settings_.rt_quality);
     core_.set_expansion_pak(settings_.expansion_pak);
 }
 

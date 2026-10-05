@@ -99,6 +99,7 @@ int main(int argc, char* argv[]) {
     std::string wav_path;
     bool raytracing = false;
     bool gpu_hires = false;
+    int rt_quality = 0;
     bool postfx = false;
     int dlss_mode = 0;
 
@@ -145,6 +146,9 @@ int main(int argc, char* argv[]) {
                       : m == "ultra" ? gpu::Dlss::UltraPerformance : 0;
         } else if (arg == "--postfx") {
             postfx = true; // screenshots through the frontend's post-processing (needs --gpu)
+        } else if (arg == "--rt-quality" && i + 1 < argc) {
+            const std::string q = argv[++i];
+            rt_quality = q == "fast" ? 0 : q == "ultra" ? 2 : 1;
         } else if (arg == "--gpu") {
             gpu_hires = true; // internal resolutions on the GPU renderer, as the frontend does
         } else if (arg == "--mash" && i + 1 < argc) {
@@ -218,6 +222,7 @@ int main(int argc, char* argv[]) {
     // Internal resolution of the RDP (screenshots come out that many times larger).
     emu.get_rdp().set_hires_scale(static_cast<u32>(std::clamp(internal_scale, 1, 8)));
     if (raytracing) emu.get_rdp().set_raytracing(true);
+    emu.get_rdp().set_rt_quality(static_cast<u32>(rt_quality));
     if (cpu_core_arg == "interp") emu.set_cpu_core(CpuCore::Interpreter);
     else if (cpu_core_arg == "jit") emu.set_cpu_core(CpuCore::Recompiler);
     if (rsp_arg == "hle") emu.get_rsp().set_mode(RspMode::HLE);

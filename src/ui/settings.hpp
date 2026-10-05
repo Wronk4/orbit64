@@ -104,6 +104,7 @@ struct Settings {
     int rt_specular = 35;          // 0..100: their highlights
     bool rt_reflections = true;    // ray-traced reflections on water and metal
     int rt_gi = 60;                // 0..100: global illumination (path-traced bounced light)
+    int rt_quality = 0;            // 0 fast, 1 balanced, 2 ultra (shadow and bounce rays for every pixel)
     // Post-processing of the shown frame (src/gpu/postfx.hpp; Vulkan).
     bool postfx = true;
     int pfx_bloom = 60;      // 0..100

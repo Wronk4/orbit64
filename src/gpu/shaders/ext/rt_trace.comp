@@ -233,17 +233,19 @@ void main() {
     vec2 uv;
     uint hit = trace(a, d, t, false, uv, false);
     if (hit == 0xFFFFFFFFu) return;
-    vec3 p = a + d * t;
     float scale = P.vpz.w;
-    float dist = distance(p, P.eye.xyz);
     uint flags = D[hit + 25u];
 
-    // Water in front of what the depth buffer holds: a reflection of the
-    // scene, by the Fresnel term (little straight down, a mirror at grazing
-    // angles), on gently rippling water.
+    // A translucent surface in front (water, but also smoke, glass and other
+    // alpha effects): water - a large one - gets a reflection of the scene,
+    // by the Fresnel term (little straight down, a mirror at grazing angles),
+    // on gently rippling water. Either way the pixel's shadows and light are
+    // those of the solid surface behind it, which the eye ray goes on to.
     if ((flags & TRI_WATER) != 0u) {
-        if (second || P.refl.x <= 0.0 || dot(pz - a, d) < t - scale) return;
-        vec3 wn = v3(hit + 9u);
+        vec3 p = a + d * t;
+        float span = max(length(v3(hit + 3u)), length(v3(hit + 6u)));
+        if (!second && P.refl.x > 0.0 && span > 3.0 * scale && dot(pz - a, d) >= t - scale) {
+            vec3 wn = v3(hit + 9u);
         if (dot(wn, d) > 0.0) wn = -wn;
         vec3 t1, b1;
         basis(wn, t1, b1);
@@ -257,10 +259,16 @@ void main() {
         vec4 rc = reflection(p + wn * max(scale * 0.02, length(p) * 1e-4), r);
         float cosv = max(dot(-d, rn), 0.0);
         float fres = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
-        occ[ob + 1u] = floatBitsToUint(dist);
+        occ[ob + 1u] = floatBitsToUint(distance(p, P.eye.xyz));
         occ[ob + 7u] = pack_reflection(rc.rgb, P.refl.x * mix(0.2, 1.0, fres) * rc.a);
-        return;
+        }
+        t = len;
+        hit = trace(a, d, t, false, uv, true);
+        if (hit == 0xFFFFFFFFu) return;
+        flags = D[hit + 25u];
     }
+    vec3 p = a + d * t;
+    float dist = distance(p, P.eye.xyz);
     // Something the BVH doesn't hold (a billboard, a cut-out texture) in
     // front: leave the pixel alone.
     if (distance(p, pz) > 0.03 * dist + 0.5 * scale) return;

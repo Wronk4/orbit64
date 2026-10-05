@@ -164,6 +164,7 @@ public:
     }
     void set_rt_reflections(bool on) { rt_reflections_ = on; }
     void set_rt_gi(int strength) { rt_gi_ = strength; } // 0..100
+    void set_rt_quality(int q) { rt_quality_ = q; }      // 0 fast, 1 balanced, 2 ultra
     // Who renders internal resolutions above 1 (the GPU renderer), or
     // nullptr for the CPU. Applied at the next frame; the high-resolution
     // buffers start over.
@@ -266,6 +267,7 @@ private:
     std::atomic<int> rt_specular_{35};
     std::atomic<bool> rt_reflections_{true};
     std::atomic<int> rt_gi_{60};
+    std::atomic<int> rt_quality_{0};
     std::mutex factory_mutex_;
     HiResFactory hires_factory_;
     bool factory_dirty_ = false; // guarded by factory_mutex_

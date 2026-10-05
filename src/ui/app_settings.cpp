@@ -369,6 +369,16 @@ void App::settings_graphics() {
         if (toggle("rtpxl", &settings_.rt_pixel_lighting))
             core_.set_rt_pixel_lighting(settings_.rt_pixel_lighting, settings_.rt_specular);
         row_end();
+        row_begin("Ray tracing quality",
+                  "Fast traces shadows and bounced light once per original pixel and smooths them out; Balanced "
+                  "twice as densely each way; Ultra at every pixel with more rays - the most detailed, and the "
+                  "most demanding on the graphics card.",
+                  cw);
+        {
+            const char* q[] = {"Fast", "Balanced", "Ultra"};
+            if (segmented("rtq", q, 3, &settings_.rt_quality, cw)) core_.set_rt_quality(settings_.rt_quality);
+        }
+        row_end();
         row_begin("Global illumination",
                   "Path-traced bounced light: surfaces pick up the colour of what is around them, and creases "
                   "and corners darken (ambient occlusion).",

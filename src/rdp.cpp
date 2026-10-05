@@ -1571,6 +1571,7 @@ void RDP::rt_pixel_flush() {
     p.tex_batch = hires_->rt_batch();
     p.tri_offset = scene.serialize(p.bvh, &p.lights_offset, p.tex_batch);
     p.gi = rt_gi_;
+    p.quality = rt_quality_;
     p.pixel_lighting = rt_pixel_lighting_;
     p.specular = rt_specular_;
     p.water_reflect = rt_reflections_ ? 0.75f : 0.0f;
@@ -1593,6 +1594,11 @@ void RDP::rt_pixel_flush() {
     if (const char* e = std::getenv("ORBIT64_RT_RELIGHT")) p.pixel_lighting = std::atoi(e) != 0;
     if (const char* e = std::getenv("ORBIT64_RT_GI")) p.gi = static_cast<f32>(std::atof(e));
     static const bool debug = std::getenv("ORBIT64_RT_DEBUG") != nullptr;
+    if (debug && p.frame % 60 == 1) {
+        u32 all = 0;
+        const u32 stale = scene.stale_cutouts(p.tex_batch, &all);
+        std::fprintf(stderr, "[rt] cut-outs %u, stale texture state %u\n", all, stale);
+    }
     if (debug && p.frame % 60 == 1)
         std::fprintf(stderr, "[rt] water triangles in this pass: %u\n", rt_dbg_water_);
     rt_dbg_water_ = 0;

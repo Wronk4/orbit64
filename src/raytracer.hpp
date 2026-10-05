@@ -173,6 +173,17 @@ public:
     // (kLightSetWords each: ambient, count, then per light direction and
     // colour). Returns the triangles' offset; *lights_offset the sets'.
     static constexpr u32 kTriWords = 36, kLightSetWords = 16;
+    // Cut-outs whose texture state isn't from batch `tex_batch` (of all cut-outs).
+    u32 stale_cutouts(u64 tex_batch, u32* total = nullptr) const {
+        u32 n = 0, all = 0;
+        for (const auto& a : attrs_)
+            if (a.cutout) {
+                ++all;
+                if (a.tex_batch != tex_batch) ++n;
+            }
+        if (total) *total = all;
+        return n;
+    }
     u32 serialize(std::vector<u32>& out, u32* lights_offset = nullptr, u64 tex_batch = 0) const;
 
     bool intersect_any(const RTRay& ray) const;
