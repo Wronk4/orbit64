@@ -488,14 +488,20 @@ private:
     std::array<bool, 80> rt_lit_{};
     std::array<bool, 80> rt_metal_{}; // environment-mapped (G_TEXTURE_GEN)
     std::array<orbit64::rt::RTLightSet, 80> rt_lset_{};
-    // The light unlit geometry is shadowed from: the strongest directional
-    // light of the frame before.
-    orbit64::rt::RTVector3 rt_sun_{0.35f, 0.85f, 0.4f};
-    // The strongest light of the frame being drawn, which rt_sun_ moves
-    // toward when it ends (rt_new_frame): one light per frame, no jumps
-    // between the lights of different objects.
-    orbit64::rt::RTVector3 rt_sun_next_{};
-    f32 rt_sun_best_ = 0.0f;
+    // The sun: a fixed direction in the world (y up), not the game's lights,
+    // which many games (Super Mario 64) give relative to the camera. It
+    // reaches modelview space through the frame's view matrix: the modelview
+    // most of the scene's triangles were drawn with (the level's own).
+    orbit64::rt::RTVector3 rt_sun_world_{0.42f, 0.85f, 0.32f};
+    orbit64::rt::RTVector3 rt_sun_{0.35f, 0.85f, 0.4f}; // in modelview space, for this frame
+    struct RtView {
+        Matrix4x4 m;
+        u32 count;
+    };
+    std::vector<RtView> rt_views_;
+    size_t rt_view_last_ = 0;
+    void rt_count_view(const Matrix4x4& mv);
+    orbit64::rt::RTVector3 rt_sun_in_view() const;
     u32 rt_frame_no_ = 0;
     u32 hires_req_scale_ = 1; // what set_hires_scale() asked for
     bool rt_native_unsupported_ = false; // the factory's renderer can't trace rays

@@ -407,13 +407,42 @@ void RDP::set_raytracing(bool on) {
 }
 
 void RDP::rt_new_frame() {
-    if (rt_sun_best_ > 0.0f) {
-        // Ease toward the frame's light (a light that turns does so smoothly).
-        rt_sun_ = (rt_sun_ * 0.75f + rt_sun_next_ * 0.25f).normalized();
-        if (rt_frame_no_ < 2) rt_sun_ = rt_sun_next_;
-    }
-    rt_sun_best_ = 0.0f;
+    rt_views_.clear();
+    rt_view_last_ = 0;
     ++rt_frame_no_;
+}
+
+void RDP::rt_count_view(const Matrix4x4& mv) {
+    if (rt_view_last_ < rt_views_.size() && std::memcmp(&rt_views_[rt_view_last_].m, &mv, sizeof mv) == 0) {
+        ++rt_views_[rt_view_last_].count;
+        return;
+    }
+    for (size_t i = 0; i < rt_views_.size(); ++i)
+        if (std::memcmp(&rt_views_[i].m, &mv, sizeof mv) == 0) {
+            ++rt_views_[i].count;
+            rt_view_last_ = i;
+            return;
+        }
+    if (rt_views_.size() < 512) {
+        rt_view_last_ = rt_views_.size();
+        rt_views_.push_back({mv, 1});
+    }
+}
+
+// The world's sun in modelview space: turned by the rotation of the view
+// matrix (rows are where the world's axes go; scale divided out).
+orbit64::rt::RTVector3 RDP::rt_sun_in_view() const {
+    const RtView* best = nullptr;
+    for (const RtView& v : rt_views_)
+        if (!best || v.count > best->count) best = &v;
+    const orbit64::rt::RTVector3 s = rt_sun_world_.normalized();
+    if (!best) return s;
+    orbit64::rt::RTVector3 out;
+    for (int j = 0; j < 3; ++j) {
+        const f32 x = s.x * best->m.m[0][j] + s.y * best->m.m[1][j] + s.z * best->m.m[2][j];
+        (j == 0 ? out.x : j == 1 ? out.y : out.z) = x;
+    }
+    return out.finite() && out.length_squared() > 1e-12f ? out.normalized() : s;
 }
 
 HiResTarget* RDP::hires_target(u8* rdram, size_t rdram_size) {
@@ -1101,17 +1130,6 @@ void RDP::execute_vtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
     // positions in modelview space, and for lit ones normals and lights.
     const bool rt_on = raytracing_enabled_ && rt_pixel_mode() && rt_frame_view();
     const Matrix4x4& rt_mv = modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back();
-    if (rt_on && (geometry_mode & 0x00020000) && !cbfd_) {
-        // The frame's strongest directional light also lights the unlit
-        // scenery (from the next frame on).
-        for (const auto& l : dir_lights) {
-            const f32 k = static_cast<f32>(l.r) + l.g + l.b;
-            if (k > rt_sun_best_ && (l.dx != 0.0f || l.dy != 0.0f || l.dz != 0.0f)) {
-                rt_sun_best_ = k;
-                rt_sun_next_ = orbit64::rt::RTVector3(l.dx, l.dy, l.dz).normalized();
-            }
-        }
-    }
 
     orbit64::rt::RTLightSet rt_ls;
     if (rt_on && (geometry_mode & 0x00020000) && !cbfd_) {
@@ -1496,6 +1514,7 @@ void RDP::rt_triangle(u32 a, u32 b, u32 c) {
         }
         scene_b.add_triangle(pa, pb, pc, attr);
         rt_cur_casts_ |= opaque || cutout;
+        if (opaque || cutout) rt_count_view(modelview_stack.empty() ? Matrix4x4::identity() : modelview_stack.back());
         if (water) ++rt_dbg_water_;
     }
 }
@@ -1561,6 +1580,7 @@ void RDP::rt_pixel_flush() {
         for (int c = 0; c < 4; ++c) p.proj[r * 4 + c] = rt_px_proj_.m[r][c];
     if (!invert4(p.proj, p.inv_proj)) return;
     for (int i = 0; i < 6; ++i) p.vp[i] = rt_px_vp_[i];
+    rt_sun_ = rt_sun_in_view();
     p.sun[0] = rt_sun_.x; p.sun[1] = rt_sun_.y; p.sun[2] = rt_sun_.z;
     p.eye[0] = rt_px_eye_.x; p.eye[1] = rt_px_eye_.y; p.eye[2] = rt_px_eye_.z;
     p.scene_scale = scene.scale();
