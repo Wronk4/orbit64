@@ -44,8 +44,14 @@ if(NOT SDL3_FOUND)
     endif()
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
     set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    # The default release is checked against a hash; another version has none to compare with.
+    set(ORBIT64_SDL3_HASH "")
+    if(ORBIT64_SDL3_VERSION STREQUAL "3.4.16")
+        set(ORBIT64_SDL3_HASH "URL_HASH;SHA256=7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68")
+    endif()
     FetchContent_Declare(SDL3
         URL "https://github.com/libsdl-org/SDL/releases/download/release-${ORBIT64_SDL3_VERSION}/SDL3-${ORBIT64_SDL3_VERSION}.tar.gz"
+        ${ORBIT64_SDL3_HASH}
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(SDL3)
 endif()

@@ -20,6 +20,10 @@ on:
     paths-ignore: ['site/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
+# Least privilege for every job; the release job below asks for contents: write itself.
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   # Never cancel a main run halfway through publishing its release.
