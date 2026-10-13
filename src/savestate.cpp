@@ -1,5 +1,7 @@
 #include "savestate.hpp"
+#include <algorithm>
 #include <atomic>
+#include <climits>
 #include <fstream>
 #include <system_error>
 
@@ -126,14 +128,14 @@ std::vector<u8> deflate(const void* data, size_t size) {
 }
 
 bool inflate(const u8* data, size_t size, size_t expected, std::vector<u8>& out) {
-    int len = 0;
-    char* raw = stbi_zlib_decode_malloc_guesssize_headerflag(reinterpret_cast<const char*>(data), static_cast<int>(size),
-                                                             static_cast<int>(expected), &len, 1);
-    if (!raw) return false;
-    const bool ok = static_cast<size_t>(len) == expected;
-    if (ok) out.assign(raw, raw + len);
-    STBI_FREE(raw);
-    return ok;
+    // Decode into a buffer of the expected size: a crafted stream can't expand past it.
+    if (expected == 0 || expected > kMaxStateBytes || size > static_cast<size_t>(INT_MAX)) return false;
+    std::vector<u8> buf(expected);
+    const int len = stbi_zlib_decode_buffer(reinterpret_cast<char*>(buf.data()), static_cast<int>(expected),
+                                            reinterpret_cast<const char*>(data), static_cast<int>(size));
+    if (len < 0 || static_cast<size_t>(len) != expected) return false;
+    out = std::move(buf);
+    return true;
 }
 
 } // namespace
@@ -143,6 +145,10 @@ bool write_file(const fs::path& path, const std::vector<u8>& state, const FileIn
     const std::vector<u8> body = deflate(state.data(), state.size());
     if (body.empty()) {
         error = "compressing the state failed";
+        return false;
+    }
+    if (state.size() > kMaxStateBytes) {
+        error = "the state is too large to save";
         return false;
     }
 
@@ -223,6 +229,16 @@ bool read_file(const fs::path& path, std::vector<u8>* state, FileInfo& info, std
     const u32 raw_bytes = static_cast<u32>(get_le(head + 64, 4));
     const u32 body_bytes = static_cast<u32>(get_le(head + 68, 4));
     const u64 checksum = get_le(head + 72, 8);
+
+    // The sizes in the header must fit in the file, or a tiny file could force a huge allocation.
+    f.clear();
+    f.seekg(0, std::ios::end);
+    const u64 file_size = static_cast<u64>(std::max<std::streamoff>(f.tellg(), 0));
+    f.seekg(kHeaderSize, std::ios::beg);
+    if (file_size < kHeaderSize || static_cast<u64>(thumb_bytes) + body_bytes > file_size - kHeaderSize) {
+        error = "the file is damaged";
+        return false;
+    }
 
     info.thumb.clear();
     const size_t thumb_px = static_cast<size_t>(info.thumb_w) * info.thumb_h;

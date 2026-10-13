@@ -33,34 +33,36 @@ bool Cartridge::load_rom(const std::string& filepath) {
         return false;
     }
 
-    rom.resize(size);
-    rom_latched_ = false;
-    if (!file.read(reinterpret_cast<char*>(rom.data()), size)) {
+    // Read and validate into a local buffer: a bad file must not replace the loaded cartridge.
+    std::vector<u8> data(size);
+    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
         std::cerr << "[Cartridge] Failed to read ROM data\n";
         return false;
     }
 
     // Check endianness and convert to big-endian (z64 format)
-    u8 b0 = rom[0], b1 = rom[1], b2 = rom[2], b3 = rom[3];
+    u8 b0 = data[0], b1 = data[1], b2 = data[2], b3 = data[3];
     if (b0 == 0x80 && b1 == 0x37 && b2 == 0x12 && b3 == 0x40) {
         // Native .z64 big-endian
     } else if (b0 == 0x37 && b1 == 0x80 && b2 == 0x40 && b3 == 0x12) {
         // .v64 byte-swapped
-        for (size_t i = 0; i < rom.size(); i += 2) {
-            std::swap(rom[i], rom[i + 1]);
+        for (size_t i = 0; i + 1 < data.size(); i += 2) {
+            std::swap(data[i], data[i + 1]);
         }
     } else if (b0 == 0x40 && b1 == 0x12 && b2 == 0x37 && b3 == 0x80) {
         // .n64 little-endian
-        for (size_t i = 0; i < rom.size(); i += 4) {
-            std::swap(rom[i], rom[i + 3]);
-            std::swap(rom[i + 1], rom[i + 2]);
+        for (size_t i = 0; i + 3 < data.size(); i += 4) {
+            std::swap(data[i], data[i + 3]);
+            std::swap(data[i + 1], data[i + 2]);
         }
     } else {
-        std::cerr << "[Cartridge] Unknown ROM format magic: " 
-                  << std::hex << (int)b0 << " " << (int)b1 << " " 
+        std::cerr << "[Cartridge] Unknown ROM format magic: "
+                  << std::hex << (int)b0 << " " << (int)b1 << " "
                   << (int)b2 << " " << (int)b3 << std::dec << "\n";
         return false;
     }
+    rom = std::move(data);
+    rom_latched_ = false;
 
     // Parse header fields
     entry_point = (static_cast<u32>(rom[8]) << 24) |
@@ -315,7 +317,7 @@ void Cartridge::flash_command(u32 cmd) {
         case 0x78: // run the armed erase
             if (flash_erase_chip) {
                 std::fill(sram.begin(), sram.end(), 0xFF);
-            } else if (flash_erase_offset + 0x4000 <= sram.size()) {
+            } else if (static_cast<size_t>(flash_erase_offset) + 0x4000 <= sram.size()) {
                 std::fill(sram.begin() + flash_erase_offset, sram.begin() + flash_erase_offset + 0x4000, 0xFF);
             }
             flash_status = 0x08;

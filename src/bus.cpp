@@ -126,7 +126,7 @@ u8 Bus::read8(u32 paddr) {
 }
 
 u16 Bus::read16(u32 paddr) {
-    if (paddr + 1 < ram_limit_) {
+    if (paddr < ram_limit_ && paddr + 1 < ram_limit_) {
         jit::notify_read(paddr, 2);
         return (static_cast<u16>(rdram[paddr]) << 8) | static_cast<u16>(rdram[paddr + 1]);
     }
@@ -138,7 +138,7 @@ u16 Bus::read16(u32 paddr) {
 }
 
 u32 Bus::read32(u32 paddr) {
-    if (paddr + 3 < ram_limit_) {
+    if (paddr < ram_limit_ && paddr + 3 < ram_limit_) {
         jit::notify_read(paddr, 4);
         return (static_cast<u32>(rdram[paddr + 0]) << 24) |
                (static_cast<u32>(rdram[paddr + 1]) << 16) |
@@ -226,7 +226,7 @@ void Bus::write8(u32 paddr, u8 val) {
 }
 
 void Bus::write16(u32 paddr, u16 val) {
-    if (paddr + 1 < ram_limit_) {
+    if (paddr < ram_limit_ && paddr + 1 < ram_limit_) {
         rdram[paddr + 0] = (val >> 8) & 0xFF;
         rdram[paddr + 1] = val & 0xFF;
         jit::notify_code_write(paddr, 2);
@@ -239,7 +239,7 @@ void Bus::write16(u32 paddr, u16 val) {
 }
 
 void Bus::write32(u32 paddr, u32 val) {
-    if (paddr + 3 < ram_limit_) {
+    if (paddr < ram_limit_ && paddr + 3 < ram_limit_) {
         rdram[paddr + 0] = (val >> 24) & 0xFF;
         rdram[paddr + 1] = (val >> 16) & 0xFF;
         rdram[paddr + 2] = (val >> 8)  & 0xFF;
