@@ -83,6 +83,8 @@ inline void mults64_128(s64 a, s64 b, u64& hi, u64& lo) {
 constexpr u64 CPU_CLOCK_RATE = 93750000ULL; // 93.75 MHz
 constexpr u64 CYCLES_PER_FRAME = CPU_CLOCK_RATE / 60; // 1,562,500 cycles per frame at 60Hz
 constexpr u64 AI_VIDEO_CLOCK_NTSC = 48681812ULL; // Video clock used to derive the AI DAC sample rate
+constexpr u64 AI_VIDEO_CLOCK_PAL = 49656530ULL;
+constexpr u64 AI_VIDEO_CLOCK_MPAL = 48628316ULL;
 constexpr u32 RDRAM_SIZE = 8 * 1024 * 1024; // 8 MB RDRAM (Expansion Pak)
 constexpr u32 DMEM_SIZE = 4096;
 constexpr u32 IMEM_SIZE = 4096;

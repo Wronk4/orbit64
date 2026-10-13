@@ -118,6 +118,8 @@ void Emulator::reset() {
         rdram[a + 3] = v & 0xFF;
     };
     write_u32(0x300, cart.tv_type()); // osTvType (0 = PAL, 1 = NTSC, 2 = MPAL), from the header's country code
+    ai.set_video_clock(cart.tv_type() == 0 ? AI_VIDEO_CLOCK_PAL
+                       : cart.tv_type() == 2 ? AI_VIDEO_CLOCK_MPAL : AI_VIDEO_CLOCK_NTSC);
     write_u32(0x304, 0);          // osRomType (0 = cartridge)
     write_u32(0x308, 0xB0000000); // osRomBase: the cartridge via KSEG1, as IPL3 sets it (Turok reads through it)
     write_u32(0x30C, 0);          // osResetType

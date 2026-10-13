@@ -17,6 +17,12 @@
 
 extern int g_current_frame; // emulator.cpp
 
+// Per-task statistics and matrix dumps go to stdout only with ORBIT64_RDP_DEBUG set.
+static bool rdp_debug_output() {
+    static const bool on = std::getenv("ORBIT64_RDP_DEBUG") != nullptr;
+    return on;
+}
+
 static u32 stat_tri_called = 0;
 static u32 stat_incount[4] = {0, 0, 0, 0};
 static u32 stat_rast_called = 0;
@@ -893,7 +899,7 @@ void RDP::execute_mtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
             is_proj = (param_byte & 0x01) != 0;
             is_load = (param_byte & 0x02) != 0;
             is_push = (param_byte & 0x04) != 0;
-            if (stat_tri_called > 395000 && stat_tri_called < 420000) {
+            if (rdp_debug_output() && stat_tri_called > 395000 && stat_tri_called < 420000) {
                 std::cout << "[MTXFLAGDBG] tri=" << stat_tri_called << " w0=0x" << std::hex << w0
                           << " param=0x" << (int)param_byte << std::dec
                           << " proj=" << is_proj << " load=" << is_load << " push=" << is_push << "\n";
@@ -901,7 +907,7 @@ void RDP::execute_mtx(u32 w0, u32 w1, MicrocodeType ucode, const u8* rdram, size
         }
 
         if (is_proj) {
-            if (stat_tri_called > 395000 && stat_tri_called < 420000) {
+            if (rdp_debug_output() && stat_tri_called > 395000 && stat_tri_called < 420000) {
                 std::cout << "[PROJRAW] tri=" << stat_tri_called << " load=" << is_load << ":\n";
                 for (int r = 0; r < 4; ++r) {
                     std::cout << "  [" << mat.m[r][0] << ", " << mat.m[r][1] << ", " << mat.m[r][2] << ", " << mat.m[r][3] << "]\n";
@@ -2482,7 +2488,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
                     dl_stack.pop_back();
                 } else {
                     // Finished entire display list!
-                    std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
+                    if (rdp_debug_output()) std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
                               << " | incount: [0]=" << stat_incount[0] << " [1]=" << stat_incount[1] 
                               << " [2]=" << stat_incount[2] << " [3]=" << stat_incount[3]
                               << " | rasterize called: " << stat_rast_called
@@ -2659,7 +2665,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
         }
     }
 
-    std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
+    if (rdp_debug_output()) std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
               << " | incount: [0]=" << stat_incount[0] << " [1]=" << stat_incount[1] 
               << " [2]=" << stat_incount[2] << " [3]=" << stat_incount[3]
               << " | rasterize called: " << stat_rast_called

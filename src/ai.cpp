@@ -20,7 +20,7 @@ void AI::reset() {
 }
 
 u32 AI::native_sample_rate() const {
-    return static_cast<u32>(AI_VIDEO_CLOCK_NTSC / (dacrate_reg + 1));
+    return static_cast<u32>(video_clock_ / (dacrate_reg + 1));
 }
 
 u32 AI::read_reg(u32 addr) const {

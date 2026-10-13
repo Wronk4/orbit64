@@ -29,6 +29,8 @@ public:
     void set_sink(AudioStream* sink) { sink_ = sink; }
 
     // Frontend status queries (read-only). 0 until the game programs AI_DACRATE.
+    // The video clock the DAC rate derives from: it differs between NTSC, PAL and MPAL consoles.
+    void set_video_clock(u64 hz) { video_clock_ = hz; }
     u32 get_native_sample_rate() const { return dacrate_reg ? native_sample_rate() : 0; }
 
     // Test tap (headless --wav): every buffer the game hands to the DAC is
@@ -48,6 +50,7 @@ private:
     u32 dram_addr_reg{0};
     u32 control_reg{0};
     u32 dacrate_reg{0};
+    u64 video_clock_{AI_VIDEO_CLOCK_NTSC};
     u32 bitrate_reg{0};
 
     AudioBuffer current_buffer{};

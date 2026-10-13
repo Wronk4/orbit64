@@ -121,6 +121,12 @@ void PI::execute_dma_write(MI& mi, Cartridge& cart, const u8* rdram, size_t rdra
 
     u32 cur_dram = dram_addr & (rdram_size - 1);
 
+    if (cart_addr >= 0x10000000) { // the ROM can't be written; SRAM addressing would wrap onto the save data
+        dram_addr += len;
+        cart_addr += len;
+        mi.raise_interrupt(MIInterrupt::PI);
+        return;
+    }
     const u32 sram_offset = (cart_addr >= 0x08000000) ? (cart_addr - 0x08000000) : cart_addr;
     const u32 n = static_cast<u32>(std::min<size_t>(len, rdram_size - cur_dram));
     jit::notify_read(cur_dram, n);
