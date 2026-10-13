@@ -30,7 +30,7 @@
 
 namespace savestate {
 
-constexpr u32 kStateVersion = 11;
+constexpr u32 kStateVersion = 12;
 
 namespace detail {
 template <class T> struct is_vector : std::false_type {};

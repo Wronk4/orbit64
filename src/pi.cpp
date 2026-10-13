@@ -15,6 +15,7 @@ void PI::reset() {
     rd_len = 0;
     wr_len = 0;
     status = 0;
+    dma_cycles_left = 0;
     dom1_lat = 0;
     dom1_pwd = 0;
     dom1_pgs = 0;
@@ -68,8 +69,9 @@ void PI::write_reg(u32 addr, u32 val, MI& mi, Cartridge& cart, u8* rdram, size_t
                 mi.clear_interrupt(MIInterrupt::PI);
             }
             if (val & (1 << 0)) {
-                // Reset PI controller
+                // Reset PI controller: a running DMA is dropped without an interrupt
                 status = 0;
+                dma_cycles_left = 0;
             }
             break;
         case 5: dom1_lat = val & 0xFF; break;
@@ -111,8 +113,7 @@ void PI::execute_dma_read(MI& mi, Cartridge& cart, u8* rdram, size_t rdram_size)
     dram_addr += len;
     cart_addr += len;
 
-    // Raise PI interrupt in MI
-    mi.raise_interrupt(MIInterrupt::PI);
+    begin_dma(len);
 }
 
 void PI::execute_dma_write(MI& mi, Cartridge& cart, const u8* rdram, size_t rdram_size) {
@@ -124,7 +125,7 @@ void PI::execute_dma_write(MI& mi, Cartridge& cart, const u8* rdram, size_t rdra
     if (cart_addr >= 0x10000000) { // the ROM can't be written; SRAM addressing would wrap onto the save data
         dram_addr += len;
         cart_addr += len;
-        mi.raise_interrupt(MIInterrupt::PI);
+        begin_dma(len);
         return;
     }
     const u32 sram_offset = (cart_addr >= 0x08000000) ? (cart_addr - 0x08000000) : cart_addr;
@@ -135,6 +136,27 @@ void PI::execute_dma_write(MI& mi, Cartridge& cart, const u8* rdram, size_t rdra
     dram_addr += len;
     cart_addr += len;
 
-    // Raise PI interrupt in MI
+    begin_dma(len);
+}
+
+// A short delay: a game's thread is still busy after the store that started the DMA (it blocks on a message queue,
+// or switches interrupts off and polls), and the interrupt must not arrive inside that store; but the game code
+// runs one instruction per cycle here, far faster than on hardware, so the real transfer time (many cycles per
+// byte) would let a thread reach its next critical section before the interrupt. Conker's Bad Fur Day hangs with
+// 200 + len / 4 cycles and runs with 64 + len / 16.
+void PI::begin_dma(u32 len) {
+    status |= 1; // DMA busy
+    dma_cycles_left = 64 + len / 16;
+}
+
+bool PI::step(u32 cycles, MI& mi) {
+    if (dma_cycles_left == 0) return false;
+    if (dma_cycles_left > cycles) {
+        dma_cycles_left -= cycles;
+        return false;
+    }
+    dma_cycles_left = 0;
+    status &= ~1u;
     mi.raise_interrupt(MIInterrupt::PI);
+    return true;
 }

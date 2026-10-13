@@ -1,4 +1,5 @@
 #include "emulator.hpp"
+#include <algorithm>
 #include "savestate.hpp"
 #include <chrono>
 #include <iostream>
@@ -177,15 +178,21 @@ void Emulator::step_frame() {
         while (executed < cycles_per_scanline) {
             const u64 pc = cpu.get_pc();
             if (pc == prev_prev_pc && pc != rejected_pc) {
-                if (u32 skipped = skip_idle_loop(cycles_per_scanline - executed)) {
+                if (u32 skipped = skip_idle_loop(pi.cycles_left() ? std::min(cycles_per_scanline - executed, pi.cycles_left()) : cycles_per_scanline - executed)) {
                     executed += skipped;
+                    if (pi.step(skipped, mi)) cpu.check_interrupts();
                     continue;
                 }
                 rejected_pc = pc;
             }
             prev_prev_pc = prev_pc;
             prev_pc = pc;
-            executed += (cpu_core_ == CpuCore::Recompiler) ? jit.run(cpu, bus, cycles_per_scanline - executed) : cpu.step();
+            // A DMA is over at its own time, not at the end of the scanline: the CPU stops there.
+            u32 budget = cycles_per_scanline - executed;
+            if (const u32 dma = pi.cycles_left()) budget = std::min(budget, dma);
+            const u32 ran = (cpu_core_ == CpuCore::Recompiler) ? jit.run(cpu, bus, budget) : cpu.step();
+            executed += ran;
+            if (pi.step(ran, mi)) cpu.check_interrupts();
         }
         const Clock::time_point t1 = profiling_ ? Clock::now() : Clock::time_point{};
 
