@@ -150,7 +150,9 @@ u32 crc32(const u8* p, size_t n) {
 struct SaveEntry { const char id[3]; SaveType type; };
 constexpr SaveEntry kSaveTypes[] = {
     // 16 Kbit EEPROM
-    {"DO", SaveType::EEPROM_16K}, // Donkey Kong 64
+    {"DO", SaveType::EEPROM_16K}, // (kept as it was)
+    {"DK", SaveType::EEPROM_16K}, // Donkey Kong 64 (game code NDK*)
+    {"MW", SaveType::EEPROM_16K}, // Mario Party 2 (NMW*)
     {"B7", SaveType::EEPROM_16K}, // Banjo-Tooie
     {"PD", SaveType::EEPROM_16K}, // Perfect Dark
     {"YS", SaveType::EEPROM_16K}, // Yoshi's Story

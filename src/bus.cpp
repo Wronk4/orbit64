@@ -35,10 +35,16 @@ void Bus::reset() {
 }
 
 void Bus::set_tlb_entry(size_t index, const TLBEntry& entry) {
-    tlb_gen_++;
     if (index < tlb_entries.size()) {
+        const TLBEntry& old = tlb_entries[index];
+        // Games rewrite the same mapping again and again (refill handlers); nothing cached
+        // (translations, compiled-block lookups) is stale then, so don't flush it.
+        if (old.initialized == entry.initialized && old.page_mask == entry.page_mask &&
+            old.entry_hi == entry.entry_hi && old.entry_lo0 == entry.entry_lo0 && old.entry_lo1 == entry.entry_lo1)
+            return;
         tlb_entries[index] = entry;
     }
+    tlb_gen_++;
 }
 
 const TLBEntry& Bus::get_tlb_entry(size_t index) const {

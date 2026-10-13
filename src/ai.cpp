@@ -51,6 +51,7 @@ void AI::write_reg(u32 addr, u32 val, MI& mi, const u8* rdram, size_t rdram_size
             u32 length = (val & 0x3FFF8);
             if (length == 0) break;
 
+            bool accepted = true;
             if (!busy) {
                 current_buffer.dram_addr = dram_addr_reg;
                 current_buffer.length = length;
@@ -61,7 +62,10 @@ void AI::write_reg(u32 addr, u32 val, MI& mi, const u8* rdram, size_t rdram_size
                 next_buffer.length = length;
                 next_buffer.remaining = length;
                 full = true;
+            } else {
+                accepted = false; // both slots in use: the hardware drops the write
             }
+            if (!accepted) break;
 
             // The samples play at the native AI_DACRATE rate; the host side
             // (AudioStream) resamples them to the device rate.
