@@ -1328,16 +1328,16 @@
  },
  "FCE0D799-65316C54": {
   "name": "Knife Edge - Nose Gunner",
-  "rom": "roms\\Knife Edge - Nose Gunner (U) [!].z64",
-  "seconds": 219.4,
-  "head": "7e49b5e",
+  "rom": "roms/Knife Edge - Nose Gunner (U) [!].z64",
+  "seconds": 486.2,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 2715,
+  "frontier": 3435,
   "reached": "scene",
   "frames": 1590,
   "play": "stick_a",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "616B8494-8A509210": {
   "name": "Kobe Bryant's NBA Courtside",
@@ -1352,15 +1352,15 @@
  },
  "0894909C-DAD4D82D": {
   "name": "Knockout Kings 2000",
-  "rom": "roms\\Knockout Kings 2000 (U) [!].z64",
-  "seconds": 211.3,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 5640,
-  "reached": "scene",
-  "frames": 5145,
-  "play": "stick_z",
-  "attempts": 3
+  "rom": "roms/Knockout Kings 2000 (U) [!].z64",
+  "seconds": 206.9,
+  "head": "bb7a5e6",
+  "stop": "",
+  "frontier": 5895,
+  "reached": "ingame",
+  "frames": 5850,
+  "play": "stick",
+  "attempts": 4
  },
  "096A40EA-8ABE0A10": {
   "name": "LEGO Racers",
@@ -1376,29 +1376,28 @@
  },
  "DEB78BBA-52F6BD9D": {
   "name": "Madden NFL 99",
-  "rom": "roms\\Madden NFL 99 (U) [!].z64",
-  "seconds": 234.4,
-  "head": "7e49b5e",
+  "rom": "roms/Madden NFL 99 (U) [!].z64",
+  "seconds": 287.7,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 8385,
-  "reached": "furthest",
+  "frontier": 7845,
+  "reached": "big",
   "frames": 6585,
   "play": "stick_a",
-  "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "75B61647-7ADABF78": {
   "name": "Magical Tetris Challenge",
-  "rom": "roms\\Magical Tetris Challenge (U) [!].z64",
-  "seconds": 200.2,
-  "head": "7e49b5e",
+  "rom": "roms/Magical Tetris Challenge (U) [!].z64",
+  "seconds": 392.4,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 6315,
+  "frontier": 5955,
   "reached": "furthest",
   "frames": 4470,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "80C1C05C-EA065EF4": {
   "name": "Major League Baseball Featuring Ken Griffey Jr.",
@@ -1426,15 +1425,16 @@
  },
  "0CB81686-5FD85A81": {
   "name": "Madden 2000",
-  "rom": "roms\\Madden 2000 (U) [!].z64",
-  "seconds": 291.4,
-  "head": "17ac9c9",
+  "rom": "roms/Madden 2000 (U) [!].z64",
+  "seconds": 1334.2,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 2040,
+  "frontier": 1365,
   "reached": "scene",
   "frames": 1365,
   "play": "stick_b",
-  "attempts": 2
+  "kept": "no better route found",
+  "attempts": 3
  },
  "3E5055B6-2E92DA52": {
   "name": "Mario Kart 64",
@@ -1449,15 +1449,16 @@
  },
  "13836389-265B3C76": {
   "name": "Madden Football 64",
-  "rom": "roms\\Madden Football 64 (U) [!].z64",
-  "seconds": 714.7,
-  "head": "17ac9c9",
+  "rom": "roms/Madden Football 64 (U) [!].z64",
+  "seconds": 1373.4,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 915,
+  "frontier": 690,
   "reached": "big",
   "frames": 690,
   "play": "stick_a",
-  "attempts": 3
+  "kept": "no better route found",
+  "attempts": 4
  },
  "EB38F792-190EA246": {
   "name": "Madden NFL 2001",
@@ -1518,42 +1519,42 @@
  },
  "9EA95858-AF72B618": {
   "name": "Mario Party 2",
-  "rom": "roms\\Mario Party 2 (U) [!].z64",
-  "seconds": 213.1,
-  "head": "7e49b5e",
-  "stop": "time",
-  "frontier": 5145,
+  "rom": "roms/Mario Party 2 (U) [!].z64",
+  "seconds": 31.4,
+  "head": "bb7a5e6",
+  "stop": "dead",
+  "frontier": 3525,
   "reached": "scene",
   "frames": 3525,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "7C3829D9-6E8247CE": {
   "name": "Mario Party 3",
-  "rom": "roms\\Mario Party 3 (U) [!].z64",
-  "seconds": 186.9,
-  "head": "7e49b5e",
+  "rom": "roms/Mario Party 3 (U) [!].z64",
+  "seconds": 312.5,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 7530,
+  "frontier": 7035,
   "reached": "scene",
   "frames": 6090,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "E36166C2-8613A2E5": {
   "name": "Michael Owens WLS 2000",
-  "rom": "roms\\Michael Owens WLS 2000 (E).v64",
-  "seconds": 230.0,
-  "head": "517f850",
+  "rom": "roms/Michael Owens WLS 2000 (E).v64",
+  "seconds": 276.4,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 2385,
+  "frontier": 1470,
   "reached": "big",
   "frames": 720,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "F1850C35-ACE07912": {
   "name": "Micro Machines 64 Turbo",
@@ -1568,29 +1569,29 @@
  },
  "E4B35E4C-1AC45CC9": {
   "name": "Midway's Greatest Arcade Hits Volume 1",
-  "rom": "roms\\Midway_s Greatest Arcade Hits Volume 1 (U) [!].z64",
-  "seconds": 187.1,
-  "head": "7e49b5e",
-  "stop": "stagnant",
-  "frontier": 1905,
+  "rom": "roms/Midway_s Greatest Arcade Hits Volume 1 (U) [!].z64",
+  "seconds": 289.2,
+  "head": "bb7a5e6",
+  "stop": "time",
+  "frontier": 2535,
   "reached": "big",
   "frames": 735,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "FA8C4571-BBE7F9C0": {
   "name": "Mickey's Speedway USA",
-  "rom": "roms\\Mickey_s Speedway USA (U) [!].z64",
-  "seconds": 220.6,
-  "head": "7e49b5e",
+  "rom": "roms/Mickey_s Speedway USA (U) [!].z64",
+  "seconds": 390.2,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 5640,
+  "frontier": 5325,
   "reached": "scene",
   "frames": 4155,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "26035CF8-802B9135": {
   "name": "Mission Impossible",
@@ -1605,16 +1606,16 @@
  },
  "1001F10C-3D51D8C1": {
   "name": "Mia Hamm Soccer 64",
-  "rom": "roms\\Mia Hamm Soccer 64 (U) [!].z64",
-  "seconds": 226.3,
-  "head": "7e49b5e",
+  "rom": "roms/Mia Hamm Soccer 64 (U) [!].z64",
+  "seconds": 1006.6,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 1140,
+  "frontier": 2580,
   "reached": "big",
   "frames": 240,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "09D53E16-3AB268B9": {
   "name": "Mike Piazza's Strike Zone",
@@ -1629,16 +1630,16 @@
  },
  "0B93051B-603D81F9": {
   "name": "Mischief Makers",
-  "rom": "roms\\Mischief Makers (U) [!].z64",
-  "seconds": 201.0,
-  "head": "7e49b5e",
+  "rom": "roms/Mischief Makers (U) [!].z64",
+  "seconds": 265.7,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 6990,
+  "frontier": 6630,
   "reached": "scene",
   "frames": 5910,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "2E955ECD-F3000884": {
   "name": "Milo's Astro Lanes",
@@ -1688,16 +1689,15 @@
  },
  "5AC383E1-D712E387": {
   "name": "Monopoly",
-  "rom": "roms\\Monopoly (U) [!].z64",
-  "seconds": 200.5,
-  "head": "7e49b5e",
+  "rom": "roms/Monopoly (U) [!].z64",
+  "seconds": 411.6,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 3435,
-  "reached": "furthest",
-  "frames": 2895,
+  "frontier": 3345,
+  "reached": "big",
+  "frames": 3300,
   "play": "stick",
-  "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "B19AD999-7E585118": {
   "name": "Monster Truck Madness 64",
@@ -1778,16 +1778,16 @@
  },
  "5129B6DA-9DEF3C8C": {
   "name": "Namco Museum 64",
-  "rom": "roms\\Namco Museum 64 (U) [!].z64",
-  "seconds": 209.5,
-  "head": "7e49b5e",
+  "rom": "roms/Namco Museum 64 (U) [!].z64",
+  "seconds": 189.2,
+  "head": "bb7a5e6",
   "stop": "time",
-  "frontier": 2130,
+  "frontier": 2670,
   "reached": "big",
   "frames": 735,
   "play": "stick",
   "kept": "no better route found",
-  "attempts": 3
+  "attempts": 4
  },
  "916852D8-73DBEAEF": {
   "name": "NBA Courtside 2 - Featuring Kobe Bryant",
