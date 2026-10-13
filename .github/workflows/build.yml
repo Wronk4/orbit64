@@ -510,6 +510,16 @@ jobs:
           path: dist/orbit64-android-${{ matrix.arch }}.tar.gz
           retention-days: 14
 
+  # Differential and audio tests under AddressSanitizer and UndefinedBehaviorSanitizer.
+  # Not part of the release: it only reports problems.
+  sanitizers:
+    name: Tests (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Interpreter vs JIT, audio pacing
+        run: make -j4 jit_selftest audio_check CXX="g++ -fsanitize=address,undefined -fno-sanitize-recover=undefined -g"
+
   release:
     needs: [build, freebsd, openbsd, netbsd, haiku, android, linux-musl, linux-x86, linux-cross]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
