@@ -175,24 +175,29 @@ void Emulator::step_frame() {
         // runs when pc repeats the one two steps back - and a two-pc loop it
         // has turned down isn't asked about again for the rest of the scanline.
         u64 prev_pc = ~0ULL, prev_prev_pc = ~0ULL, rejected_pc = ~0ULL;
+        // A DMA is over at its own time, not at the end of the scanline: the CPU is never run past it.
+        auto dma_limit = [this] {
+            u32 limit = ~0u;
+            if (pi.cycles_left()) limit = std::min(limit, pi.cycles_left());
+            if (si.cycles_left()) limit = std::min(limit, si.cycles_left());
+            return limit;
+        };
         while (executed < cycles_per_scanline) {
             const u64 pc = cpu.get_pc();
             if (pc == prev_prev_pc && pc != rejected_pc) {
-                if (u32 skipped = skip_idle_loop(pi.cycles_left() ? std::min(cycles_per_scanline - executed, pi.cycles_left()) : cycles_per_scanline - executed)) {
+                if (u32 skipped = skip_idle_loop(std::min(cycles_per_scanline - executed, dma_limit()))) {
                     executed += skipped;
-                    if (pi.step(skipped, mi)) cpu.check_interrupts();
+                    if (pi.step(skipped, mi) | si.step(skipped, mi)) cpu.check_interrupts();
                     continue;
                 }
                 rejected_pc = pc;
             }
             prev_prev_pc = prev_pc;
             prev_pc = pc;
-            // A DMA is over at its own time, not at the end of the scanline: the CPU stops there.
-            u32 budget = cycles_per_scanline - executed;
-            if (const u32 dma = pi.cycles_left()) budget = std::min(budget, dma);
+            const u32 budget = std::min(cycles_per_scanline - executed, dma_limit());
             const u32 ran = (cpu_core_ == CpuCore::Recompiler) ? jit.run(cpu, bus, budget) : cpu.step();
             executed += ran;
-            if (pi.step(ran, mi)) cpu.check_interrupts();
+            if (pi.step(ran, mi) | si.step(ran, mi)) cpu.check_interrupts();
         }
         const Clock::time_point t1 = profiling_ ? Clock::now() : Clock::time_point{};
 

@@ -5,6 +5,13 @@
 #include <cstring>
 #include <iostream>
 
+namespace {
+// A Joybus transfer takes thousands of cycles. A delay of at least 2000 is what GT 64 and Nightmare Creatures need
+// to get going (they did not at 200 or with the interrupt inside the starting store); 4000 is in the middle of
+// what hardware needs for one controller poll.
+constexpr u32 kDmaCycles = 4000;
+}
+
 SI::SI() {
     reset();
 }
@@ -14,6 +21,7 @@ void SI::reset() {
     pif_addr_rd64b = 0;
     pif_addr_wr64b = 0;
     status = 0;
+    dma_cycles_left = 0;
 }
 
 u32 SI::read_reg(u32 addr) const {
@@ -45,8 +53,8 @@ void SI::write_reg(u32 addr, u32 val, MI& mi, PIF& pif, Controller controllers[4
             }
             jit::notify_code_write(cur_dram, static_cast<u32>(std::min<size_t>(64, rdram_size - cur_dram)));
 
-            status |= (1 << 12); // Interrupt set
-            mi.raise_interrupt(MIInterrupt::SI);
+            status |= 1; // DMA busy
+            dma_cycles_left = kDmaCycles;
             break;
         }
         case 4: { // SI_PIF_ADDR_WR64B_REG (RDRAM to PIF)
@@ -62,14 +70,27 @@ void SI::write_reg(u32 addr, u32 val, MI& mi, PIF& pif, Controller controllers[4
             // Process commands immediately
             pif.process_commands(controllers, cart);
 
-            status |= (1 << 12); // Interrupt set
-            mi.raise_interrupt(MIInterrupt::SI);
+            status |= 1; // DMA busy
+            dma_cycles_left = kDmaCycles;
             break;
         }
         case 6: // SI_STATUS_REG
             // Writing any value clears SI interrupt
-            status &= ~(1 << 12);
+            status &= ~(1u << 12);
             mi.clear_interrupt(MIInterrupt::SI);
             break;
     }
+}
+
+bool SI::step(u32 cycles, MI& mi) {
+    if (dma_cycles_left == 0) return false;
+    if (dma_cycles_left > cycles) {
+        dma_cycles_left -= cycles;
+        return false;
+    }
+    dma_cycles_left = 0;
+    status &= ~1u;
+    status |= (1u << 12); // Interrupt set
+    mi.raise_interrupt(MIInterrupt::SI);
+    return true;
 }
