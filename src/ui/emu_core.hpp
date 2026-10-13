@@ -8,6 +8,7 @@
 //   core -> UI  : latest video frame, live statistics
 
 #include <atomic>
+#include <chrono>
 #include "../audio_stream.hpp"
 #include "../rdp.hpp"
 #include "../video_frame.hpp"
@@ -151,6 +152,7 @@ public:
     // Internal resolution of the software RDP: 1 = the game's frame buffer
     // size, 2..8 = that many times larger. Applied at the next frame.
     void set_internal_scale(int scale) { internal_scale_ = scale; }
+    void set_autosave_backup(bool on) { autosave_backup_ = on; } // write saves ~3 s after a change, not only on exit
     // Who renders internal resolutions above 1 (the GPU renderer), or
     // nullptr for the CPU. Applied at the next frame; the high-resolution
     // buffers start over.
@@ -247,6 +249,8 @@ private:
     bool exact_factory_dirty_ = false; // guarded by factory_mutex_
     std::atomic<int> fps_limit_{0};
     std::atomic<int> internal_scale_{1};
+    std::atomic<bool> autosave_backup_{true};
+    std::chrono::steady_clock::time_point last_backup_{}; // emulation thread only
     std::mutex factory_mutex_;
     HiResFactory hires_factory_;
     bool factory_dirty_ = false; // guarded by factory_mutex_

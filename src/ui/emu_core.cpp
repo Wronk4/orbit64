@@ -554,6 +554,11 @@ void EmuCore::run_one_frame(FrameClock& fc) {
     for (int p = 0; p < 4; ++p) rumble_[p] = emu_->get_controller(p).rumble();
     emu_->render_frame(fc.frame);
     auto t1 = Clock::now();
+    // Cartridge saves hit the disk soon after the game writes them, so a crash doesn't lose progress.
+    if (autosave_backup_ && t1 - last_backup_ > std::chrono::seconds(3)) {
+        last_backup_ = t1;
+        if (emu_->get_cartridge().backup_dirty()) emu_->get_cartridge().save_backup();
+    }
     apply_memory_writes();
     fc.frame_counter++;
     fc.window_frames++;

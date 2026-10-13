@@ -1,4 +1,5 @@
 #include "settings.hpp"
+#include "../atomic_file.hpp"
 #include "platform.hpp"
 
 #include <SDL3/SDL.h>
@@ -338,10 +339,8 @@ bool Settings::save(const std::string& path) const {
     w.kv("dir_count", static_cast<int>(rom_dirs.size()));
     for (size_t i = 0; i < rom_dirs.size(); ++i) w.kv("dir" + std::to_string(i), rom_dirs[i]);
 
-    std::ofstream f(platform::utf8_to_path(path), std::ios::binary);
-    if (!f) return false;
-    f << w.out.str();
-    return true;
+    const std::string text = w.out.str();
+    return atomic_file::write(platform::utf8_to_path(path), text.data(), text.size());
 }
 
 bool Settings::load(const std::string& path) {

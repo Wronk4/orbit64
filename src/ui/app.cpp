@@ -603,6 +603,7 @@ void App::update_input() {
     core_.set_limit_speed(settings_.limit_speed);
     core_.set_fps_limit(settings_.fps_limit);
     core_.set_internal_scale(settings_.internal_scale);
+    core_.set_autosave_backup(settings_.autosave_backup);
     core_.set_expansion_pak(settings_.expansion_pak);
 }
 

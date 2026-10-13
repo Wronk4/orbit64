@@ -1,4 +1,5 @@
 #include "library.hpp"
+#include "../atomic_file.hpp"
 #include "platform.hpp"
 
 #include <algorithm>
@@ -58,13 +59,19 @@ void Library::load(const fs::path& state_file) {
 
 void Library::save() const {
     if (state_file_.empty()) return;
-    std::ofstream f(state_file_, std::ios::binary);
+    // Tabs and newlines would break the line format; such paths are left out.
+    auto plain = [](const std::string& v) { return v.find_first_of("\t\r\n") == std::string::npos; };
+    std::ostringstream f;
     for (const auto& [key, s] : stats_) {
         if (!s.favorite && s.last_played == 0 && s.play_seconds == 0) continue;
+        if (!plain(key)) continue;
         f << "G\t" << (s.favorite ? 1 : 0) << "\t" << s.last_played << "\t" << s.play_seconds << "\t" << s.launches
           << "\t" << key << "\n";
     }
-    for (const auto& x : extra_paths_) f << "X\t" << x << "\n";
+    for (const auto& x : extra_paths_)
+        if (plain(x)) f << "X\t" << x << "\n";
+    const std::string text = f.str();
+    atomic_file::write(state_file_, text.data(), text.size());
 }
 
 void Library::rescan(const std::vector<std::string>& dirs, bool recursive, const std::string& boxart_dir) {
@@ -103,9 +110,9 @@ void Library::rescan(const std::vector<std::string>& dirs, bool recursive, const
                     if (it->is_regular_file(ec)) consider(it->path());
                 }
             } else {
-                for (const auto& e : fs::directory_iterator(root, opts, ec)) {
-                    if (cancel_) break;
-                    if (e.is_regular_file(ec)) consider(e.path());
+                fs::directory_iterator it(root, opts, ec), end;
+                for (; !ec && it != end && !cancel_; it.increment(ec)) {
+                    if (it->is_regular_file(ec)) consider(it->path());
                 }
             }
         }

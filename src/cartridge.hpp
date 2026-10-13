@@ -29,6 +29,9 @@ public:
 
     bool load_rom(const std::string& filepath);
     void save_backup();
+    bool backup_dirty() const {
+        return sram_dirty || eeprom_dirty || mempak_dirty[0] || mempak_dirty[1] || mempak_dirty[2] || mempak_dirty[3];
+    }
     // Off: load_rom() neither reads nor later writes the .sav next to the ROM,
     // so a run always starts from blank save memory (reproducible test runs).
     void set_use_save_file(bool on) { use_save_file_ = on; }

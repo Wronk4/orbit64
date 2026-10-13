@@ -1,4 +1,5 @@
 #include "cartridge.hpp"
+#include "atomic_file.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -385,24 +386,16 @@ void Cartridge::dma_from_rdram(u32 off, const u8* src, u32 len) {
 void Cartridge::save_backup() {
     for (int i = 0; i < 4; ++i) {
         if (!mempak_dirty[i] || mempak_filepath[i].empty()) continue;
-        std::ofstream pak_file(utf8_path(mempak_filepath[i]), std::ios::binary);
-        if (pak_file.is_open()) {
-            pak_file.write(reinterpret_cast<const char*>(mempaks[i].data()), mempaks[i].size());
+        if (atomic_file::write(utf8_path(mempak_filepath[i]), mempaks[i].data(), mempaks[i].size()))
             mempak_dirty[i] = false;
-        }
     }
     if (!sram_dirty && !eeprom_dirty) return;
     if (save_filepath.empty()) return;
 
-    std::ofstream file(utf8_path(save_filepath), std::ios::binary);
-    if (!file.is_open()) return;
-
     if ((save_type == SaveType::SRAM_32K || save_type == SaveType::FLASHRAM_128K) && !sram.empty()) {
-        file.write(reinterpret_cast<const char*>(sram.data()), sram.size());
-        sram_dirty = false;
+        if (atomic_file::write(utf8_path(save_filepath), sram.data(), sram.size())) sram_dirty = false;
     } else if ((save_type == SaveType::EEPROM_4K || save_type == SaveType::EEPROM_16K) && !eeprom.empty()) {
-        file.write(reinterpret_cast<const char*>(eeprom.data()), eeprom.size());
-        eeprom_dirty = false;
+        if (atomic_file::write(utf8_path(save_filepath), eeprom.data(), eeprom.size())) eeprom_dirty = false;
     }
 }
 

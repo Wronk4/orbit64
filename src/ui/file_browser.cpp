@@ -141,7 +141,8 @@ void FileBrowser::refresh() {
         error_ = "This folder can't be opened: " + ec.message();
         return;
     }
-    for (const auto& de : it) {
+    for (const fs::directory_iterator end; it != end; it.increment(ec)) {
+        const auto& de = *it;
         Entry e;
         e.path = de.path();
         e.name = platform::path_to_utf8(de.path().filename());
