@@ -250,6 +250,7 @@ public:
     // "Conversion between floating-point and integer", parameterized by the
     // *integer* register's width (32/64) and the FP register's precision.
     void fcvtzs(int rd, int vn, bool int64, bool dbl) { fcvt_int(int64, dbl, 0b11, 0b000, rd, vn); } // toward zero
+    void fcvtns(int rd, int vn, bool int64, bool dbl) { fcvt_int(int64, dbl, 0b00, 0b000, rd, vn); } // nearest, ties to even
     void fcvtas(int rd, int vn, bool int64, bool dbl) { fcvt_int(int64, dbl, 0b00, 0b100, rd, vn); } // nearest, ties away
     void fcvtps(int rd, int vn, bool int64, bool dbl) { fcvt_int(int64, dbl, 0b01, 0b000, rd, vn); } // toward +inf
     void fcvtms(int rd, int vn, bool int64, bool dbl) { fcvt_int(int64, dbl, 0b10, 0b000, rd, vn); } // toward -inf

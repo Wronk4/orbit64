@@ -555,7 +555,7 @@ bool emit_fp_arith(Gen& g, const Decoded& d) {
         const bool to64 = d.funct < 0x0C;
         ld(0, fs);
         switch (d.funct & 3) {
-        case 0: a.fcvtas(0, 0, to64, dbl); break; // std::round: nearest, ties away from zero
+        case 0: a.fcvtns(0, 0, to64, dbl); break; // nearbyint: nearest, ties to even (as the interpreter)
         case 1: a.fcvtzs(0, 0, to64, dbl); break;
         case 2: a.fcvtps(0, 0, to64, dbl); break;
         default: a.fcvtms(0, 0, to64, dbl); break;

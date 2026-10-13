@@ -1854,7 +1854,7 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
     std::vector<CountedDl> counted_dl;
     u32 pc = dl_addr;
 
-    const u32 MAX_COMMANDS = 100000;
+    const u32 MAX_COMMANDS = 400000; // a runaway list ends here; real ones are far shorter
     u32 cmd_count = 0;
 
     while (cmd_count++ < MAX_COMMANDS) {
@@ -2665,6 +2665,14 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
         }
     }
 
+    if (cmd_count > MAX_COMMANDS) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::cerr << "[RDP] A display list ran past " << MAX_COMMANDS << " commands and was cut off\n";
+        }
+    }
+
     if (rdp_debug_output()) std::cout << "[RDP Stats] Triangles called: " << stat_tri_called
               << " | incount: [0]=" << stat_incount[0] << " [1]=" << stat_incount[1] 
               << " [2]=" << stat_incount[2] << " [3]=" << stat_incount[3]
@@ -2683,6 +2691,20 @@ void RDP::process_display_list(u32 dl_addr, u8* rdram, size_t rdram_size, MI& mi
 // from segmented image addresses; `raw` commands come from the RDP command
 // buffer (process_rdp_commands()) and carry physical ones.
 bool RDP::execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size, bool raw) {
+    // Games reload the same texture into TMEM over and over. The decoded-texture caches are
+    // keyed on tmem_gen_, so a load that leaves TMEM as it was must not invalidate them.
+    if (opcode == 0xF0 || opcode == 0xF3 || opcode == 0xF4) { // LOADTLUT, LOADBLOCK, LOADTILE
+        const std::array<u8, 4096> tmem_before = tmem;
+        const std::array<bool, 512> dxt_before = tmem_word_dxt_zero;
+        const u64 gen_before = tmem_gen_;
+        const bool r = execute_rdp_op_impl(opcode, w0, w1, rdram, rdram_size, raw);
+        if (tmem == tmem_before && tmem_word_dxt_zero == dxt_before) tmem_gen_ = gen_before;
+        return r;
+    }
+    return execute_rdp_op_impl(opcode, w0, w1, rdram, rdram_size, raw);
+}
+
+bool RDP::execute_rdp_op_impl(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size, bool raw) {
     auto image_addr = [&](u32 a) { return raw ? (a & 0x00FFFFFF) : segment_to_physical(a); };
     switch (opcode) {
         case 0xED: { // G_SETSCISSOR

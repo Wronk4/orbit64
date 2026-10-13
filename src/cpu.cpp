@@ -1171,7 +1171,7 @@ void CPU::execute_fpu_op(u32 instr) {
             case 0x06: d_val = s_val; break; // MOV.S
             case 0x07: d_val = -s_val; break; // NEG.S
             case 0x08: { // ROUND.L.S
-                s64 i_val = static_cast<s64>(std::round(s_val));
+                s64 i_val = static_cast<s64>(std::nearbyint(s_val));
                 set_fpr64(fd, static_cast<u64>(i_val));
                 return;
             }
@@ -1191,7 +1191,7 @@ void CPU::execute_fpu_op(u32 instr) {
                 return;
             }
             case 0x0C: { // ROUND.W.S
-                s32 i_val = static_cast<s32>(std::round(s_val));
+                s32 i_val = static_cast<s32>(std::nearbyint(s_val));
                 set_fpr32(fd, static_cast<u32>(i_val));
                 return;
             }
@@ -1259,7 +1259,7 @@ void CPU::execute_fpu_op(u32 instr) {
             case 0x06: d_val = s_val; break; // MOV.D
             case 0x07: d_val = -s_val; break; // NEG.D
             case 0x08: { // ROUND.L.D
-                s64 i_val = static_cast<s64>(std::round(s_val));
+                s64 i_val = static_cast<s64>(std::nearbyint(s_val));
                 set_fpr64(fd, static_cast<u64>(i_val));
                 return;
             }
@@ -1279,7 +1279,7 @@ void CPU::execute_fpu_op(u32 instr) {
                 return;
             }
             case 0x0C: { // ROUND.W.D
-                s32 i_val = static_cast<s32>(std::round(s_val));
+                s32 i_val = static_cast<s32>(std::nearbyint(s_val));
                 set_fpr32(fd, static_cast<u32>(i_val));
                 return;
             }

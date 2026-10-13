@@ -211,6 +211,9 @@ void VI::render_frame_exact(const u8* rdram, size_t rdram_size, ExactRdp* rdp, s
     v_res *= S;
     const int max_x = (x_start + h_res * x_add) >> 10;
     const int max_y = (y_start + v_res * y_add) >> 10;
+    // A stray VI_X_SCALE / VI_Y_SCALE would make the working buffers gigabytes large. Real
+    // modes stay below about 1300 x 600 native pixels (2x downscaled interlaced 640 x 480).
+    if (max_x > 1536 * S || max_y > 1152 * S) return blank();
 
     const u32 aa_mode = (st >> 8) & 3;
     const bool fetch_aa = aa_mode < 2;   // coverage anti-aliasing

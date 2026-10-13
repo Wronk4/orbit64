@@ -36,6 +36,7 @@ struct UpStore {
     UpStore& operator=(const UpStore&) = delete;
     u8* color(u32 slice) const { return color_ + slice * size; }         // RDRAM bytes
     u8* hidden(u32 slice) const { return hidden_ + slice * (size / 2); } // ninth bits per halfword
+    bool ok() const { return color_ && hidden_ && ref; } // false when the memory couldn't be reserved
     u32 scale;
     size_t size;
     // RDRAM as it was when the copy last agreed with it (same layout): where

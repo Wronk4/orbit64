@@ -256,6 +256,7 @@ private:
     void rdp_triangle(const u64* cmd, u32 op, u8* rdram, size_t rdram_size);
     // Shared by display lists and the command buffer, see its definition.
     bool execute_rdp_op(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size, bool raw);
+    bool execute_rdp_op_impl(u8 opcode, u32 w0, u32 w1, u8* rdram, size_t rdram_size, bool raw);
 
     // DPC registers
     u32 dpc_start{0};

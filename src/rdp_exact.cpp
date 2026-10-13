@@ -380,7 +380,6 @@ UpStore::UpStore(u32 scale_, size_t rdram_size) : scale(scale_), size(rdram_size
     if (!color_ || !hidden_ || !ref) {
         std::fprintf(stderr, "ExactRdp: can't reserve %zu MB for %ux internal resolution\n",
                      (color_bytes_ + hidden_bytes_ + ref_bytes_) >> 20, scale);
-        std::abort();
     }
 }
 
@@ -392,7 +391,17 @@ UpStore::~UpStore() {
 
 UpStore* ExactRdp::upscaled(size_t rdram_size) {
     if (scale_ <= 1) return nullptr;
-    if (!up_ || up_->size != rdram_size) up_ = std::make_shared<UpStore>(scale_, rdram_size);
+    if (!up_ || up_->size != rdram_size) {
+        auto store = std::make_shared<UpStore>(scale_, rdram_size);
+        if (!store->ok()) {
+            // Not enough memory for this internal resolution: carry on at native resolution.
+            std::fprintf(stderr, "ExactRdp: falling back to 1x internal resolution\n");
+            up_.reset();
+            scale_ = 1;
+            return nullptr;
+        }
+        up_ = std::move(store);
+    }
     return up_.get();
 }
 
