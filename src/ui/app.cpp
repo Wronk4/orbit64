@@ -774,8 +774,8 @@ void App::action_add_folder() {
 
 void App::launch(const fs::path& rom) {
     auto do_launch = [this, rom]() {
-        if (core_.loaded()) stop_now();
         RomInfo info = inspect_rom(rom);
+        if (info.valid && core_.loaded()) stop_now(); // an invalid file leaves the running game alone
         if (!info.valid) {
             error_title_ = "Can't open this file";
             error_msg_ = platform::path_to_utf8(rom.filename()) +

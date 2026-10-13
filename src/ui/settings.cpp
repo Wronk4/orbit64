@@ -376,6 +376,14 @@ bool Settings::load(const std::string& path) {
     r.get("autosave", autosave_backup); r.get("expansion_pak", expansion_pak);
     r.get("fps_limit", fps_limit); r.get("render_scale", render_scale);
     r.get("render_w", render_w); r.get("render_h", render_h);
+    // A hand-edited or damaged file must not hand nonsense to the audio device or the emulation loop.
+    volume = std::clamp(volume, 0, 100);
+    sample_rate = std::clamp(sample_rate, 8000, 192000);
+    buffer_frames = std::clamp(buffer_frames, 64, 16384);
+    ff_speed = std::clamp(ff_speed, 0, 16);
+    fps_limit = std::clamp(fps_limit, 0, 1000);
+    cpu_core = std::clamp(cpu_core, 0, 1);
+    rsp_mode = std::clamp(rsp_mode, 0, 2);
 
     for (int i = 0; i < 4; ++i) {
         r.sec = "port" + std::to_string(i + 1);
