@@ -1,5 +1,6 @@
 #include "raytracer.hpp"
 
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 
@@ -187,7 +188,7 @@ void RayTracingScene::build(u32 node, u32 first, u32 count, int depth) {
 u32 RayTracingScene::serialize(std::vector<u32>& out, u32* lights_offset, u64 tex_batch) const {
     out.clear();
     if (!ready()) return 0;
-    auto f = [&](f32 v) { out.push_back(std::bit_cast<u32>(v)); };
+    auto f = [&](f32 v) { u32 bits; std::memcpy(&bits, &v, sizeof bits); out.push_back(bits); }; // std::bit_cast is missing in older libstdc++ (NetBSD)
     out.reserve(nodes_.size() * 8 + tris_.size() * 12);
     for (const BVHNode& n : nodes_) {
         f(n.bounds.min.x); f(n.bounds.min.y); f(n.bounds.min.z);
