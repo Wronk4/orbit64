@@ -33,6 +33,13 @@ bool Cartridge::load_rom(const std::string& filepath) {
         std::cerr << "[Cartridge] ROM file too small: " << size << " bytes\n";
         return false;
     }
+    // The cartridge bus maps 0x10000000-0x1FBFFFFF; a larger file is no ROM (and could not be read into memory
+    // on a 32-bit build).
+    constexpr std::streamsize kMaxRomBytes = 0x0FC00000;
+    if (size > kMaxRomBytes) {
+        std::cerr << "[Cartridge] ROM file too large: " << size << " bytes\n";
+        return false;
+    }
 
     // Read and validate into a local buffer: a bad file must not replace the loaded cartridge.
     std::vector<u8> data(size);

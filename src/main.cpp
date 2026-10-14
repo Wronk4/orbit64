@@ -11,6 +11,9 @@
 #include <chrono>
 #include <thread>
 #include <limits>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
@@ -94,20 +97,32 @@ int main(int argc, char* argv[]) {
     bool use_save_file = true;
     std::string wav_path;
 
+    // A number on the command line; anything else ends the program with a message, not an uncaught exception.
+    auto number = [](const std::string& text, const char* option) {
+        char* end = nullptr;
+        errno = 0;
+        const long v = std::strtol(text.c_str(), &end, 10);
+        if (text.empty() || *end != '\0' || errno != 0 || v < INT_MIN || v > INT_MAX) {
+            std::cerr << "[Main] " << option << ": \"" << text << "\" is not a number\n";
+            std::exit(2);
+        }
+        return static_cast<int>(v);
+    };
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--headless" && i + 1 < argc) {
             headless = true;
-            headless_frames = std::stoi(argv[++i]);
+            headless_frames = number(argv[++i], "--headless");
         } else if (arg == "--scale" && i + 1 < argc) {
-            internal_scale = std::stoi(argv[++i]);
+            internal_scale = number(argv[++i], "--scale");
         } else if (arg == "--screenshot" && i + 1 < argc) {
             screenshot_path = argv[++i];
         } else if (arg == "--screenshot-at" && i + 1 < argc) {
             std::string p = argv[++i];
             size_t colon = p.find(':');
             if (colon != std::string::npos) {
-                int frame = std::stoi(p.substr(0, colon));
+                int frame = number(p.substr(0, colon), "--screenshot-at");
                 std::string path = p.substr(colon + 1);
                 scheduled_screenshots.emplace_back(frame, path);
             }
@@ -133,7 +148,7 @@ int main(int argc, char* argv[]) {
             std::string p = argv[++i];
             size_t colon = p.find(':');
             if (colon != std::string::npos) {
-                int frame = std::stoi(p.substr(0, colon));
+                int frame = number(p.substr(0, colon), "--press");
                 std::string btn = p.substr(colon + 1);
                 scheduled_presses.emplace_back(frame, btn);
             }
