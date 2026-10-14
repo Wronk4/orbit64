@@ -1,4 +1,5 @@
 # Build output
+.build_info
 build/
 bin/
 out/

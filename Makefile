@@ -23,7 +23,10 @@ else
     EXE :=
 endif
 
-CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Wno-unused-parameter -MMD -MP $(SDL3_CFLAGS) $(PLATFORM_DEFS) \
+# The version the app shows (tools/version.sh): major.minor, the number of commits, "-<branch>" off main.
+ORBIT64_VERSION := $(shell sh tools/version.sh)
+
+CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Wno-unused-parameter -MMD -MP $(SDL3_CFLAGS) $(PLATFORM_DEFS) -DORBIT64_VERSION='"$(ORBIT64_VERSION)"' \
             -Isrc -Ithird_party/imgui -Ithird_party/imgui/backends -Ithird_party/stb -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -DIMGUI_ENABLE_TEST_ENGINE
 LDFLAGS := $(SDL3_LIBS) $(PLATFORM_LIBS) -lpthread
 

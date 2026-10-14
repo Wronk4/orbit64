@@ -26,7 +26,13 @@
 namespace ui {
 
 constexpr const char* kAppName = "Orbit64";
-constexpr const char* kAppVersion = "1.0.0";
+// The version of the release this build belongs to: major.minor from project(VERSION) in CMakeLists.txt, then the
+// number of commits (the number the release workflow gives the release), and the branch name when it is not main.
+// CMake and the Makefile define ORBIT64_VERSION; a build without either shows 1.0.0.
+#ifndef ORBIT64_VERSION
+#define ORBIT64_VERSION "1.0.0"
+#endif
+constexpr const char* kAppVersion = ORBIT64_VERSION;
 
 enum class View { Library, Game };
 enum class LibraryFilter { All, Favorites, Recent, Homebrew, RegionUSA, RegionEUR, RegionJPN, Folder };

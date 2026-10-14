@@ -109,6 +109,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
 
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
@@ -186,6 +193,14 @@ jobs:
             os: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
+
       - name: Build in Alpine
         run: |
           docker run --rm -v ${{ github.workspace }}:/work -w /work alpine:latest sh -c "
@@ -219,6 +234,14 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
+
       - name: Build in 32-bit Debian
         run: |
           docker run --rm -v ${{ github.workspace }}:/work -w /work i386/debian:bookworm sh -c "
@@ -274,6 +297,14 @@ jobs:
             packages: gcc-powerpc64le-linux-gnu g++-powerpc64le-linux-gnu
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
+
       - name: Install cross-toolchain and QEMU runner
         run: |
           sudo apt-get update
@@ -310,6 +341,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
 
       - name: Build in FreeBSD
         uses: vmactions/freebsd-vm@v1
@@ -351,6 +389,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
 
       - name: Build in OpenBSD
         uses: vmactions/openbsd-vm@v1
@@ -390,6 +435,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
 
       - name: Build in NetBSD
         uses: vmactions/netbsd-vm@v1
@@ -439,6 +491,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
 
       - name: Build in Haiku
         uses: vmactions/haiku-vm@v1
@@ -484,6 +543,14 @@ jobs:
             abi: x86_64
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version info (the app shows it)
+        shell: bash
+        run: |
+          { git rev-list --count HEAD; if [ "$GITHUB_REF_TYPE" = branch ]; then echo "$GITHUB_REF_NAME"; fi; } > .build_info
+
       - name: Build for Android
         run: |
           NDK_PATH="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
