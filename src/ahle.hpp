@@ -157,8 +157,8 @@ private:
     struct MusyXState;
     void run_musyx_v1(u32 sfd_ptr, u32 sfd_count);
     void run_musyx_v2(u32 sfd_ptr, u32 sfd_count);
-    void musyx_dma_cat8(u8* dst, u32 catsrc_ptr);
-    void musyx_dma_cat16(s16* dst, u32 catsrc_ptr);
+    void musyx_dma_cat8(u8* dst, u32 catsrc_ptr, size_t capacity);
+    void musyx_dma_cat16(s16* dst, u32 catsrc_ptr, size_t capacity);
     void musyx_load_samples_pcm16(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset);
     void musyx_load_samples_adpcm(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset);
     void musyx_mix_voice_samples(MusyXState& musyx, u32 voice_ptr, const s16* samples,

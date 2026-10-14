@@ -1096,7 +1096,7 @@ namespace {
         }
         for (unsigned int i = 0; i < count; ++i) {
             const u8 c2 = nibbles[0];
-            const s16* book = (c2 & 0xF0) + table;
+            const s16* book = (c2 & 0x70) + table; // the table holds 8 books of 16 coefficients
             const unsigned int rshift = (c2 & 0x0F);
 
             musyx_predict_frame(frame, src, nibbles, rshift);
@@ -1149,31 +1149,26 @@ struct AudioHLE::MusyXState {
     s16 subframe_740_last4[4]{0, 0, 0, 0};
 };
 
-void AudioHLE::musyx_dma_cat8(u8* dst, u32 catsrc_ptr) {
+// The two copies of a catenated source (size1 + size2 bytes or samples) are cut to the room `capacity` the destination
+// has: the sizes are 16-bit values read from RDRAM and a corrupt voice could name more than the stack buffers hold.
+void AudioHLE::musyx_dma_cat8(u8* dst, u32 catsrc_ptr, size_t capacity) {
     const u32 ptr1  = dram_u32(catsrc_ptr + CATSRC_PTR1);
     const u32 ptr2  = dram_u32(catsrc_ptr + CATSRC_PTR2);
-    const u16 size1 = dram_u16(catsrc_ptr + CATSRC_SIZE1);
-    const u16 size2 = dram_u16(catsrc_ptr + CATSRC_SIZE2);
+    const size_t size1 = std::min<size_t>(dram_u16(catsrc_ptr + CATSRC_SIZE1), capacity);
+    const size_t size2 = std::min<size_t>(dram_u16(catsrc_ptr + CATSRC_SIZE2), capacity - size1);
 
     for (size_t i = 0; i < size1; ++i) dst[i] = dram_u8(ptr1 + i);
-    if (size2 != 0) {
-        for (size_t i = 0; i < size2; ++i) dst[size1 + i] = dram_u8(ptr2 + i);
-    }
+    for (size_t i = 0; i < size2; ++i) dst[size1 + i] = dram_u8(ptr2 + i);
 }
 
-void AudioHLE::musyx_dma_cat16(s16* dst, u32 catsrc_ptr) {
+void AudioHLE::musyx_dma_cat16(s16* dst, u32 catsrc_ptr, size_t capacity) {
     const u32 ptr1  = dram_u32(catsrc_ptr + CATSRC_PTR1);
     const u32 ptr2  = dram_u32(catsrc_ptr + CATSRC_PTR2);
-    const u16 size1 = dram_u16(catsrc_ptr + CATSRC_SIZE1);
-    const u16 size2 = dram_u16(catsrc_ptr + CATSRC_SIZE2);
-
-    const size_t count1 = size1 >> 1;
-    const size_t count2 = size2 >> 1;
+    const size_t count1 = std::min<size_t>(dram_u16(catsrc_ptr + CATSRC_SIZE1) >> 1, capacity);
+    const size_t count2 = std::min<size_t>(dram_u16(catsrc_ptr + CATSRC_SIZE2) >> 1, capacity - count1);
 
     for (size_t i = 0; i < count1; ++i) dst[i] = dram_s16(ptr1 + i * 2);
-    if (size2 != 0) {
-        for (size_t i = 0; i < count2; ++i) dst[count1 + i] = dram_s16(ptr2 + i * 2);
-    }
+    for (size_t i = 0; i < count2; ++i) dst[count1 + i] = dram_s16(ptr2 + i * 2);
 }
 
 void AudioHLE::musyx_load_samples_pcm16(u32 voice_ptr, s16* samples, unsigned& segbase, unsigned& offset) {
@@ -1181,13 +1176,14 @@ void AudioHLE::musyx_load_samples_pcm16(u32 voice_ptr, s16* samples, unsigned& s
     const u16 u16_40 = dram_u16(voice_ptr + VOICE_U16_40);
     const u16 u16_42 = dram_u16(voice_ptr + VOICE_U16_42);
 
-    const unsigned count = align_up(u16_40 + u8_3e, 4);
+    // (`count` fits the buffer for any real voice; a corrupt one must not make `segbase` wrap around.)
+    const unsigned count = std::min<unsigned>(align_up(u16_40 + u8_3e, 4), MUSYX_SAMPLE_BUFFER_SIZE);
     segbase = MUSYX_SAMPLE_BUFFER_SIZE - count;
     offset  = u8_3e;
 
-    musyx_dma_cat16(samples + segbase, voice_ptr + VOICE_CATSRC_0);
+    musyx_dma_cat16(samples + segbase, voice_ptr + VOICE_CATSRC_0, count);
     if (u16_42 != 0) {
-        musyx_dma_cat16(samples, voice_ptr + VOICE_CATSRC_1);
+        musyx_dma_cat16(samples, voice_ptr + VOICE_CATSRC_1, MUSYX_SAMPLE_BUFFER_SIZE);
     }
 }
 
@@ -1205,16 +1201,20 @@ void AudioHLE::musyx_load_samples_adpcm(u32 voice_ptr, s16* samples, unsigned& s
         adpcm_table[i] = dram_s16(adpcm_table_ptr + i * 2);
     }
 
-    const unsigned count = static_cast<unsigned>(u8_3c) << 5;
+    // A frame is 32 samples; more frames than the buffer holds would write past it (and wrap `segbase`).
+    constexpr unsigned kMaxFrames = MUSYX_SAMPLE_BUFFER_SIZE / 32;
+    const u8 frames0 = static_cast<u8>(std::min<unsigned>(u8_3c, kMaxFrames));
+    const u8 frames1 = static_cast<u8>(std::min<unsigned>(u8_3d, kMaxFrames));
+    const unsigned count = static_cast<unsigned>(frames0) << 5;
     segbase = MUSYX_SAMPLE_BUFFER_SIZE - count;
     offset  = u8_3e & 0x1F;
 
-    musyx_dma_cat8(buffer, voice_ptr + VOICE_CATSRC_0);
-    musyx_decode_frames(samples + segbase, buffer, adpcm_table, u8_3c, u8_3e);
+    musyx_dma_cat8(buffer, voice_ptr + VOICE_CATSRC_0, sizeof(buffer));
+    musyx_decode_frames(samples + segbase, buffer, adpcm_table, frames0, u8_3e);
 
-    if (u8_3d != 0) {
-        musyx_dma_cat8(buffer, voice_ptr + VOICE_CATSRC_1);
-        musyx_decode_frames(samples, buffer, adpcm_table, u8_3d, u8_3f);
+    if (frames1 != 0) {
+        musyx_dma_cat8(buffer, voice_ptr + VOICE_CATSRC_1, sizeof(buffer));
+        musyx_decode_frames(samples, buffer, adpcm_table, frames1, u8_3f);
     }
 }
 
@@ -1315,6 +1315,7 @@ void AudioHLE::musyx_sfx_stage(MusyXState& musyx, u32 sfx_ptr, u16 idx, bool is_
     const u32 cbuffer_ptr    = dram_u32(sfx_ptr + SFX_CBUFFER_PTR);
     const u32 cbuffer_length = dram_u32(sfx_ptr + SFX_CBUFFER_LENGTH);
     if (cbuffer_ptr == 0 || cbuffer_length == 0) return;
+    if (cbuffer_length > 0x400000) return; // samples: more than any RDRAM holds, so the structure is garbage
 
     const u16 tap_count = dram_u16(sfx_ptr + SFX_TAP_COUNT);
 
@@ -1340,14 +1341,17 @@ void AudioHLE::musyx_sfx_stage(MusyXState& musyx, u32 sfx_ptr, u16 idx, bool is_
     s16 delayed[MUSYX_SUBFRAME_SIZE];
 
     for (size_t i = 0; i < tap_count && i < 8; ++i) {
-        int dpos = static_cast<int>(pos) - static_cast<int>(tap_delays[i]);
-        while (dpos <= 0) {
-            dpos += static_cast<int>(cbuffer_length);
-        }
+        // The read position wraps into (0, cbuffer_length]. (A loop adding the length until it is positive never ends
+        // for a length of 2^31 or more, and a position past the end indexed `delayed` below zero.)
+        s64 wrapped = static_cast<s64>(pos) - static_cast<s64>(tap_delays[i]);
+        const s64 len = static_cast<s64>(cbuffer_length);
+        wrapped %= len;
+        if (wrapped <= 0) wrapped += len;
+        int dpos = static_cast<int>(wrapped);
         int dlength = static_cast<int>(MUSYX_SUBFRAME_SIZE);
 
-        if (static_cast<u32>(dpos + MUSYX_SUBFRAME_SIZE) > cbuffer_length) {
-            dlength = static_cast<int>(cbuffer_length) - dpos;
+        if (static_cast<s64>(dpos) + static_cast<s64>(MUSYX_SUBFRAME_SIZE) > len) {
+            dlength = static_cast<int>(len - dpos);
             for (int s = 0; s < static_cast<int>(MUSYX_SUBFRAME_SIZE) - dlength; ++s) {
                 delayed[dlength + s] = dram_s16(cbuffer_ptr + s * 2);
             }
