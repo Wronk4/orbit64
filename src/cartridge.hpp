@@ -111,6 +111,10 @@ public:
         }
     }
     std::string get_game_code() const { return game_code; }
+    // Games whose graphics must all run on the low-level RSP: Flying Dragon (NFD*) mixes an ordinary F3DEX with
+    // Sprite2D microcodes whose display list the high-level renderer cannot read (opcode 0x09), and it crashes
+    // when only some of them run low-level.
+    bool graphics_need_lle() const { return game_code.size() >= 3 && game_code[1] == 'F' && game_code[2] == 'D'; }
 
     // Save states (savestate.hpp): the save memory, so the game finds what it
     // last wrote. A loaded state's save memory goes to the .sav file too.

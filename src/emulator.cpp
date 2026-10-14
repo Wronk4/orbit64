@@ -39,6 +39,7 @@ void Emulator::reset() {
             pi.set_domain1_from_header((u32(header[0]) << 24) | (u32(header[1]) << 16) | (u32(header[2]) << 8) | header[3]);
     }
     rsp.reset();
+    rsp.set_gfx_lle_only(cart.graphics_need_lle());
     rdp.reset();
     pif.reset(cart.get_cic_type());
     jit.invalidate_all(); // RDRAM contents are about to be rewritten below

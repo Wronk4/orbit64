@@ -372,6 +372,7 @@ bool RSP::detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_s
     }
     // Microcodes known by their code come first: some share another's
     // banner (Wave Race 64's reads like Super Mario 64's Fast3D).
+    if (lle_only_) return false;
     if (ucode_needs_lle(ucode_ptr, rdram, rdram_size)) return false;
     if (const MicrocodeType t = ucode_by_crc(ucode_ptr, rdram, rdram_size); t != MicrocodeType::Auto) {
         rdp.set_ucode_type(t);

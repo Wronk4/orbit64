@@ -65,6 +65,7 @@ public:
     void set_force_lle(bool on) { mode_ = on ? RspMode::LLE : RspMode::HLE; env_mode_ = -1; }
     // Whether the last graphics task ran low-level.
     bool gfx_lle() const { return gfx_lle_; }
+    void set_gfx_lle_only(bool on) { lle_only_ = on; }
     bool lle_active() const { return lle_running; }
     u64 get_lle_task_count() const { return lle_task_count; }
     const RspCore& debug_core() const { return core; }
@@ -101,6 +102,8 @@ private:
     RspMode mode_{RspMode::HLE};
     int env_mode_{-1}; // ORBIT64_RSP's RspMode, -1 = not set
     bool gfx_lle_{false};
+    // The game's graphics tasks all run on the low-level RSP (set per game, see Cartridge::graphics_need_lle).
+    bool lle_only_{false};
     u64 lle_task_count{0};
     s64 lle_cycle_debt{0};   // RSP cycles owed from the last step (2 RSP : 3 CPU)
 
