@@ -152,7 +152,6 @@ constexpr SaveEntry kSaveTypes[] = {
     // 16 Kbit EEPROM
     {"DO", SaveType::EEPROM_16K}, // (kept as it was)
     {"DK", SaveType::EEPROM_16K}, // Donkey Kong 64 (game code NDK*)
-    {"MW", SaveType::EEPROM_16K}, // Mario Party 2 (NMW*)
     {"B7", SaveType::EEPROM_16K}, // Banjo-Tooie
     {"PD", SaveType::EEPROM_16K}, // Perfect Dark
     {"YS", SaveType::EEPROM_16K}, // Yoshi's Story
@@ -163,6 +162,8 @@ constexpr SaveEntry kSaveTypes[] = {
     {"FU", SaveType::EEPROM_16K}, // Conker's Bad Fur Day
     {"JF", SaveType::EEPROM_16K}, // Jet Force Gemini
     {"M8", SaveType::EEPROM_16K}, // Mario Tennis
+    // 4 Kbit EEPROM, listed where a game's code would otherwise suggest the larger chip
+    {"MW", SaveType::EEPROM_4K}, // Mario Party 2 (NMW*): its save check probes the chip and halts on a 16 Kbit answer
     // SRAM
     {"ZL", SaveType::SRAM_32K}, // Zelda: Ocarina of Time
     {"FZ", SaveType::SRAM_32K}, // F-Zero X
