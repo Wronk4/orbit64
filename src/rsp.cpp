@@ -1,4 +1,5 @@
 #include "rsp.hpp"
+#include <set>
 #include "mi.hpp"
 #include "rdp.hpp"
 #include "jit/jit_invalidate.hpp"
@@ -312,7 +313,7 @@ bool RSP::detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_s
                 count++;
                 std::string clean;
                 for (char c : header) clean += (c >= 32 && c < 127) ? c : '.';
-                std::cout << "[UCODE-BANNER-RAW] ptr=0x" << std::hex << ptr << std::dec << " text=\"" << clean.substr(0, 200) << "\"\n";
+                std::cout << "[UCODE-BANNER-RAW] ptr=0x" << std::hex << ptr << " code_crc=0x" << ucode_crc(ucode_ptr, rdram, rdram_size) << std::dec << " text=\"" << clean.substr(0, 200) << "\"\n";
             }
         }
         if (const MicrocodeType t = identify_ucode_banner(&rdram[phys], check_len); t != MicrocodeType::Auto) {
@@ -362,6 +363,13 @@ bool RSP::detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_s
         return false;
     };
 
+    {
+        // Each microcode seen is logged once, with its code CRC, for ucode_needs_lle / ucode_by_crc.
+        static std::set<u32> seen;
+        const u32 crc = ucode_crc(ucode_ptr, rdram, rdram_size);
+        if (seen.size() < 16 && seen.insert(crc).second)
+            std::cout << "[UCODE-CRC] code_ptr=0x" << std::hex << ucode_ptr << " code_crc=0x" << crc << std::dec << "\n";
+    }
     // Microcodes known by their code come first: some share another's
     // banner (Wave Race 64's reads like Super Mario 64's Fast3D).
     if (ucode_needs_lle(ucode_ptr, rdram, rdram_size)) return false;
@@ -373,7 +381,7 @@ bool RSP::detect_gfx_ucode(u32 offset, RDP& rdp, const u8* rdram, size_t rdram_s
     static int dbg_fail = 0;
     if (dbg_fail < 5) {
         dbg_fail++;
-        std::cout << "[UCODE-DETECT-FAIL] data_ptr=0x" << std::hex << ucode_data_ptr << " code_ptr=0x" << ucode_ptr
+        std::cout << "[UCODE-DETECT-FAIL] data_ptr=0x" << std::hex << ucode_data_ptr << " code_ptr=0x" << ucode_ptr << " code_crc=0x" << ucode_crc(ucode_ptr, rdram, rdram_size)
                   << std::dec << ": running it on the low-level RSP\n";
     }
     return false;
