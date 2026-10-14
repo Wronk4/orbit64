@@ -24,11 +24,12 @@ void Bus::reset() {
     std::fill(rdram.begin(), rdram.end(), 0);
     for (auto& entry : tlb_entries) entry = {};
     tlb_gen_++;
-    ri_mode = 0;
-    ri_config = 0;
+    // The RDRAM interface as the IPL3 leaves it.
+    ri_mode = 0x0000000E;
+    ri_config = 0x00000040;
     ri_current_load = 0;
-    ri_select = 0x0000000E;
-    ri_refresh = 0;
+    ri_select = 0x00000014;
+    ri_refresh = 0x00063634;
     ri_latency = 0;
     ri_error = 0;
     ri_werror = 0;

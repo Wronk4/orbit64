@@ -33,6 +33,11 @@ void Emulator::reset() {
     ai.reset();
     pi.reset();
     si.reset();
+    {
+        const auto& header = cart.get_rom_data();
+        if (header.size() >= 4)
+            pi.set_domain1_from_header((u32(header[0]) << 24) | (u32(header[1]) << 16) | (u32(header[2]) << 8) | header[3]);
+    }
     rsp.reset();
     rdp.reset();
     pif.reset(cart.get_cic_type());

@@ -16,6 +16,9 @@ public:
 
     u32 get_status() const { return status; }
 
+    // IPL3 programs the domain 1 timing registers from the first word of the ROM header (usually 0x80371240).
+    void set_domain1_from_header(u32 word);
+
     // CPU cycles until the running DMA ends (0: none is running). The emulator never runs the CPU past it.
     u32 cycles_left() const { return dma_cycles_left; }
     // Time has passed: ends a DMA whose time has run out (clears the busy bit, raises the PI interrupt).

@@ -26,6 +26,13 @@ void PI::reset() {
     dom2_rls = 0;
 }
 
+void PI::set_domain1_from_header(u32 word) {
+    dom1_lat = word & 0xFF;
+    dom1_pwd = (word >> 8) & 0xFF;
+    dom1_pgs = (word >> 16) & 0x0F;
+    dom1_rls = (word >> 20) & 0x03;
+}
+
 u32 PI::read_reg(u32 addr) const {
     u32 reg = (addr & 0x3F) >> 2;
     switch (reg) {
