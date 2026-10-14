@@ -161,7 +161,10 @@ RDP::~RDP() {
 
 void RDP::set_capture(bool on) {
     capture_enabled = on;
-    if (!on) capture_frame.clear();
+    if (!on) {
+        capture_frame.clear();
+        texture_decode_cache.clear(); // up to 512 decoded textures that nothing needs once the debug views are closed
+    }
     if (on && !capture_shadow_ && !geometry_only_) {
         capture_shadow_ = std::make_unique<RDP>(true);
         capture_shadow_mi_ = std::make_unique<MI>();
