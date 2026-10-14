@@ -1,4 +1,5 @@
 #include "transfer_pak.hpp"
+#include "atomic_file.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -119,10 +120,8 @@ void GbCart::save() {
         put_le(t + 40, static_cast<u64>(rtc_updated_), save_tail_.size() == 48 ? 8 : 4);
     }
     data.insert(data.end(), save_tail_.begin(), save_tail_.end());
-    std::ofstream f(utf8_path(save_path_), std::ios::binary);
-    if (!f.is_open()) return;
-    f.write(reinterpret_cast<const char*>(data.data()), data.size());
-    dirty_ = false;
+    // Through a temporary file, like every other save; a failed write leaves the old file and the dirty flag alone.
+    if (atomic_file::write(utf8_path(save_path_), data.data(), data.size())) dirty_ = false;
 }
 
 void GbCart::reset() {
