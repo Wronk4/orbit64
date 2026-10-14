@@ -589,6 +589,9 @@ void CPU::execute(u32 instr, u64 cur_pc) {
                 }
             } else if (rs == 0x05) { // DMTC0
                 cp0[rd] = gpr[rt];
+                if (rd == CP0Reg::COMPARE) {
+                    cp0[CP0Reg::CAUSE] &= ~(1 << 15); // Clear IP7, as MTC0 does
+                }
                 if (rd == CP0Reg::WIRED) {
                     cp0[CP0Reg::RANDOM] = 31;
                 }
