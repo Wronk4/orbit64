@@ -46,15 +46,14 @@ int main(int argc, char** argv) {
     int saved = 0, loaded = 0, undone = 0, state_errors = 0;
 
     std::mt19937 rng(1234);
-    std::vector<std::uint32_t> frame;
+    VideoFrame frame;
     std::vector<float> audio(1024);
     std::uint64_t seen = 0;
     const auto end = steady_clock::now() + std::chrono::seconds(seconds);
     int step = 0;
     while (steady_clock::now() < end) {
         ++step;
-        int w = 0, h = 0, scale = 1;
-        core.fetch_frame(frame, w, h, scale, seen);
+        core.fetch_frame(frame, seen);
         core.pull_audio(audio.data(), audio.size() / 2, 1.0f);
         (void)core.stats();
         for (ui::StateEvent ev; core.poll_state_event(ev);) {
